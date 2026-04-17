@@ -1,0 +1,608 @@
+{
+  "manifest_version": "1.0",
+  "global_seed": 42,
+  "task_set_hash": "9b3669afdf369b76ef37c7929dfb5abe86dcab55ba96695c2e41248accbf4fed",
+  "timestamp": "2026-03-28T00:00:00Z",
+  "tasks": [
+    {
+      "task_id": "arc_eval_001",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 001",
+      "game_id": "game_001"
+    },
+    {
+      "task_id": "arc_eval_002",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 002",
+      "game_id": "game_002"
+    },
+    {
+      "task_id": "arc_eval_003",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 003",
+      "game_id": "game_003"
+    },
+    {
+      "task_id": "arc_eval_004",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 004",
+      "game_id": "game_004"
+    },
+    {
+      "task_id": "arc_eval_005",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 005",
+      "game_id": "game_005"
+    },
+    {
+      "task_id": "arc_eval_006",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 006",
+      "game_id": "game_006"
+    },
+    {
+      "task_id": "arc_eval_007",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 007",
+      "game_id": "game_007"
+    },
+    {
+      "task_id": "arc_eval_008",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 008",
+      "game_id": "game_008"
+    },
+    {
+      "task_id": "arc_eval_009",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 009",
+      "game_id": "game_009"
+    },
+    {
+      "task_id": "arc_eval_010",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 010",
+      "game_id": "game_010"
+    },
+    {
+      "task_id": "arc_eval_011",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 011",
+      "game_id": "game_011"
+    },
+    {
+      "task_id": "arc_eval_012",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 012",
+      "game_id": "game_012"
+    },
+    {
+      "task_id": "arc_eval_013",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 013",
+      "game_id": "game_013"
+    },
+    {
+      "task_id": "arc_eval_014",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 014",
+      "game_id": "game_014"
+    },
+    {
+      "task_id": "arc_eval_015",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 015",
+      "game_id": "game_015"
+    },
+    {
+      "task_id": "arc_eval_016",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 016",
+      "game_id": "game_016"
+    },
+    {
+      "task_id": "arc_eval_017",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 017",
+      "game_id": "game_017"
+    },
+    {
+      "task_id": "arc_eval_018",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 018",
+      "game_id": "game_018"
+    },
+    {
+      "task_id": "arc_eval_019",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 019",
+      "game_id": "game_019"
+    },
+    {
+      "task_id": "arc_eval_020",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 020",
+      "game_id": "game_020"
+    },
+    {
+      "task_id": "arc_eval_021",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 021",
+      "game_id": "game_021"
+    },
+    {
+      "task_id": "arc_eval_022",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 022",
+      "game_id": "game_022"
+    },
+    {
+      "task_id": "arc_eval_023",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 023",
+      "game_id": "game_023"
+    },
+    {
+      "task_id": "arc_eval_024",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 024",
+      "game_id": "game_024"
+    },
+    {
+      "task_id": "arc_eval_025",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 025",
+      "game_id": "game_025"
+    },
+    {
+      "task_id": "arc_eval_026",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 026",
+      "game_id": "game_026"
+    },
+    {
+      "task_id": "arc_eval_027",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 027",
+      "game_id": "game_027"
+    },
+    {
+      "task_id": "arc_eval_028",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 028",
+      "game_id": "game_028"
+    },
+    {
+      "task_id": "arc_eval_029",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 029",
+      "game_id": "game_029"
+    },
+    {
+      "task_id": "arc_eval_030",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 030",
+      "game_id": "game_030"
+    },
+    {
+      "task_id": "arc_eval_031",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 031",
+      "game_id": "game_031"
+    },
+    {
+      "task_id": "arc_eval_032",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 032",
+      "game_id": "game_032"
+    },
+    {
+      "task_id": "arc_eval_033",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 033",
+      "game_id": "game_033"
+    },
+    {
+      "task_id": "arc_eval_034",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 034",
+      "game_id": "game_034"
+    },
+    {
+      "task_id": "arc_eval_035",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 035",
+      "game_id": "game_035"
+    },
+    {
+      "task_id": "arc_eval_036",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 036",
+      "game_id": "game_036"
+    },
+    {
+      "task_id": "arc_eval_037",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 037",
+      "game_id": "game_037"
+    },
+    {
+      "task_id": "arc_eval_038",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 038",
+      "game_id": "game_038"
+    },
+    {
+      "task_id": "arc_eval_039",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 039",
+      "game_id": "game_039"
+    },
+    {
+      "task_id": "arc_eval_040",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 040",
+      "game_id": "game_040"
+    },
+    {
+      "task_id": "arc_eval_041",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 041",
+      "game_id": "game_041"
+    },
+    {
+      "task_id": "arc_eval_042",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 042",
+      "game_id": "game_042"
+    },
+    {
+      "task_id": "arc_eval_043",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 043",
+      "game_id": "game_043"
+    },
+    {
+      "task_id": "arc_eval_044",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 044",
+      "game_id": "game_044"
+    },
+    {
+      "task_id": "arc_eval_045",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 045",
+      "game_id": "game_045"
+    },
+    {
+      "task_id": "arc_eval_046",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 046",
+      "game_id": "game_046"
+    },
+    {
+      "task_id": "arc_eval_047",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 047",
+      "game_id": "game_047"
+    },
+    {
+      "task_id": "arc_eval_048",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 048",
+      "game_id": "game_048"
+    },
+    {
+      "task_id": "arc_eval_049",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 049",
+      "game_id": "game_049"
+    },
+    {
+      "task_id": "arc_eval_050",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 050",
+      "game_id": "game_050"
+    },
+    {
+      "task_id": "arc_eval_051",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 051",
+      "game_id": "game_051"
+    },
+    {
+      "task_id": "arc_eval_052",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 052",
+      "game_id": "game_052"
+    },
+    {
+      "task_id": "arc_eval_053",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 053",
+      "game_id": "game_053"
+    },
+    {
+      "task_id": "arc_eval_054",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 054",
+      "game_id": "game_054"
+    },
+    {
+      "task_id": "arc_eval_055",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 055",
+      "game_id": "game_055"
+    },
+    {
+      "task_id": "arc_eval_056",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 056",
+      "game_id": "game_056"
+    },
+    {
+      "task_id": "arc_eval_057",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 057",
+      "game_id": "game_057"
+    },
+    {
+      "task_id": "arc_eval_058",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 058",
+      "game_id": "game_058"
+    },
+    {
+      "task_id": "arc_eval_059",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 059",
+      "game_id": "game_059"
+    },
+    {
+      "task_id": "arc_eval_060",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 060",
+      "game_id": "game_060"
+    },
+    {
+      "task_id": "arc_eval_061",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 061",
+      "game_id": "game_061"
+    },
+    {
+      "task_id": "arc_eval_062",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 062",
+      "game_id": "game_062"
+    },
+    {
+      "task_id": "arc_eval_063",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 063",
+      "game_id": "game_063"
+    },
+    {
+      "task_id": "arc_eval_064",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 064",
+      "game_id": "game_064"
+    },
+    {
+      "task_id": "arc_eval_065",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 065",
+      "game_id": "game_065"
+    },
+    {
+      "task_id": "arc_eval_066",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 066",
+      "game_id": "game_066"
+    },
+    {
+      "task_id": "arc_eval_067",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 067",
+      "game_id": "game_067"
+    },
+    {
+      "task_id": "arc_eval_068",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 068",
+      "game_id": "game_068"
+    },
+    {
+      "task_id": "arc_eval_069",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 069",
+      "game_id": "game_069"
+    },
+    {
+      "task_id": "arc_eval_070",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 070",
+      "game_id": "game_070"
+    },
+    {
+      "task_id": "arc_eval_071",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 071",
+      "game_id": "game_071"
+    },
+    {
+      "task_id": "arc_eval_072",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 072",
+      "game_id": "game_072"
+    },
+    {
+      "task_id": "arc_eval_073",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 073",
+      "game_id": "game_073"
+    },
+    {
+      "task_id": "arc_eval_074",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 074",
+      "game_id": "game_074"
+    },
+    {
+      "task_id": "arc_eval_075",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 075",
+      "game_id": "game_075"
+    },
+    {
+      "task_id": "arc_eval_076",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 076",
+      "game_id": "game_076"
+    },
+    {
+      "task_id": "arc_eval_077",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 077",
+      "game_id": "game_077"
+    },
+    {
+      "task_id": "arc_eval_078",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 078",
+      "game_id": "game_078"
+    },
+    {
+      "task_id": "arc_eval_079",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 079",
+      "game_id": "game_079"
+    },
+    {
+      "task_id": "arc_eval_080",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 080",
+      "game_id": "game_080"
+    },
+    {
+      "task_id": "arc_eval_081",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 081",
+      "game_id": "game_081"
+    },
+    {
+      "task_id": "arc_eval_082",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 082",
+      "game_id": "game_082"
+    },
+    {
+      "task_id": "arc_eval_083",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 083",
+      "game_id": "game_083"
+    },
+    {
+      "task_id": "arc_eval_084",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 084",
+      "game_id": "game_084"
+    },
+    {
+      "task_id": "arc_eval_085",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 085",
+      "game_id": "game_085"
+    },
+    {
+      "task_id": "arc_eval_086",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 086",
+      "game_id": "game_086"
+    },
+    {
+      "task_id": "arc_eval_087",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 087",
+      "game_id": "game_087"
+    },
+    {
+      "task_id": "arc_eval_088",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 088",
+      "game_id": "game_088"
+    },
+    {
+      "task_id": "arc_eval_089",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 089",
+      "game_id": "game_089"
+    },
+    {
+      "task_id": "arc_eval_090",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 090",
+      "game_id": "game_090"
+    },
+    {
+      "task_id": "arc_eval_091",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 091",
+      "game_id": "game_091"
+    },
+    {
+      "task_id": "arc_eval_092",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 092",
+      "game_id": "game_092"
+    },
+    {
+      "task_id": "arc_eval_093",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 093",
+      "game_id": "game_093"
+    },
+    {
+      "task_id": "arc_eval_094",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 094",
+      "game_id": "game_094"
+    },
+    {
+      "task_id": "arc_eval_095",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 095",
+      "game_id": "game_095"
+    },
+    {
+      "task_id": "arc_eval_096",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 096",
+      "game_id": "game_096"
+    },
+    {
+      "task_id": "arc_eval_097",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 097",
+      "game_id": "game_097"
+    },
+    {
+      "task_id": "arc_eval_098",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 098",
+      "game_id": "game_098"
+    },
+    {
+      "task_id": "arc_eval_099",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 099",
+      "game_id": "game_099"
+    },
+    {
+      "task_id": "arc_eval_100",
+      "category": "core",
+      "prompt": "Solve ARC puzzle 100",
+      "game_id": "game_100"
+    }
+  ]
+}

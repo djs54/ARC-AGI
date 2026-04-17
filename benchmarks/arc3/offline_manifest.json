@@ -1,0 +1,73 @@
+{
+  "bundle": {
+    "name": "sidequests-offline-submission",
+    "version": "0.1.0",
+    "description": "ARC3 offline submission bundle that packages code, wheels, models, datasets, and configs.",
+    "created_at": "2026-03-28T00:00:00Z",
+    "expected_size_gb": {
+      "min": 10,
+      "max": 50
+    },
+    "checksum_algorithm": "sha256",
+    "checksum_file": "checksums.txt"
+  },
+  "components": [
+    {
+      "name": "code",
+      "description": "SideQuests runtime + ARC adapter and harness.",
+      "dest": "code",
+      "sources": [
+        "sidequests",
+        "benchmarks/arc3"
+      ]
+    },
+    {
+      "name": "docs",
+      "description": "Offline setup guide for ARC3 evaluators.",
+      "dest": "code/docs",
+      "sources": [
+        "docs/arc3-offline-setup.md"
+      ]
+    },
+    {
+      "name": "wheels",
+      "description": "Pinned Python wheels for offline dependency installation.",
+      "dest": "wheels",
+      "sources": [
+        "dist/sidequests_brain-0.1.0rc1-py3-none-any.whl"
+      ]
+    },
+    {
+      "name": "models",
+      "description": "Locally downloaded Ollama model directories (primary + fallback).",
+      "dest": "models",
+      "sources": [
+        "benchmarks/arc3/offline_assets/models"
+      ]
+    },
+    {
+      "name": "datasets",
+      "description": "Cached ARC3 puzzles used for calibration/verification.",
+      "dest": "datasets",
+      "sources": [
+        "benchmarks/arc3/offline_assets/datasets"
+      ]
+    },
+    {
+      "name": "config",
+      "description": "Runtime configuration shipped alongside the bundle.",
+      "dest": ".",
+      "sources": [
+        "benchmarks/config.yaml"
+      ]
+    },
+    {
+      "name": "verify-script",
+      "description": "Offline verification helper that checks checksums + environment.",
+      "dest": ".",
+      "sources": [
+        "benchmarks/arc3/verify_offline_bundle.py"
+      ]
+    }
+  ]
+}

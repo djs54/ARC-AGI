@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc-agi-sidequests"
+version = "0.1.0"
+description = "ARC-AGI solver and benchmark workspace that consumes SideQuests as a memory dependency"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "SideQuests", email = "sidequests@example.com" }]
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "sidequests-brain>=0.1.0rc1",
+    "httpx>=0.24.0",
+    "openai>=1.50.0",
+    "psutil>=5.9.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pyyaml>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents*", "benchmarks*", "sidequests_bridge*"]
+
+[tool.setuptools.package-data]
+"benchmarks.arc3" = ["*.md", "*.json", "*.yaml", "prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
