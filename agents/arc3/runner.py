@@ -52,6 +52,7 @@ class DurableARCRunner:
         self._last_replan_step: int = -999
         self._replan_backoff_steps: int = 3
         self._last_replan_signature: dict[str, Any] | None = None
+        self._current_trace_snapshot: List[dict] = []
         self.observability = build_observability(config if isinstance(config, dict) else {})
         
         self.brain = LedgerBrainClient(

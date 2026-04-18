@@ -136,6 +136,7 @@ class ARCOrchestrator:
         config: dict,
         cost_tracker: Optional[CostTracker] = None,
         phase_controller: object | None = None,
+        execution_trace: Optional[List[dict]] = None,
     ):
         self.brain = brain_client
         llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
@@ -157,6 +158,7 @@ class ARCOrchestrator:
         self.session_id = session_id
         self.serializer = serializer
         self.config = config
+        self._execution_trace = execution_trace if execution_trace is not None else []
         self._observability = build_observability(config if isinstance(config, dict) else {})
         self.cost_tracker = cost_tracker
         self._plan_id: str | None = None

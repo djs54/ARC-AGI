@@ -4,6 +4,7 @@
 
 import argparse
 import asyncio
+import atexit
 import datetime
 import importlib.util
 import json
@@ -140,6 +141,7 @@ def _enforce_observability_preflight(config: dict) -> None:
         )
         if all_present:
             os.environ["PHOENIX_ENABLE"] = "1"
+            os.environ["_A016_AUTO_ENABLED_PHOENIX"] = "1"
             if isinstance(config, dict):
                 config.setdefault("observability", {})["enabled"] = True
             obs_cfg = config.get("observability", {})
@@ -578,6 +580,30 @@ class SingleTaskRunner:
             self.db = None
 
 
+def _emergency_shutdown(runner: DurableARCRunner):
+    """atexit handler to atomically save trace data on unexpected exit."""
+    if not runner or not hasattr(runner, "_current_trace_snapshot") or not runner._current_trace_snapshot:
+        return
+
+    try:
+        path = Path(AGENT_EXECUTION_TRACE_PATH)
+        temp_path = path.with_suffix(f"{path.suffix}.tmp")
+        with open(temp_path, "w") as f:
+            json.dump(runner._current_trace_snapshot, f, indent=2)
+        # Check for and create the directory if it doesn't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_path, path)
+        # fsync is not available on all platforms, and might not be needed
+        # with modern filesystems, but can be added for extra durability.
+        # if hasattr(os, "fsync"):
+        #     with open(path, "r") as f:
+        #         os.fsync(f.fileno())
+        logger.info("Emergency shutdown: successfully saved agent execution trace.")
+    except Exception:
+        # Avoid crashing inside the crash handler
+        logger.exception("Emergency shutdown failed to save trace data.")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
     parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
@@ -666,6 +692,7 @@ async def main():
             progress_callback=runner.append_live_snapshot,
         )
         durable._emit_transition_snapshots = True
+        atexit.register(_emergency_shutdown, durable)
 
         llm_cfg = runner.config.get("llm", {})
         logger.info(
