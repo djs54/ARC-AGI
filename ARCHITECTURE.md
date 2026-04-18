@@ -210,6 +210,15 @@ This loop is ARC-owned. Memory persistence is SideQuests-owned.
 fallback. The runtime can now route back into better modeling or strategy
 selection instead of treating every stall as a generic crash.
 
+#### Route-reason taxonomy
+
+- `low_value_but_known_geometry` → all tested actions are low_value AND player/goal confidences ≥ 0.6 → resume at MODEL to reconsider archetype given the geometry
+- `signature_escalation` → identical REPLAN signature seen back-to-back → escalate to MODEL
+- `exploration_incomplete` → action_coverage.initial_exploration_complete is False → stay in MODEL to keep exploring
+- `low_archetype_conf` → archetype_confidence < 0.3 → drop to HYPOTHESIZE
+- `rebuild_route_from_saturation` → coverage saturated and geometry known → ROUTE (A010 has already graduated the chunker)
+- `default` → no evidence gate fired → ROUTE
+
 ### Phase 1: Exploration / Modeling
 
 Goal: learn what the puzzle environment does before overcommitting to a solve theory.
@@ -235,6 +244,7 @@ Primary outputs:
 Goal: turn exploration evidence into a goal-directed policy.
 
 Solve-time responsibilities include:
+Primary outputs:
 
 - archetype classification
 - object role assignment
@@ -243,8 +253,19 @@ Solve-time responsibilities include:
 - dissonance/stall detection
 - replanning when the current theory stops making progress
 
-## How ARC Uses SideQuests Memory
+#### Plateau family memory
 
+The solver keeps a set `_failed_plateau_families` across an entire solve()
+call. A family enters this set only via the plateau-exhaustion guard
+(two consecutive no-progress replans on the same locked family). The set
+is cleared only by a reward tick or a full solver reset — never by cell
+changes alone. Lock selection subtracts this set from the candidate pool,
+and if two or more families have failed and no unfailed candidate
+remains, the solver raises `plateau_escalation_required` which the
+orchestrator translates to `COVERAGE_SATURATED_ABORT` when the
+action-coverage signal also agrees.
+
+## How ARC Uses SideQuests Memory
 The ARC stack treats SideQuests as a memory substrate, not as solver logic.
 
 ### Core Memory Operations Used

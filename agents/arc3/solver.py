@@ -127,6 +127,7 @@ class SolveContext:
     plateau_reason: str = ""
     plateau_activation_mode: str = "" # "direct", "sticky", or ""
     plateau_locked_family: Optional[str] = None
+    plateau_escalation_required: bool = False
     ranked_action_families: List[str] = field(default_factory=list)
     action_family_scores: Dict[str, float] = field(default_factory=dict)
 
@@ -1860,6 +1861,11 @@ class SolveEngine:
         self.PLATEAU_MIN_DISTINCT_ACTIONS: int = 3
         # B216: Loop-detection blacklist (action families to avoid when routing)
         self._loop_detected_action_blacklist: Optional[set[str]] = None
+        # A018: cross-chunk memory of plateau families that already exhausted.
+        # Unlike _loop_detected_action_blacklist, this set survives any cell-change
+        # clear and is only reset by a genuine reward tick or full solver reset.
+        self._failed_plateau_families: set[str] = set()
+        self._plateau_escalation_required: bool = False
         # B217: Ensure we only bootstrap victory once per task/level
         self._bootstrapped_victory_done: bool = False
         # B207: Plateau lock exhaustion tracking
@@ -2740,13 +2746,19 @@ class SolveEngine:
         # B216: Clear blacklist when the last transition shows a successful state change
         try:
             last_eff = (hypothesis_context or {}).get("last_transition_effect") or {}
-            n_changed = int(last_eff.get("n_cells_changed", last_eff.get("pixels_changed", 0)) or 0)
-            if n_changed > 0 and self._loop_detected_action_blacklist:
+            score_delta = float(last_eff.get("score_delta") or 0.0)
+            reward_delta = float(last_eff.get("reward") or last_eff.get("reward_delta") or 0.0)
+            if (score_delta > 0 or reward_delta > 0) and self._loop_detected_action_blacklist:
                 try:
-                    self._trace("loop_escape", "clear_blacklist", {"step": step}, {"cleared": list(self._loop_detected_action_blacklist)})
+                    self._trace("loop_escape", "clear_blacklist", {"step": step},
+                                {"cleared": list(self._loop_detected_action_blacklist),
+                                 "trigger": "reward_tick"})
                 except Exception:
                     pass
                 self._loop_detected_action_blacklist = None
+                # A018: reward tick also clears the failed-plateau set, since real progress
+                # has invalidated the accumulated "this family cannot break the plateau" signal.
+                self._failed_plateau_families = set()
         except Exception:
             pass
 
@@ -3111,6 +3123,13 @@ class SolveEngine:
                     if family not in self._loop_detected_action_blacklist
                 ] or ranked_families
             
+            # A018: also exclude plateau families that already exhausted earlier in this puzzle.
+            if self._failed_plateau_families:
+                ranked_families = [
+                    family for family in ranked_families
+                    if family not in self._failed_plateau_families
+                ] or ranked_families
+            
             # B176: Track lock duration for threshold decay
             if self._plateau_locked_family is not None:
                 self._plateau_lock_duration += 1
@@ -3207,6 +3226,9 @@ class SolveEngine:
                         step=step,
                         reason="plateau_zero_delta_escape",
                     )
+                    # A018: sticky failure memory
+                    if locked_family:
+                        self._failed_plateau_families.add(str(locked_family))
 
                     self._plateau_locked_family = alternate_family
                     self._plateau_lock_duration = 0
@@ -3256,6 +3278,11 @@ class SolveEngine:
                         step=step,
                         reason="plateau_exhausted",
                     )
+                    # A018: record this family as a failed plateau so the lock-selection step
+                    # below will not re-propose it on a subsequent plateau detection.
+                    if cur_family:
+                        self._failed_plateau_families.add(str(cur_family))
+
                     self._plateau_locked_family = None
                     self._plateau_lock_duration = 0
                     self._plateau_active = False
@@ -3266,7 +3293,20 @@ class SolveEngine:
             # B145/B146: Replace or Update Plateau Exploitation chunk
             # Use the AUTHORITATIVE locked family for the chunk
             top_family = self._plateau_locked_family
-            if top_family:
+            # A018: if the selector could not pick a family and we already burned through
+            # two or more, escalate rather than churning another single-action plateau.
+            if top_family is None and len(self._failed_plateau_families) >= 2:
+                self._plateau_escalation_required = True
+                try:
+                    self._trace(
+                        "solve_plateau_escalation",
+                        "plateau_policy",
+                        {"step": step, "failed_families": sorted(list(self._failed_plateau_families))},
+                        {"reason": "all_plateau_families_failed"},
+                    )
+                except Exception:
+                    pass
+            elif top_family:
                 if self._active_chunk and (self._active_chunk.source == "explore" or (self._active_chunk.source == "plateau_exploitation" and top_family not in self._active_chunk.description)):
                     logger.info("B146: Syncing Plateau Exploitation chunk to locked family: %s", top_family)
                     
@@ -3323,6 +3363,7 @@ class SolveEngine:
             plateau_reason=plateau_reason,
             plateau_activation_mode=plateau_activation_mode,
             plateau_locked_family=self._plateau_locked_family,
+            plateau_escalation_required=self._plateau_escalation_required,
             ranked_action_families=ranked_families,
             action_family_scores=action_family_scores,
         )
@@ -3491,6 +3532,8 @@ class SolveEngine:
         self._plateau_active = False
         self._plateau_locked_family = None
         self._loop_detected_action_blacklist = None
+        self._failed_plateau_families = set()
+        self._plateau_escalation_required = False
 
     def _best_other_primary(self, role_type: RoleType, exclude_color: int) -> tuple[Optional[int], float]:
         """Return the strongest existing primary of a role type, excluding one color."""

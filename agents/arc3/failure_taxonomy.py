@@ -39,6 +39,7 @@ def classify_failure(
     loop_detected: bool = False,
     graduation_reason: str | None = None,
     coverage_saturated: bool = False,
+    plateau_escalation_required: bool = False,
 ) -> FailureTaxonomy:
     """Return the best-effort taxonomy bucket for a failed run.
 
@@ -56,12 +57,16 @@ def classify_failure(
             message_parts.append(str(final_state))
         if graduation_reason:
             message_parts.append(str(graduation_reason))
+        if plateau_escalation_required:
+            message_parts.append("plateau_escalation_required")
         haystack = " | ".join(message_parts).lower()
 
-        # A015: detect when we learned everything but still couldn't reach goal.
+        # A015 + A018: detect when we learned everything but still couldn't reach goal.
         # This is prioritized over budget/timeout/crash because it's a structural 
         # environment-capacity signal.
-        if coverage_saturated or (graduation_reason and "coverage_saturated" in graduation_reason.lower()):
+        is_saturated = coverage_saturated or (graduation_reason and "coverage_saturated" in graduation_reason.lower())
+        
+        if is_saturated or (plateau_escalation_required and is_saturated):
             return FailureTaxonomy.COVERAGE_SATURATED_ABORT
 
         if budget_exhausted or (

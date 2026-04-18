@@ -406,6 +406,7 @@ class DurableARCRunner:
                                 ),
                                 graduation_reason=str((getattr(orchestrator, "_solve_context", {}) or {}).get("graduation_reason") or "") if orchestrator is not None else "",
                                 coverage_saturated=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("coverage_saturated", False)) if orchestrator is not None else False,
+                                plateau_escalation_required=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("plateau_escalation_required", False)) if orchestrator is not None else False,
                             )
                             mgr.mark_failed(checkpoint, task.task_id, str(exc), failure_class.value)
                             logger.error("Task %s failed [%s]: %s", task.task_id, failure_class.value, exc)
@@ -823,7 +824,7 @@ class DurableARCRunner:
                 if not success and not done:
                     try:
                         if self._should_replan(orchestrator, consecutive_no_progress_steps):
-                            replan_target = self._replan_target(orchestrator)
+                            replan_target, replan_route_reason = self._replan_target(orchestrator)
                             self._last_replan_step = len(getattr(orchestrator, "_step_history", []) or [])
                             try:
                                 orchestrator._emit_trace_event(
@@ -835,6 +836,7 @@ class DurableARCRunner:
                                         "loop_detected": bool((getattr(orchestrator, "_hypothesis_context", {}) or {}).get("loop_detected")),
                                         "from_phase": phase_ctrl.phase_name,
                                         "target_phase": replan_target.value,
+                                        "route_reason": replan_route_reason,
                                     },
                                 )
                             except Exception:
@@ -844,7 +846,7 @@ class DurableARCRunner:
                                     orchestrator._record_write_event(
                                         kind="replan",
                                         summary=f"replan triggered after {consecutive_no_progress_steps} no-progress step(s)",
-                                        detail={"target_phase": replan_target.value, "step": total_steps},
+                                        detail={"target_phase": replan_target.value, "step": total_steps, "route_reason": replan_route_reason},
                                         source_step=total_steps,
                                     )
                             except Exception:
@@ -924,7 +926,11 @@ class DurableARCRunner:
                                     to_phase=phase_ctrl.phase_name,
                                     step=total_steps,
                                     start_time=start_time,
-                                    metadata={"reason": "replan_exit", "target_phase": replan_target.value},
+                                    metadata={
+                                        "reason": "replan_exit", 
+                                        "target_phase": replan_target.value,
+                                        "route_reason": replan_route_reason,
+                                    },
                                 )
                             except Exception:
                                 logger.exception("Failed persisting phase after replan")
@@ -1035,6 +1041,9 @@ class DurableARCRunner:
                 ) if getattr(orchestrator, "cost_tracker", None) else False,
                 max_steps_reached=(total_steps >= max_steps * max_retries),
                 loop_detected=bool((getattr(orchestrator, "_hypothesis_context", {}) or {}).get("loop_detected")),
+                graduation_reason=str((getattr(orchestrator, "_solve_context", {}) or {}).get("graduation_reason") or "") if orchestrator else "",
+                coverage_saturated=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("coverage_saturated", False)) if orchestrator else False,
+                plateau_escalation_required=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("plateau_escalation_required", False)) if orchestrator else False,
             ).value
 
         cost_usd = None
@@ -1555,7 +1564,7 @@ class DurableARCRunner:
                 if not success and not done:
                     try:
                         if self._should_replan(orchestrator, consecutive_no_progress_steps):
-                            replan_target = self._replan_target(orchestrator)
+                            replan_target, replan_route_reason = self._replan_target(orchestrator)
                             self._last_replan_step = len(getattr(orchestrator, "_step_history", []) or [])
                             try:
                                 orchestrator._emit_trace_event(
@@ -1567,6 +1576,7 @@ class DurableARCRunner:
                                         "loop_detected": bool((getattr(orchestrator, "_hypothesis_context", {}) or {}).get("loop_detected")),
                                         "from_phase": phase_ctrl.phase_name,
                                         "target_phase": replan_target.value,
+                                        "route_reason": replan_route_reason,
                                     },
                                 )
                             except Exception:
@@ -1646,7 +1656,11 @@ class DurableARCRunner:
                                     to_phase=phase_ctrl.phase_name,
                                     step=total_steps,
                                     start_time=start_time,
-                                    metadata={"reason": "replan_exit", "target_phase": replan_target.value},
+                                    metadata={
+                                        "reason": "replan_exit", 
+                                        "target_phase": replan_target.value,
+                                        "route_reason": replan_route_reason,
+                                    },
                                 )
                             except Exception:
                                 logger.exception("Failed persisting variant phase after replan")
@@ -1757,6 +1771,9 @@ class DurableARCRunner:
                 ) if getattr(orchestrator, "cost_tracker", None) else False,
                 max_steps_reached=(total_steps >= max_steps * max_retries),
                 loop_detected=bool((getattr(orchestrator, "_hypothesis_context", {}) or {}).get("loop_detected")),
+                graduation_reason=str((getattr(orchestrator, "_solve_context", {}) or {}).get("graduation_reason") or "") if orchestrator else "",
+                coverage_saturated=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("coverage_saturated", False)) if orchestrator else False,
+                plateau_escalation_required=bool((getattr(orchestrator, "_solve_context", {}) or {}).get("plateau_escalation_required", False)) if orchestrator else False,
             ).value
 
         cost_usd = None
@@ -1986,46 +2003,94 @@ class DurableARCRunner:
             pass
         return False
 
-    def _replan_target(self, orchestrator: ARCOrchestrator) -> SolvePhase:
-        """Choose a target phase to advance to after REPLAN.
+    def _replan_target(self, orchestrator: ARCOrchestrator) -> tuple[SolvePhase, str]:
+        """Choose (target_phase, route_reason) after REPLAN.
 
-        Heuristics:
-        - If signature matches last replan -> escalate to MODEL
-        - If initial exploration is incomplete -> MODEL
-        - If archetype confidence is low -> HYPOTHESIZE
-        - Otherwise -> ROUTE
+        Evidence-aware decision tree (A017, restoring A011 runner-side).
+        First match wins.
         """
         try:
             solve_ctx = getattr(orchestrator, "_solve_context", {}) or {}
             hyp_ctx = getattr(orchestrator, "_hypothesis_context", {}) or {}
+
+            # --- Evidence predicates (computed once up front) ---
+            action_facts = hyp_ctx.get("action_facts") or []
+            action_coverage = hyp_ctx.get("action_coverage") or {}
+            tested_count = int(action_coverage.get("tested_count") or 0)
+            available_total = int(action_coverage.get("available_total") or 0)
+            untested_count = int(action_coverage.get("untested_count") or 0)
+            exploration_complete = bool(action_coverage.get("initial_exploration_complete"))
+
+            det_effects = [
+                f for f in action_facts
+                if str(f.get("fact_type") or "").lower() == "deterministic_effect"
+            ]
+            all_actions_low_value = (
+                len(det_effects) > 0
+                and tested_count >= available_total
+                and available_total > 0
+                and all(
+                    str(f.get("value_status") or "").lower() == "low_value"
+                    for f in det_effects
+                )
+            )
+
+            roles = solve_ctx.get("object_roles") or {}
+            # roles cid keys are usually ints in sc
+            player_cid = next((cid for cid, r in roles.items() if getattr(r, 'role', None) and hasattr(r.role, 'value') and r.role.value == "player"), None)
+            goal_cid = next((cid for cid, r in roles.items() if getattr(r, 'role', None) and hasattr(r.role, 'value') and r.role.value == "goal"), None)
             
-            # B218: signature escalation
+            player_role = roles.get(player_cid)
+            goal_role = roles.get(goal_cid)
+            
+            player_conf = player_role.confidence if player_role else 0.0
+            goal_conf = goal_role.confidence if goal_role else 0.0
+            # A017 uses 0.6 threshold aligned with PlanChunker directional bar
+            geometry_high_conf = player_conf >= 0.6 and goal_conf >= 0.6
+
+            coverage_saturated = exploration_complete and untested_count == 0
+
+            arch_conf = float(
+                getattr(
+                    getattr(orchestrator, "solve_engine", None),
+                    "_archetype_confidence",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            # --- Signature (retains B218 escalation semantics) ---
             signature = {
                 "active_chunk_source": (solve_ctx.get("active_chunk") or {}).get("source"),
                 "plateau_locked_family": solve_ctx.get("plateau_locked_family"),
                 "archetype": solve_ctx.get("archetype"),
-                "victory_condition_type": (solve_ctx.get("victory_condition") or {}).get("type") if isinstance(solve_ctx.get("victory_condition"), dict) else solve_ctx.get("victory_condition"),
+                "victory_condition_type": (
+                    (solve_ctx.get("victory_condition") or {}).get("type")
+                    if isinstance(solve_ctx.get("victory_condition"), dict)
+                    else solve_ctx.get("victory_condition")
+                ),
             }
-            
-            if self._last_replan_signature == signature:
-                # Repeated signature -> escalation
-                if hasattr(orchestrator, "_emit_trace_event"):
-                    orchestrator._emit_trace_event("replan_escalation", "escalate", {"signature": signature})
-                return SolvePhase.MODEL
-            
+            signature_repeated = self._last_replan_signature == signature
             self._last_replan_signature = signature
 
-            coverage = hyp_ctx.get("action_coverage") or {}
-            exploration_complete = bool(coverage.get("initial_exploration_complete"))
+            # --- Decision tree (first match wins) ---
+            if all_actions_low_value and geometry_high_conf:
+                return SolvePhase.MODEL, "low_value_but_known_geometry"
+            if signature_repeated:
+                if hasattr(orchestrator, "_emit_trace_event"):
+                    orchestrator._emit_trace_event(
+                        "replan_escalation", "escalate", {"signature": signature}
+                    )
+                return SolvePhase.MODEL, "signature_escalation"
             if not exploration_complete:
-                return SolvePhase.MODEL
-            
-            arch_conf = float(getattr(getattr(orchestrator, "solve_engine", None), "_archetype_confidence", 0.0) or 0.0)
+                return SolvePhase.MODEL, "exploration_incomplete"
             if arch_conf < 0.3:
-                return SolvePhase.HYPOTHESIZE
+                return SolvePhase.HYPOTHESIZE, "low_archetype_conf"
+            if coverage_saturated:
+                return SolvePhase.ROUTE, "rebuild_route_from_saturation"
         except Exception:
-            pass
-        return SolvePhase.ROUTE
+            logger.exception("_replan_target evaluation failed; falling back to ROUTE")
+        return SolvePhase.ROUTE, "default"
 
     def _summarize_strategy(self, orchestrator: ARCOrchestrator) -> str:
         try:
