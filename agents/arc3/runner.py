@@ -75,7 +75,11 @@ class DurableARCRunner:
     async def run(self, tasks: List[ABTask], card_id: str) -> List[dict]:
         run_span = self.observability.span(
             canonical_span_name("run"), 
-            {"card_id": card_id, "task_count": len(tasks)}
+            {
+                "openinference.span.kind": "AGENT",
+                "card_id": card_id, 
+                "task_count": len(tasks)
+            }
         )
         run_span.__enter__()
         
@@ -117,7 +121,11 @@ class DurableARCRunner:
             async def _run_single_task(task: ABTask) -> Optional[dict]:
                 task_span = self.observability.span(
                     canonical_span_name("task"),
-                    {"task_id": task.task_id, "game_id": getattr(task, "game_id", "unknown")}
+                    {
+                        "openinference.span.kind": "AGENT",
+                        "task_id": task.task_id, 
+                        "game_id": getattr(task, "game_id", "unknown")
+                    }
                 )
                 
                 with task_span:

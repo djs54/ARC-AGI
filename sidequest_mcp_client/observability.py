@@ -67,7 +67,7 @@ class Observability:
         if self.enabled and HAS_OTEL:
             endpoint = os.environ.get("PHOENIX_ENDPOINT", "http://127.0.0.1:6006/v1/traces")
             # Canonical Phoenix project for ARC_AGI smoke runs; override via PHOENIX_PROJECT env.
-            project = os.environ.get("PHOENIX_PROJECT", "arc-agi-sidequests")
+            project = os.environ.get("PHOENIX_PROJECT", "ARC-AGI")
             
             try:
                 resource = Resource(attributes={SERVICE_NAME: project})

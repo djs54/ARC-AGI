@@ -186,7 +186,14 @@ class MCPBrainClient:
 
     async def register_task_graph(self, *, label: str, session_id: str, owner: str, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
         args = {"label": label, "session_id": session_id, "owner": owner, "tasks": tasks}
-        return await self.call_tool("register_task_graph", args)
+        try:
+            return await self.call_tool("register_task_graph", args)
+        except Exception as e:
+            if "violates the uniqueness constraint of the primary key column" in str(e):
+                import logging
+                logging.getLogger(__name__).warning(f"A019: Ignoring duplicate primary key on register_task_graph for {label}")
+                return {"status": "ignored_duplicate"}
+            raise
 
     async def get_ready_tasks(self, *, graph_id: str) -> Dict[str, Any]:
         args = {"graph_id": graph_id}

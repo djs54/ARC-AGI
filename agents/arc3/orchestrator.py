@@ -965,6 +965,18 @@ class ARCOrchestrator:
                     "emitter.method": "_emit_trace_event",
                     "trace.contract.version": "v1",
                 }
+                
+                # A021: Map to Phoenix span_kind
+                op_str = str(operation)
+                if op_str.startswith("brain.") or op_str.startswith("arc_api."):
+                    base_attrs["openinference.span.kind"] = "TOOL"
+                elif op_str.startswith("llm.") or "completion" in op_str:
+                    base_attrs["openinference.span.kind"] = "LLM"
+                elif event_type in {"phase_start", "phase_end", "phase_transition", "agent_phase_transition"}:
+                    base_attrs["openinference.span.kind"] = "CHAIN"
+                else:
+                    base_attrs["openinference.span.kind"] = "AGENT"
+
                 if elapsed_ms is not None:
                     base_attrs["latency_ms"] = float(elapsed_ms)
                 for k, v in details_dict.items():
