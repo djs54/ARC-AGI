@@ -14,7 +14,7 @@ try:
     from opentelemetry import trace
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     HAS_OTEL = True
 except ImportError:
@@ -22,7 +22,7 @@ except ImportError:
     SERVICE_NAME = "service.name"
     Resource = None
     TracerProvider = None
-    BatchSpanProcessor = None
+    SimpleSpanProcessor = None
     OTLPSpanExporter = None
 
 
@@ -72,7 +72,7 @@ class Observability:
             try:
                 resource = Resource(attributes={SERVICE_NAME: project})
                 provider = TracerProvider(resource=resource)
-                processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+                processor = SimpleSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
                 provider.add_span_processor(processor)
                 
                 # Set the global tracer provider if not already set
