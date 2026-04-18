@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from benchmarks.arc3.adapter import BrainClientProtocol, LedgerBrainClient
-from sidequests_bridge.observability import (
+from sidequest_mcp_client.observability import (
     REQUIRED_DECISION_FIELDS,
     build_observability,
     ensure_contract_fields,

@@ -8,7 +8,7 @@ from pathlib import Path
 # Ensure repository root is on sys.path so tests can import the local package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sidequests_bridge.mcp_session import (
+from sidequest_mcp_client.mcp_session import (
     MCPStdIOSession,
     MCPStartupError,
     MCPMalformedResponse,

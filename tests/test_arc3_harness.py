@@ -4,34 +4,18 @@ Tests for ARC-AGI-3 A/B Harness
 
 import pytest
 import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.ab_harness import ABVariant, ABTask, BenchmarkConfig
 
 @pytest.fixture(autouse=True)
-def mock_embeddings():
-    with patch("mcp_engine.graph.embeddings.embed") as mock:
-        mock.return_value = [0.1] * 384
-        yield mock
-
-@pytest.fixture(autouse=True)
 def mock_llm_client():
-    with patch("mcp_engine.llm.provider.create_llm_client") as mock:
+    with patch("arc_runtime.llm.create_llm_client") as mock:
         mock_client = MagicMock()
         mock_client.chat.return_value = '{"action_id": "ACTION6", "x": 1, "y": 1, "value": 1, "rationale": "mocked"}'
         mock.return_value = mock_client
         yield mock
-
-@pytest.fixture(autouse=True)
-def mock_local_brain_client():
-    """Prevent LocalBrainClient from calling real notify_turn/current_truth with mock db."""
-    with patch("benchmarks.arc3.harness.LocalBrainClient") as MockClient:
-        instance = MagicMock()
-        instance.notify_turn = AsyncMock(return_value={"status": "queued"})
-        instance.current_truth = AsyncMock(return_value={"results": []})
-        MockClient.return_value = instance
-        yield MockClient
 
 @pytest.fixture
 def mock_db():

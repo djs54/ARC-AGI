@@ -16,7 +16,7 @@ ARC-owned code now lives under:
 - `ARC_AGI/tests/`
 - `ARC_AGI/run_single_puzzle.py`
 - `ARC_AGI/ARCHITECTURE.md`
-- `ARC_AGI/sidequests_bridge/`
+- `ARC_AGI/sidequest_mcp_client/`
 
 Core-memory code still lives in the parent project and is consumed as a dependency:
 
@@ -26,8 +26,8 @@ Core-memory code still lives in the parent project and is consumed as a dependen
 
 Current caveat:
 
-- `ARC_AGI/sidequests_bridge/` reduces import sprawl, but it does not yet talk to SideQuests via MCP transport.
-- It currently wraps direct Python imports from SideQuests internals. This in-repo import-wrapper is transitional and non-compliant with the documented production import policy. The v1 production seam is MCP over stdio only and ARC runtime code must interact with SideQuests through the MCP stdio client contract rather than direct imports.
+- `ARC_AGI/sidequest_mcp_client/` now serves as the MCP-facing production seam for ARC runtime code.
+- Direct-import compatibility helpers have been moved out of production paths and isolated under `ARC_AGI/sidequest_mcp_client/test_compat/` for tests only. The v1 production seam is MCP over stdio only and ARC runtime code interacts with SideQuests through the MCP client contract rather than direct imports.
 
 Startup/readiness expectations:
 

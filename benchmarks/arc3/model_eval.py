@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 
-from sidequests_bridge.runtime import create_llm_client, load_config
+from arc_runtime.config import load_config
+from arc_runtime.llm import create_llm_client
 
 
 logger = logging.getLogger(__name__)

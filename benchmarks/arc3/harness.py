@@ -18,10 +18,11 @@ import logging
 from typing import Dict, Any, List, Optional, Tuple
 
 from benchmarks.ab_harness import ABHarness, ABVariant, ABTask, ABTaskResult, ABTaskManifest
-from benchmarks.arc3.adapter import ARC3Adapter, BrainClientProtocol, NoOpBrainClient, LocalBrainClient
-from sidequests_bridge.mcp_brain_client import MCPBrainClient
+from benchmarks.arc3.adapter import ARC3Adapter, BrainClientProtocol, NoOpBrainClient
+from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from benchmarks.arc3.state_serializer import StateSerializerForARC
-from sidequests_bridge.runtime import create_llm_client, load_config
+from arc_runtime.config import load_config
+from arc_runtime.llm import create_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class ARC3Harness(ABHarness):
         session_id = f"arc-{variant}-{uuid.uuid4().hex[:8]}"
         
         # Determine which brain client to use
-        if variant == ABVariant.SIDEQUESTS and self.db:
+        if variant == ABVariant.SIDEQUESTS and not self.mock_api:
             brain_client = MCPBrainClient(self.db, self.config_data)
         else:
             brain_client = NoOpBrainClient()

@@ -22,7 +22,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agents*", "benchmarks*", "sidequests_bridge*"]
+include = ["agents*", "benchmarks*", "sidequest_mcp_client*", "arc_runtime*"]
 
 [tool.setuptools.package-data]
 "benchmarks.arc3" = ["*.md", "*.json", "*.yaml", "prompts/*.md"]
@@ -30,4 +30,3 @@ include = ["agents*", "benchmarks*", "sidequests_bridge*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-

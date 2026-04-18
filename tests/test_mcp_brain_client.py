@@ -9,8 +9,8 @@ from pathlib import Path
 # Ensure repository root is on sys.path so tests can import the local package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sidequests_bridge.mcp_brain_client import MCPBrainClient
-from sidequests_bridge.mcp_session import MCPToolNotFound
+from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
+from sidequest_mcp_client.mcp_session import MCPToolNotFound
 
 
 SERVER_SCRIPT = textwrap.dedent(r"""

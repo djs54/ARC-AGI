@@ -40,7 +40,7 @@ That means the intended relationship is:
 
 ### MCP v1 — stdio-only production seam
 
-For production (v1) the canonical seam between `ARC_AGI` and SideQuests is MCP over stdio. Development convenience wrappers that import SideQuests internals are transitional only. Developers should prefer a local `sidequests-brain` MCP process or a published client/SDK and interact via the MCP stdio contract described in `ARCHITECTURE.md`. Production code should not rely on direct imports of `mcp_engine.*` or other SideQuests internals.
+For production (v1) the canonical seam between `ARC_AGI` and SideQuests is MCP over stdio. Production code now uses only the MCP-facing client modules in `sidequest_mcp_client/` (`mcp_brain_client`, `mcp_session`, `readiness`, `observability`). Any direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` for tests only. Production code should not rely on direct imports of `mcp_engine.*` or other SideQuests internals.
 
 ## Local Development
 
@@ -63,7 +63,7 @@ What is already done:
 - ARC code is copied into its own repo-shaped folder
 - ARC tests are copied into their own test tree
 - packaging metadata for a standalone ARC project is added
-- SideQuests runtime imports are concentrated behind `sidequests_bridge/` instead of being scattered across the ARC runtime
+- Production SideQuests integration is concentrated behind MCP-facing modules in `sidequest_mcp_client/`, with any direct-import compatibility helpers isolated to `sidequest_mcp_client/test_compat/`
 
 What still remains if you want a fully independent git repo:
 

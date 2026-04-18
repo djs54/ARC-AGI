@@ -13,18 +13,13 @@ import sys
 import time
 from pathlib import Path
 
-from benchmarks.arc3.adapter import LocalBrainClient
-from sidequests_bridge.mcp_brain_client import MCPBrainClient
+from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from agents.arc3.runner import DurableARCRunner
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
-from sidequests_bridge.observability import build_observability
-from sidequests_bridge.runtime import (
-    create_llm_client,
-    load_config,
-    run_loop,
-)
-from sidequests_bridge.readiness import check_mcp_readiness, ReadinessError
+from sidequest_mcp_client.observability import build_observability
+from arc_runtime.config import load_config
+from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[0]
@@ -167,8 +162,6 @@ class SingleTaskRunner:
         _enforce_observability_preflight(self.config)
         self.db = None
         self.harness = None
-        self.loop_queue = asyncio.Queue()
-        self.loop_task = None
         self.tasks = []
         self.results = []
         self.real_api = real_api
@@ -236,40 +229,6 @@ class SingleTaskRunner:
                 usable_count,
                 getattr(self.tasks[0], "game_id", "unknown"),
             )
-
-    async def _loop_worker(self, centroids):
-        """Minimal loop worker for submission."""
-        llm_client = create_llm_client(self.config)
-        
-        while True:
-            got_item = False
-            try:
-                item = await self.loop_queue.get()
-                got_item = True
-                
-                # B108: Added precomputed to queue tuple
-                if len(item) == 4:
-                    message_id, text, role, session_id = item
-                    precomputed = None
-                else:
-                    message_id, text, role, session_id, precomputed = item
-
-                await run_loop(
-                    message_id=message_id,
-                    text=text,
-                    role=role,
-                    db=self.db,
-                    llm_client=llm_client,
-                    config=self.config,
-                    centroids=centroids,
-                    session_id=session_id,
-                    precomputed=precomputed,
-                )
-            except Exception as e:
-                logger.error(f"Loop worker error: {e}")
-            finally:
-                if got_item:
-                    self.loop_queue.task_done()
 
     def reset_live_output(self):
         self.live_output_path.write_text("")
@@ -563,14 +522,6 @@ class SingleTaskRunner:
 
     async def shutdown(self):
         """Tear down background resources so the runner exits cleanly."""
-        if self.loop_task is not None:
-            self.loop_task.cancel()
-            try:
-                await self.loop_task
-            except asyncio.CancelledError:
-                pass
-            self.loop_task = None
-
         if self.harness is not None:
             await self.harness.teardown()
             self.harness = None

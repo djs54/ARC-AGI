@@ -7,13 +7,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-PROD_PATHS = [ROOT / "benchmarks", ROOT / "run_single_puzzle.py"]
+PROD_PATHS = [ROOT / "agents", ROOT / "benchmarks", ROOT / "run_single_puzzle.py", ROOT / "sidequest_mcp_client"]
 
-BAD_PATTERNS = [
-    "mcp_engine.config",
-    "mcp_engine.schema",
-    "mcp_engine.graph.kuzu_client",
-    "mcp_engine.loop.",
+# Use regex patterns so we don't false-positive on the local MCP client package name.
+BAD_REGEXES = [
+    r"\bmcp_engine\.config\b",
+    r"\bmcp_engine\.schema\b",
+    r"\bmcp_engine\.graph\.kuzu_client\b",
+    r"\bmcp_engine\.loop\.",
+    r"\bfrom\s+sidequests\b",
+    r"\bimport\s+sidequests\b",
+    r"\bfrom\s+mcp_engine\b",
+    r"\bimport\s+mcp_engine\b",
+    r'importlib\.import_module\([^)]*"m"\s*\+\s*"cp_"',
+    r'importlib\.import_module\([^)]*cp_.*engine',
 ]
 
 
@@ -31,13 +38,20 @@ def _gather_files(paths):
 def test_no_direct_bootstrap_imports_in_production_paths():
     files = _gather_files(PROD_PATHS)
     offending = []
+    import re
+
+    compiled = [re.compile(p) for p in BAD_REGEXES]
+
     for f in files:
+        # allow test-only shims under sidequest_mcp_client/test_compat if present
+        if "sidequest_mcp_client/test_compat" in str(f):
+            continue
         try:
             text = f.read_text()
         except Exception:
             continue
-        for pat in BAD_PATTERNS:
-            if pat in text:
-                offending.append((str(f.relative_to(ROOT)), pat))
+        for pat in compiled:
+            if pat.search(text):
+                offending.append((str(f.relative_to(ROOT)), pat.pattern))
 
     assert not offending, f"Found direct SideQuests bootstrap imports in production files: {offending}"

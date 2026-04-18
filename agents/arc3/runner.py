@@ -18,7 +18,7 @@ from typing import Any, Callable, List, Mapping, Optional
 from benchmarks.ab_harness import ABHarness, ABTask, ABTaskResult, ABVariant, BenchmarkConfig
 from benchmarks.arc3.adapter import ARC3Adapter, BrainClientProtocol, LedgerBrainClient
 from benchmarks.arc3.harness import ARC3Harness
-from sidequests_bridge.observability import (
+from sidequest_mcp_client.observability import (
     REQUIRED_DECISION_FIELDS,
     REQUIRED_OUTCOME_FIELDS,
     build_observability,
@@ -28,7 +28,7 @@ from sidequests_bridge.observability import (
 from benchmarks.arc3.outcome_judge import OutcomeJudge
 from benchmarks.arc3.regression_monitor import RegressionMonitor, RunRecord
 from benchmarks.arc3.trajectory_eval import TrajectoryEvaluator
-from sidequests_bridge.runtime import create_llm_client
+from arc_runtime.llm import create_llm_client
 from agents.arc3.checkpoint import CheckpointManager
 from agents.arc3.failure_taxonomy import classify_failure
 from agents.arc3.orchestrator import ARCOrchestrator

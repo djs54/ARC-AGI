@@ -10,11 +10,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from agents.arc3.grid_analysis import GridDiffEngine, PatternRegion
 from agents.arc3.solver import RoleType, ObjectRole
-from sidequests_bridge.runtime import KuzuClient
+if TYPE_CHECKING:
+    from typing import Any as KuzuClient
 
 logger = logging.getLogger(__name__)
 

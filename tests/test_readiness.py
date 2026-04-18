@@ -8,7 +8,7 @@ from pathlib import Path
 # Ensure repo root on sys.path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sidequests_bridge.readiness import check_mcp_readiness, ReadinessError
+from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
 
 
 SERVER_SCRIPT = textwrap.dedent(r"""

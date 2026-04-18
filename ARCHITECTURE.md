@@ -39,7 +39,7 @@ Today, `ARC_AGI` still imports SideQuests internals directly:
 
 So the split is structurally cleaner now, but the runtime boundary is still tighter than ideal.
 
-ARC_AGI now contains a small `sidequests_bridge/` package to concentrate those imports behind one repo-local seam.
+ARC_AGI now contains a small `sidequest_mcp_client/` package that serves as the MCP-facing seam for production code. Any direct-import compatibility helpers belong under `sidequest_mcp_client/test_compat/` and are not part of the production boundary.
 Important: this bridge is currently an in-process import wrapper, not an MCP client calling SideQuests over MCP endpoints.
 
 ### Target Dependency Boundary
@@ -58,7 +58,7 @@ The desired end state is:
 
 ### MCP v1 — stdio-only production seam
 
-For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP over stdio only. Production ARC components must interact with SideQuests via an MCP client using a stdio transport (local process or managed service). The in-repo `sidequests_bridge` import-wrapper is transitional and non-compliant with the production import policy and must be replaced by an MCP client for production use.
+For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP over stdio only. Production ARC components must interact with SideQuests via an MCP client using a stdio transport (local process or managed service). In the current repo, the allowed production seam is the MCP-facing portion of `sidequest_mcp_client/` (`mcp_session`, `mcp_brain_client`, `readiness`, `observability`). Direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` and are not allowed in production code.
 
 ARC-side client responsibilities (v1)
 
@@ -84,7 +84,7 @@ Canonical ARC-side client interface (recommended)
 
 Policy statement
 
-The current `sidequests_bridge` in-repo import-wrapper is a transitional convenience for development and testing; it is explicitly non-compliant with the production policy. Production ARC code MUST NOT directly import SideQuests internals (for example `mcp_engine.*`); instead it must use the documented MCP stdio client contract above.
+Production ARC code MUST NOT directly import SideQuests internals (for example `mcp_engine.*`); instead it must use the documented MCP stdio client contract above. If a test still needs direct-import compatibility, that helper must live under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 
 ## System Overview
 
@@ -255,7 +255,7 @@ ARC_AGI/
 ├── README.md
 ├── pyproject.toml
 ├── run_single_puzzle.py
-├── sidequests_bridge/
+├── sidequest_mcp_client/
 ├── agents/
 │   └── arc3/
 ├── benchmarks/

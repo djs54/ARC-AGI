@@ -16,17 +16,12 @@ from typing import Dict, Any, List
 
 import yaml
 
-from benchmarks.arc3.adapter import LocalBrainClient
-from sidequests_bridge.mcp_brain_client import MCPBrainClient
+from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from agents.arc3.runner import DurableARCRunner
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
-from sidequests_bridge.runtime import (
-    create_llm_client,
-    load_config,
-    run_loop,
-)
-from sidequests_bridge.readiness import check_mcp_readiness, ReadinessError
+from arc_runtime.config import load_config
+from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +39,6 @@ class SubmissionRunner:
         self.config = load_config()
         self.db = None
         self.harness = None
-        self.loop_queue = asyncio.Queue()
         self.tasks = []
         self.results = []
 
@@ -88,29 +82,6 @@ class SubmissionRunner:
             logger.info(f"Loaded {len(self.tasks)} tasks from manifest.")
         else:
             logger.warning(f"Manifest not found at {MANIFEST_PATH}. Running with empty task set.")
-
-    async def _loop_worker(self, centroids):
-        """Minimal loop worker for submission."""
-        llm_client = create_llm_client(self.config)
-        
-        while True:
-            message_id, text, role, session_id = await self.loop_queue.get()
-            try:
-                await run_loop(
-                    message_id=message_id,
-                    text=text,
-                    role=role,
-                    db=self.db,
-                    llm_client=llm_client,
-                    config=self.config,
-                    centroids=centroids,
-                    session_id=session_id,
-                )
-            except Exception as e:
-                logger.error(f"Loop worker error: {e}")
-                continue
-            finally:
-                self.loop_queue.task_done()
 
     def export_results(self):
         logger.info(f"Exporting results to {OUTPUT_PATH}")

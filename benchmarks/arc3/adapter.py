@@ -9,7 +9,7 @@ from collections import Counter, deque
 from contextlib import nullcontext
 from typing import Any, Callable, List, Mapping, Optional, Protocol, Sequence
 
-from sidequests_bridge.observability import Observability, canonical_span_name
+from sidequest_mcp_client.observability import Observability, canonical_span_name
 from .schema import (
     ARC3Action,
     ARC3ColorSummary,
@@ -182,7 +182,7 @@ class NoOpBrainClient(BrainClientProtocol):
 
 
 class LocalBrainClient(BrainClientProtocol):
-    """Brain client that calls handlers directly (for augmented mode)."""
+    """Deprecated compatibility shim kept only to fail fast if used."""
     @property
     def db(self):
         return self._db
@@ -190,26 +190,10 @@ class LocalBrainClient(BrainClientProtocol):
     def __init__(self, db, config):
         self._db = db
         self.config = config
-        # Late import to avoid circular dependencies
-        from sidequests_bridge.tool_handlers import load_tool_handlers
-
-        handlers = load_tool_handlers()
-        self._notify_turn_handler = handlers['notify_turn']
-        self._current_truth_handler = handlers['current_truth']
-        self._register_plan_handler = handlers['register_plan']
-        self._report_outcome_handler = handlers['report_outcome']
-        self._recall_procedures_handler = handlers['recall_procedures']
-        self._recall_plans_handler = handlers['recall_plans']
-        self._recall_relevant_lessons_handler = handlers['recall_relevant_lessons']
-        self._analogical_search_handler = handlers['analogical_search']
-        self._branch_quest_handler = handlers['branch_quest']
-        self._register_task_graph_handler = handlers['register_task_graph']
-        self._get_ready_tasks_handler = handlers['get_ready_tasks']
-        self._advance_task_handler = handlers['advance_task']
-        self._fail_task_handler = handlers['fail_task']
-        self._get_task_graph_handler = handlers['get_task_graph']
-        self._store_lesson_handler = handlers['upsert_lesson']
-        self._get_knowledge_gaps_handler = handlers['get_knowledge_gaps']
+        raise RuntimeError(
+            "LocalBrainClient is no longer supported in production. "
+            "Use MCPBrainClient for production paths or add a test-only shim under sidequest_mcp_client/test_compat."
+        )
 
     async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         params = {"role": role, "content": content, "session_id": session_id}

@@ -2,7 +2,7 @@
 
 Provides async method-style wrappers that map ARC runtime calls to SideQuests
 MCP tool names. The client is a thin async wrapper around the
-`MCPStdIOSession` transport implemented in `sidequests_bridge.mcp_session`.
+`MCPStdIOSession` transport implemented in `sidequest_mcp_client.mcp_session`.
 """
 
 from __future__ import annotations
