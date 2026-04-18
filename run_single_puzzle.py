@@ -566,6 +566,9 @@ class SingleTaskRunner:
 
     async def shutdown(self):
         """Tear down background resources so the runner exits cleanly."""
+        from sidequest_mcp_client.observability import build_observability
+        build_observability(self.config).shutdown()
+
         if self.harness is not None:
             await self.harness.teardown()
             self.harness = None

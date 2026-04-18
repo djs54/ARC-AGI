@@ -92,18 +92,51 @@ class Observability:
                 logging.getLogger("observability").warning("PHOENIX_ENABLE=1 but opentelemetry-sdk not installed.")
                 self.enabled = False
 
+    def _sanitize_attrs(self, attrs: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+        if not attrs:
+            return {}
+        sanitized = {}
+        for k, v in attrs.items():
+            if isinstance(v, (str, int, float, bool)):
+                sanitized[k] = v
+            elif isinstance(v, (list, tuple)) and all(isinstance(x, (str, int, float, bool)) for x in v):
+                sanitized[k] = list(v)
+            elif v is None:
+                continue
+            else:
+                import json
+                try:
+                    sanitized[k] = json.dumps(v)
+                except Exception:
+                    sanitized[k] = str(v)
+        return sanitized
+
     def span(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> AbstractContextManager:
         if self.enabled and self._tracer:
-            return self._tracer.start_as_current_span(name, attributes=attrs or {})
+            return self._tracer.start_as_current_span(name, attributes=self._sanitize_attrs(attrs))
         return _NoopSpan()
 
     def emit_structured_event(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> None:
         if self.enabled and self._tracer:
             # For point-in-time trace events, we create a very short-lived span.
             # If there's an active context, OpenTelemetry will naturally attach this as a child.
-            with self._tracer.start_as_current_span(name, attributes=attrs or {}):
+            with self._tracer.start_as_current_span(name, attributes=self._sanitize_attrs(attrs)):
                 pass
         return None
+
+    def shutdown(self) -> None:
+        if self.enabled and HAS_OTEL:
+            provider = trace.get_tracer_provider()
+            if hasattr(provider, "force_flush"):
+                try:
+                    provider.force_flush()
+                except Exception:
+                    pass
+            if hasattr(provider, "shutdown"):
+                try:
+                    provider.shutdown()
+                except Exception:
+                    pass
 
 
 REQUIRED_DECISION_FIELDS: list[str] = []
