@@ -16,6 +16,7 @@ from sidequest_mcp_client.observability import (
     REQUIRED_DECISION_FIELDS,
     build_observability,
     ensure_contract_fields,
+    canonical_span_name,
 )
 from benchmarks.arc3.schema import ARC3Action, ARC3Observation
 from benchmarks.arc3.state_serializer import StateSerializerForARC
@@ -1022,11 +1023,8 @@ class ARCOrchestrator:
                         pass
 
                 self._observability.emit_structured_event(
-                    event_type=event_type,
-                    operation=operation,
-                    details=details,
-                    result=result,
-                    elapsed_ms=elapsed_ms,
+                    name=canonical_span_name(event_type),
+                    attrs=base_attrs
                 )
         except Exception:
             logger.debug("Observability event emission failed", exc_info=True)

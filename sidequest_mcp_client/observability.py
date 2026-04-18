@@ -97,7 +97,12 @@ class Observability:
             return self._tracer.start_as_current_span(name, attributes=attrs or {})
         return _NoopSpan()
 
-    def emit_structured_event(self, *args, **kwargs) -> None:
+    def emit_structured_event(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> None:
+        if self.enabled and self._tracer:
+            # For point-in-time trace events, we create a very short-lived span.
+            # If there's an active context, OpenTelemetry will naturally attach this as a child.
+            with self._tracer.start_as_current_span(name, attributes=attrs or {}):
+                pass
         return None
 
 
