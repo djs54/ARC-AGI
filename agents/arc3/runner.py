@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+import atexit
 import uuid
 import hashlib
 import subprocess
@@ -73,6 +74,31 @@ class DurableARCRunner:
 
         self.trajectory_evaluator = TrajectoryEvaluator()
 
+    def _atexit_flush_trace(self) -> None:
+        """A022: write any in-flight execution trace to disk before interpreter exit.
+
+        Fires on both normal termination and unhandled exceptions. Idempotent —
+        the normal run() export also rewrites the file, so a subsequent normal
+        completion overwrites whatever we dumped here.
+        """
+        try:
+            snapshot = getattr(self, "_current_trace_snapshot", None) or []
+            if not snapshot:
+                return
+            # Import the atomic dumper lazily to avoid import cycles at module
+            # import time between agents and the top-level runner entrypoint.
+            from run_single_puzzle import _atomic_dump_json
+
+            _atomic_dump_json(getattr(self, "agent_execution_trace_path"), list(snapshot))
+            logger.info(
+                "A022 atexit: flushed %d trace events to %s",
+                len(snapshot),
+                getattr(self, "agent_execution_trace_path"),
+            )
+        except Exception:
+            # atexit handlers must never raise
+            pass
+
     async def run(self, tasks: List[ABTask], card_id: str) -> List[dict]:
         run_span = self.observability.span(
             canonical_span_name("run"), 
@@ -83,6 +109,8 @@ class DurableARCRunner:
             }
         )
         run_span.__enter__()
+        # Ensure we flush any in-flight trace on interpreter exit.
+        atexit.register(self._atexit_flush_trace)
         
         try:
             mgr = CheckpointManager(card_id)
@@ -272,6 +300,8 @@ class DurableARCRunner:
                                 config=vcfg2,
                                 cost_tracker=cost_tracker_v,
                             )
+                            # A022: expose the orchestrator's in-flight trace so atexit can flush it.
+                            self._current_trace_snapshot = getattr(orchestrator_v, "_execution_trace", [])
                             return await self._run_puzzle_with_brain(orchestrator_v, task_arg, variant_brain, vcfg, checkpoint, mgr)
 
                         winner = await strategy_race(self, task, variants=self.config.get("strategy_racing_variants", ["A", "B", "C"]), variant_runner=_variant_runner)
@@ -350,6 +380,8 @@ class DurableARCRunner:
                             config=cfg2,
                             cost_tracker=cost_tracker,
                         )
+                        # A022: expose the orchestrator's in-flight trace so atexit can flush it.
+                        self._current_trace_snapshot = getattr(orchestrator, "_execution_trace", [])
 
                         try:
                             task_result, duration = await self._run_puzzle(orchestrator, task, checkpoint, mgr)
@@ -441,6 +473,8 @@ class DurableARCRunner:
 
             batch_results = await scheduler.run_batch(ordered_tasks, _run_single_task)
             results = [self._submission_row_from_result(r) for r in batch_results if r is not None]
+            # Clear snapshot on normal completion so atexit handler is a no-op.
+            self._current_trace_snapshot = []
             return self._attach_batch_eval_summary(results)
         finally:
             run_span.__exit__(None, None, None)

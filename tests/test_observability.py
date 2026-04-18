@@ -41,6 +41,10 @@ def test_preflight_auto_enables_when_packages_present(monkeypatch):
         return None
 
     monkeypatch.setattr(_iu, "find_spec", fake_find_spec)
+    # Ensure build_observability used by run_single_puzzle is not a runtime blocker;
+    # patch the imported symbol on the entrypoint module so the preflight uses it.
+    import run_single_puzzle as _rsp
+    monkeypatch.setattr(_rsp, "build_observability", lambda cfg: type("_OK", (), {"enabled": True})())
 
     # config with no [observability] section
     cfg = {"llm": {"provider": "ollama"}}
@@ -75,4 +79,55 @@ def test_ensure_contract_fields_fills_defaults():
     out = ensure_contract_fields(attrs, REQUIRED_DECISION_FIELDS, defaults={"action_id": "unknown"})
     assert out["action_id"] == "unknown"
     assert out["session_id"] == "s1"
+
+
+def test_preflight_auto_enable_soft_fails_on_phoenix_unreachable(monkeypatch):
+    """A022: auto-enable path must not raise when Phoenix cannot initialize."""
+    from run_single_puzzle import _enforce_observability_preflight
+    import importlib.util as _iu
+    import sidequest_mcp_client.observability as obs_mod
+    import os
+
+    monkeypatch.delenv("PHOENIX_ENABLE", raising=False)
+
+    def fake_find_spec(name):
+        if name in ("opentelemetry", "phoenix", "phoenix.otel"):
+            return object()
+        return None
+
+    monkeypatch.setattr(_iu, "find_spec", fake_find_spec)
+
+    class _Broken:
+        enabled = False
+
+    monkeypatch.setattr(obs_mod, "build_observability", lambda cfg: _Broken())
+
+    cfg = {"llm": {}}
+    # Should not raise when auto-enabled and build_observability reports disabled
+    _enforce_observability_preflight(cfg)
+
+    assert cfg.get("observability", {}).get("enabled") is False
+    assert "PHOENIX_ENABLE" not in os.environ
+
+
+def test_preflight_explicit_enable_still_hard_fails(monkeypatch):
+    """A022: an explicit PHOENIX_ENABLE=1 must still raise on Phoenix failure."""
+    from run_single_puzzle import _enforce_observability_preflight
+    import sidequest_mcp_client.observability as obs_mod
+    import importlib.util as _iu
+
+    # Ensure find_spec does not raise ModuleNotFoundError during probing; missing
+    # packages will be reported via the 'missing' list and cause a RuntimeError.
+    monkeypatch.setattr(_iu, "find_spec", lambda name: None)
+
+    monkeypatch.setenv("PHOENIX_ENABLE", "1")
+
+    class _Broken:
+        enabled = False
+
+    monkeypatch.setattr(obs_mod, "build_observability", lambda cfg: _Broken())
+
+    cfg = {"observability": {"enabled": True}}
+    with pytest.raises(RuntimeError):
+        _enforce_observability_preflight(cfg)
 

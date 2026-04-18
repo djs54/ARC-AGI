@@ -84,7 +84,11 @@ class Observability:
                 self._tracer = trace.get_tracer(__name__)
             except Exception:
                 import logging
-                logging.getLogger("observability").exception("Failed to initialize OTEL/Phoenix tracer")
+                logger = logging.getLogger("observability")
+                if os.environ.get("_A016_AUTO_ENABLED_PHOENIX"):
+                    logger.warning("Auto-enabled Phoenix tracer failed to initialize; disabling.", exc_info=True)
+                else:
+                    logger.exception("Failed to initialize OTEL/Phoenix tracer")
                 self.enabled = False
         else:
             if self.enabled and not HAS_OTEL:

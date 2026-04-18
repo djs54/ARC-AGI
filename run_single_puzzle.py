@@ -62,6 +62,28 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(leve
 logger = logging.getLogger(__name__)
 
 
+def _atomic_dump_json(path: Path, obj) -> None:
+    """Write JSON atomically: write to <path>.tmp, fsync, then os.replace into place.
+
+    A022: prevents truncated or partial trace files when the process is killed
+    mid-write. os.replace is atomic on POSIX when src and dst are on the same
+    filesystem (they are here — both sit under REPO_ROOT).
+    """
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    # Ensure parent exists
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            # Best-effort fsync; some environments may not support it.
+            pass
+    os.replace(tmp, path)
+
+
 def _apply_llm_overrides(config: dict, overrides: dict | None = None) -> dict:
     """Return a config copy with one-shot LLM overrides applied."""
     if not overrides:
@@ -119,9 +141,12 @@ def _ensure_arc_api_key(arc_key_path: str | Path | None = None) -> str | None:
 
 def _enforce_observability_preflight(config: dict) -> None:
     """Fail fast when observability is enabled but runtime cannot emit traces.
-    
-    A016: May mutate config by setting observability.enabled = True and 
-    may set os.environ["PHOENIX_ENABLE"] = "1" if auto-enabling.
+
+    A016: May mutate config by setting observability.enabled = True and
+    may set os.environ["PHOENIX_ENABLE"] = "1" if auto-enabling. A022 softens
+    the auto-enable path so that Phoenix unreachability does not abort a smoke
+    run when auto-enabled; an explicit `PHOENIX_ENABLE=1` still makes failures
+    fatal.
     """
     obs_cfg = config.get("observability", {}) if isinstance(config, dict) else {}
     explicit_enabled = None
@@ -132,6 +157,8 @@ def _enforce_observability_preflight(config: dict) -> None:
         # User explicitly disabled; respect it
         return
 
+    auto_enabled = False
+
     if explicit_enabled is None:
         # Not set — probe dependencies and auto-enable if available
         all_present = (
@@ -140,8 +167,11 @@ def _enforce_observability_preflight(config: dict) -> None:
             and importlib.util.find_spec("phoenix.otel") is not None
         )
         if all_present:
+            # Mark that A016 auto-enabled Phoenix so we can soft-fail later if
+            # build_observability() fails. This sentinel is internal only.
             os.environ["PHOENIX_ENABLE"] = "1"
             os.environ["_A016_AUTO_ENABLED_PHOENIX"] = "1"
+            auto_enabled = True
             if isinstance(config, dict):
                 config.setdefault("observability", {})["enabled"] = True
             obs_cfg = config.get("observability", {})
@@ -173,19 +203,30 @@ def _enforce_observability_preflight(config: dict) -> None:
             "Observability preflight failed: required tracing packages are missing in this interpreter.\n"
             f"python_executable={sys.executable}\n"
             f"missing={', '.join(missing)}\n"
-            "Fix: run the smoke test with /Users/djshelton/Desktop/GitProjects/sidequests-brain/.venv/bin/python "
-            "or install tracing deps into the current interpreter."
+            "Fix: run the smoke test with the SideQuests interpreter or install tracing deps into the current interpreter."
         )
 
-    obs = build_observability(config)
-    if not obs.enabled:
-        endpoint = str(obs_cfg.get("endpoint", "http://127.0.0.1:6006/v1/traces"))
-        raise RuntimeError(
-            "Observability preflight failed: tracing could not be initialized.\n"
-            f"python_executable={sys.executable}\n"
-            f"endpoint={endpoint}\n"
-            "Fix: verify dependencies are installed in this interpreter and that Phoenix is reachable."
-        )
+    try:
+        obs = build_observability(config)
+        if not getattr(obs, "enabled", False):
+            raise RuntimeError(
+                "Observability preflight failed: tracing could not be initialized."
+            )
+    except Exception as exc:
+        if auto_enabled:
+            logger.warning(
+                "Phoenix auto-enable failed (%s); falling back to JSON-trace only. "
+                "Set PHOENIX_ENABLE=1 explicitly to make this fatal.",
+                exc,
+            )
+            os.environ.pop("PHOENIX_ENABLE", None)
+            if isinstance(config.get("observability"), dict):
+                config["observability"]["enabled"] = False
+            return
+        raise
+    finally:
+        if auto_enabled:
+            os.environ.pop("_A016_AUTO_ENABLED_PHOENIX", None)
 
 
 def _enforce_llm_preflight(config: dict) -> None:
@@ -317,8 +358,7 @@ class SingleTaskRunner:
     def export_results(self):
         output_path = self.final_output_path
         logger.info(f"Exporting results to {output_path}")
-        with open(output_path, 'w') as f:
-            json.dump(self.results, f, indent=2)
+        _atomic_dump_json(output_path, self.results)
 
         # Chronological timeline of function calls + ARC API request/response events.
         call_timeline = []
@@ -433,8 +473,7 @@ class SingleTaskRunner:
         call_timeline.sort(key=_sort_key)
 
         logger.info(f"Exporting ARC-only responses to {self.arc_server_output_path}")
-        with open(self.arc_server_output_path, 'w') as f:
-            json.dump(call_timeline, f, indent=2)
+        _atomic_dump_json(self.arc_server_output_path, call_timeline)
 
         # B131: Export agent execution trace (CloudWatch-style logs)
         agent_execution_trace = []
@@ -446,8 +485,7 @@ class SingleTaskRunner:
         agent_execution_trace.sort(key=lambda e: e.get("timestamp_iso", ""))
         
         logger.info(f"Exporting agent execution trace to {self.agent_execution_trace_path}")
-        with open(self.agent_execution_trace_path, 'w') as f:
-            json.dump(agent_execution_trace, f, indent=2)
+        _atomic_dump_json(self.agent_execution_trace_path, agent_execution_trace)
 
         timeline_base_dt = None
         for candidate in [*call_timeline, *agent_execution_trace]:
@@ -563,8 +601,7 @@ class SingleTaskRunner:
         master_timeline.sort(key=_sort_key)
 
         logger.info(f"Exporting master timeline to {self.master_timeline_path}")
-        with open(self.master_timeline_path, 'w') as f:
-            json.dump(master_timeline, f, indent=2)
+        _atomic_dump_json(self.master_timeline_path, master_timeline)
 
     async def shutdown(self):
         """Tear down background resources so the runner exits cleanly."""

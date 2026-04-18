@@ -312,6 +312,8 @@ The ARC stack treats SideQuests as a memory substrate, not as solver logic.
 - default endpoint: `http://127.0.0.1:6006/v1/traces`
 - auto-enabled in `run_single_puzzle.py` when `opentelemetry`, `phoenix`, and `phoenix.otel` are all importable
 - disable with `[observability] enabled = false` in `sidequests.toml` or `~/.sidequests/config.toml`
+
+Note: Phoenix auto-enable is best-effort in the default auto-enable path (A022); when unavailable the runtime falls back to the JSON trace as the primary diagnostic surface. See `docs/trace_recipes.md` for canonical jq recipes to analyze `agent_execution_trace.json` and related artifacts.
 - override project with `PHOENIX_PROJECT=<name>` environment variable
 - override endpoint with `PHOENIX_ENDPOINT=<url>` environment variable
 
