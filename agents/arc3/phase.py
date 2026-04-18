@@ -36,11 +36,11 @@ class PhaseController:
     """
 
     TRANSITIONS: dict[SolvePhase, set[SolvePhase]] = {
-        SolvePhase.PERCEIVE:    {SolvePhase.MODEL, SolvePhase.HYPOTHESIZE},
-        SolvePhase.MODEL:       {SolvePhase.HYPOTHESIZE},
-        SolvePhase.HYPOTHESIZE: {SolvePhase.ROUTE},
-        SolvePhase.ROUTE:       {SolvePhase.EXECUTE},
-        SolvePhase.EXECUTE:     {SolvePhase.EVALUATE},
+        SolvePhase.PERCEIVE:    {SolvePhase.MODEL, SolvePhase.HYPOTHESIZE, SolvePhase.REPLAN},
+        SolvePhase.MODEL:       {SolvePhase.HYPOTHESIZE, SolvePhase.REPLAN},
+        SolvePhase.HYPOTHESIZE: {SolvePhase.ROUTE, SolvePhase.REPLAN},
+        SolvePhase.ROUTE:       {SolvePhase.EXECUTE, SolvePhase.REPLAN},
+        SolvePhase.EXECUTE:     {SolvePhase.EVALUATE, SolvePhase.REPLAN},
         SolvePhase.EVALUATE:    {SolvePhase.PERCEIVE, SolvePhase.REPLAN},
         SolvePhase.REPLAN:      {SolvePhase.MODEL, SolvePhase.HYPOTHESIZE, SolvePhase.ROUTE},
     }

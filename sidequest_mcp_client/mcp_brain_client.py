@@ -31,11 +31,12 @@ class MCPBrainClient:
         self._init_payload: Optional[Dict[str, Any]] = None
         # B220: allow per-tool timeout overrides via config or explicit tool settings
         self.timeouts = {
-            "current_truth": 15.0,  # expensive retrieval
-            "analogical_search": 10.0,
-            "recall_relevant_lessons": 10.0,
-            "register_plan": 15.0,  # slow DB write
-            "notify_turn": 10.0,    # ingestion can be slow
+            "current_truth": 20.0,  # expensive retrieval
+            "analogical_search": 15.0,
+            "recall_relevant_lessons": 15.0,
+            "register_plan": 20.0,  # slow DB write
+            "notify_turn": 30.0,    # ingestion can be very slow
+            "upsert_lesson": 30.0,  # slow DB write
         }
 
     async def start(self, cmd: Optional[List[str]] = None, startup_timeout: float = 3.0) -> None:
