@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 
-from arc_runtime.config import load_config
-from arc_runtime.llm import create_llm_client
+from mcp_engine.llm.provider import create_llm_client
+from mcp_engine.config import load_config
 
 
 logger = logging.getLogger(__name__)

@@ -79,6 +79,17 @@ def test_classify_failure_strategy_exhausted_without_exception():
     assert result is FailureTaxonomy.STRATEGY_EXHAUSTED
 
 
+def test_classify_failure_coverage_saturated_abort():
+    # Signal from A010 graduation gate
+    result = classify_failure(
+        exc=None,
+        final_state="GAME_OVER",
+        graduation_reason="coverage_saturated_high_confidence",
+        coverage_saturated=True
+    )
+    assert result is FailureTaxonomy.COVERAGE_SATURATED_ABORT
+
+
 def test_submission_row_includes_failure_class():
     runner = _make_runner()
     row = runner._submission_row_from_result(

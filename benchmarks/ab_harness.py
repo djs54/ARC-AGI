@@ -442,12 +442,14 @@ class ABHarness(BenchmarkHarness):
             timeout_rate: Any = round(failure_classes.count("llm_timeout") / total, 4) if total else 0.0
             budget_exceeded_rate: Any = round(failure_classes.count("budget_exceeded") / total, 4) if total else 0.0
             strategy_exhausted_rate: Any = round(failure_classes.count("strategy_exhausted") / total, 4) if total else 0.0
+            coverage_saturated_rate: Any = round(failure_classes.count("coverage_saturated_abort") / total, 4) if total else 0.0
             loop_stuck_rate: Any = round(failure_classes.count("stuck_in_loop") / total, 4) if total else 0.0
         else:
             crash_rate = "N/A"
             timeout_rate = "N/A"
             budget_exceeded_rate = "N/A"
             strategy_exhausted_rate = "N/A"
+            coverage_saturated_rate = "N/A"
             loop_stuck_rate = "N/A"
 
         invalid_action_values = [
@@ -496,6 +498,7 @@ class ABHarness(BenchmarkHarness):
             "timeout_rate": timeout_rate,
             "budget_exceeded_rate": budget_exceeded_rate,
             "strategy_exhausted_rate": strategy_exhausted_rate,
+            "coverage_saturated_rate": coverage_saturated_rate,
             "loop_stuck_rate": loop_stuck_rate,
             "retry_rate": retry_rate,
         }
@@ -523,6 +526,7 @@ class ABHarness(BenchmarkHarness):
             "timeout_rate": timeout_rate,
             "budget_exceeded_rate": budget_exceeded_rate,
             "strategy_exhausted_rate": strategy_exhausted_rate,
+            "coverage_saturated_rate": coverage_saturated_rate,
             "loop_stuck_rate": loop_stuck_rate,
             "retry_rate": retry_rate,
             "invalid_action_rate": invalid_action_rate,

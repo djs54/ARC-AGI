@@ -38,6 +38,15 @@ class MCPBrainClient:
             "notify_turn": 30.0,    # ingestion can be very slow
             "upsert_lesson": 30.0,  # slow DB write
         }
+        # A012: In-memory cache for high-frequency idempotent retrieval
+        self._cache: Dict[tuple, tuple[float, Any]] = {}
+        self._cache_ttl = 15.0
+        self._cache_max_size = 32
+        self._cached_methods = {"current_truth", "recall_relevant_lessons"}
+
+    def clear_cache(self) -> None:
+        """Clear the in-memory retrieval cache."""
+        self._cache.clear()
 
     async def start(self, cmd: Optional[List[str]] = None, startup_timeout: float = 3.0) -> None:
         if cmd is not None:
@@ -67,12 +76,46 @@ class MCPBrainClient:
                 # allow calls to proceed even if initialization payload is not needed
                 pass
         
+        args = arguments or {}
+        
+        # A012: Cache lookup
+        import time
+        import json
+        if name in self._cached_methods:
+            cache_key = (name, json.dumps(args, sort_keys=True))
+            if cache_key in self._cache:
+                ts, payload = self._cache[cache_key]
+                if time.time() - ts < self._cache_ttl:
+                    # Return a deepcopy to prevent callers from mutating cache
+                    import copy
+                    return copy.deepcopy(payload)
+                else:
+                    del self._cache[cache_key]
+
         # Use explicit timeout if provided, else fallback to per-tool override, else 5.0
         final_timeout = timeout
         if final_timeout is None:
             final_timeout = self.timeouts.get(name, 5.0)
 
-        return await asyncio.to_thread(self._session.call_tool, name, arguments or {}, final_timeout)
+        resp = await asyncio.to_thread(self._session.call_tool, name, args, final_timeout)
+        
+        # A012: Diagnostic logging for queued_offline
+        if isinstance(resp, dict) and resp.get("status") == "queued_offline":
+            import logging
+            logging.getLogger("mcp_client").warning(
+                "MCP tool %s returned 'queued_offline'. Ingest events may be delayed. "
+                "Context: %s", name, resp.get("payload", {}).get("reason", "no reason provided")
+            )
+
+        # A012: Cache population
+        if name in self._cached_methods and isinstance(resp, dict) and resp.get("status") != "error":
+            if len(self._cache) >= self._cache_max_size:
+                # Simple FIFO eviction
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[(name, json.dumps(args, sort_keys=True))] = (time.time(), resp)
+
+        return resp
 
     # --- ARC method-style wrappers ---
     async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

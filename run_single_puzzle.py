@@ -117,10 +117,40 @@ def _ensure_arc_api_key(arc_key_path: str | Path | None = None) -> str | None:
 
 
 def _enforce_observability_preflight(config: dict) -> None:
-    """Fail fast when observability is enabled but runtime cannot emit traces."""
+    """Fail fast when observability is enabled but runtime cannot emit traces.
+    
+    A016: May mutate config by setting observability.enabled = True and 
+    may set os.environ["PHOENIX_ENABLE"] = "1" if auto-enabling.
+    """
     obs_cfg = config.get("observability", {}) if isinstance(config, dict) else {}
-    if not bool(obs_cfg.get("enabled", False)):
+    explicit_enabled = None
+    if isinstance(obs_cfg, dict) and "enabled" in obs_cfg:
+        explicit_enabled = bool(obs_cfg["enabled"])
+
+    if explicit_enabled is False:
+        # User explicitly disabled; respect it
         return
+
+    if explicit_enabled is None:
+        # Not set — probe dependencies and auto-enable if available
+        all_present = (
+            importlib.util.find_spec("opentelemetry") is not None
+            and importlib.util.find_spec("phoenix") is not None
+            and importlib.util.find_spec("phoenix.otel") is not None
+        )
+        if all_present:
+            os.environ["PHOENIX_ENABLE"] = "1"
+            if isinstance(config, dict):
+                config.setdefault("observability", {})["enabled"] = True
+            obs_cfg = config.get("observability", {})
+            logger.info(
+                "Phoenix observability auto-enabled (PHOENIX_ENABLE=1, project=%s, endpoint=%s)",
+                os.environ.get("PHOENIX_PROJECT", "arc-agi-sidequests"),
+                os.environ.get("PHOENIX_ENDPOINT", "http://127.0.0.1:6006/v1/traces"),
+            )
+        else:
+            # Packages missing and user did not opt in — stay off silently
+            return
 
     backend = str(obs_cfg.get("backend", "phoenix")).lower()
     if backend != "phoenix":
@@ -165,9 +195,13 @@ def _enforce_llm_preflight(config: dict) -> None:
 
 
 class SingleTaskRunner:
-    def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None):
+    def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None):
         resolved_config_path = Path(config_path) if config_path else (CONFIG_PATH if CONFIG_PATH.exists() else None)
         self.config = _apply_llm_overrides(load_config(resolved_config_path), llm_overrides)
+        if max_steps is not None:
+            if "benchmark" not in self.config:
+                self.config["benchmark"] = {}
+            self.config["benchmark"]["max_attempts_per_puzzle"] = max_steps
         _enforce_llm_preflight(self.config)
         _enforce_observability_preflight(self.config)
         self.db = None
@@ -553,6 +587,7 @@ async def main():
         ),
     )
     parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run (default: 1 for real, 5 for mock)")
+    parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle (overrides config)")
     parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
     parser.add_argument("--config", type=str, default=None, help="Explicit path to the sidequests.toml file to use for this run")
     parser.add_argument("--model", type=str, default=None, help="Override llm.model for this run only")
@@ -594,7 +629,7 @@ async def main():
     else:
         num_puzzles = 1 if real_api else TASK_BATCH_SIZE
 
-    runner = SingleTaskRunner(real_api=real_api, config_path=args.config, llm_overrides=llm_overrides)
+    runner = SingleTaskRunner(real_api=real_api, config_path=args.config, llm_overrides=llm_overrides, max_steps=args.max_steps)
     try:
         await runner.initialize()
 

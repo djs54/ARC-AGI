@@ -27,20 +27,24 @@ That means `ARC_AGI` should depend on SideQuests, not absorb it.
 
 ### Current Dependency Boundary
 
-Today, `ARC_AGI` still imports SideQuests internals directly:
+`ARC_AGI` production code now uses an ARC-owned MCP client seam:
 
-- `mcp_engine.config`
-- `mcp_engine.graph.kuzu_client`
-- `mcp_engine.schema`
-- `mcp_engine.tools`
-- `mcp_engine.observability`
-- `mcp_engine.llm.provider`
-- loop preload helpers like `step2_gist` and `step3_schema_org`
+- `sidequest_mcp_client/mcp_session.py`
+- `sidequest_mcp_client/mcp_brain_client.py`
+- `sidequest_mcp_client/readiness.py`
+- `sidequest_mcp_client/observability.py`
 
-So the split is structurally cleaner now, but the runtime boundary is still tighter than ideal.
+That seam talks to SideQuests through the generic stdio MCP adapter:
 
-ARC_AGI now contains a small `sidequest_mcp_client/` package that serves as the MCP-facing seam for production code. Any direct-import compatibility helpers belong under `sidequest_mcp_client/test_compat/` and are not part of the production boundary.
-Important: this bridge is currently an in-process import wrapper, not an MCP client calling SideQuests over MCP endpoints.
+- `python -m sidequests.adapters.mcp_server`
+
+Production ARC code should not directly import `mcp_engine.*` or `sidequests.*`.
+Any compatibility helpers that still rely on direct imports must live under
+`sidequest_mcp_client/test_compat/` and stay out of production call paths.
+
+So the boundary is no longer the earlier in-process wrapper design. The repo now
+has a real MCP client seam in production, with any direct-import escape hatches
+isolated to test-only support.
 
 ### Target Dependency Boundary
 
@@ -58,7 +62,22 @@ The desired end state is:
 
 ### MCP v1 — stdio-only production seam
 
-For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP over stdio only. Production ARC components must interact with SideQuests via an MCP client using a stdio transport (local process or managed service). In the current repo, the allowed production seam is the MCP-facing portion of `sidequest_mcp_client/` (`mcp_session`, `mcp_brain_client`, `readiness`, `observability`). Direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` and are not allowed in production code.
+For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP
+over stdio only. Production ARC components interact with SideQuests through the
+ARC-owned client package `sidequest_mcp_client/`.
+
+Allowed production seam:
+
+- `sidequest_mcp_client.mcp_session`
+- `sidequest_mcp_client.mcp_brain_client`
+- `sidequest_mcp_client.readiness`
+- `sidequest_mcp_client.observability`
+
+Not allowed in production:
+
+- direct `mcp_engine.*` imports
+- direct `sidequests.*` imports
+- `sidequest_mcp_client/test_compat/*`
 
 ARC-side client responsibilities (v1)
 
@@ -67,6 +86,7 @@ ARC-side client responsibilities (v1)
 - Call tools: invoke tools by canonical name with a structured args envelope; receive a structured result envelope with status and payload.
 - Normalize: enforce a canonical request/response JSON envelope for all tool calls to ensure stable parsing and provenance.
 - Failure handling: categorize errors (transient, permanent, validation), enforce timeouts, retry/backoff policy, idempotency keys, and safe fallback behavior if memory services are unavailable.
+- Tool-specific timeout budgeting: expensive memory operations such as `current_truth`, `register_plan`, `notify_turn`, and `upsert_lesson` may use larger budgets than lighter MCP calls.
 
 Session lifecycle and startup/readiness expectations
 
@@ -84,7 +104,10 @@ Canonical ARC-side client interface (recommended)
 
 Policy statement
 
-Production ARC code MUST NOT directly import SideQuests internals (for example `mcp_engine.*`); instead it must use the documented MCP stdio client contract above. If a test still needs direct-import compatibility, that helper must live under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
+Production ARC code MUST NOT directly import SideQuests internals (for example
+`mcp_engine.*`); instead it must use the documented MCP stdio client contract
+above. If a test still needs direct-import compatibility, that helper must live
+under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 
 ## System Overview
 
@@ -121,6 +144,8 @@ ARC-specific cognition and orchestration.
   Solve engine, rule hypotheses, object roles, chunking, strategy logic
 - `runner.py`
   Durable run driver across tasks/puzzles
+- `phase.py`
+  Durable phase-state machine with explicit `REPLAN` handling
 - `hypothesis.py`
   Hypothesis management and transition/state modeling
 - `grid_analysis.py`
@@ -169,18 +194,23 @@ ARC-specific execution, evaluation, and packaging.
 
 ## Cognitive Model
 
-The ARC agent uses a staged loop:
+The ARC agent uses a durable, inspectable phase-state machine:
 
-1. Perceive
-2. Hypothesize
-3. Solve
-4. Plan
-5. Act
-6. Evaluate
+1. `PERCEIVE`
+2. `MODEL`
+3. `HYPOTHESIZE`
+4. `ROUTE`
+5. `EXECUTE`
+6. `EVALUATE`
+7. `REPLAN`
 
 This loop is ARC-owned. Memory persistence is SideQuests-owned.
 
-### Phase 1: Exploration
+`REPLAN` is a first-class recovery/escalation phase rather than an implicit
+fallback. The runtime can now route back into better modeling or strategy
+selection instead of treating every stall as a generic crash.
+
+### Phase 1: Exploration / Modeling
 
 Goal: learn what the puzzle environment does before overcommitting to a solve theory.
 
@@ -200,7 +230,7 @@ Primary outputs:
 - structural summaries
 - failure evidence for later retrieval
 
-### Phase 2: Solving
+### Phase 2: Goal-Directed Solving
 
 Goal: turn exploration evidence into a goal-directed policy.
 
@@ -239,6 +269,30 @@ The ARC stack treats SideQuests as a memory substrate, not as solver logic.
   pull reusable procedure-like patterns
 - `get_knowledge_gaps`
   surface unresolved missing understanding
+- task-graph tools such as `register_task_graph`, `get_ready_tasks`, `advance_task`, `fail_task`, `get_task_graph`
+  support batch/task orchestration when enabled
+
+### Runtime Notes
+
+- production startup uses MCP readiness checks instead of directly bootstrapping
+  SideQuests graph/schema internals
+- `run_single_puzzle.py` now performs fail-fast preflight for:
+  - LLM initialization
+  - observability initialization
+  - SideQuests MCP readiness
+- local `provider=ollama` still uses the OpenAI-compatible Python SDK in this
+  repo architecture, so the `openai` package is a real runtime dependency
+- timeout attribution distinguishes MCP/tool stalls from true LLM timeouts so
+  benchmark outputs point at the correct subsystem
+
+### Observability defaults
+
+- default project: `arc-agi-sidequests`
+- default endpoint: `http://127.0.0.1:6006/v1/traces`
+- auto-enabled in `run_single_puzzle.py` when `opentelemetry`, `phoenix`, and `phoenix.otel` are all importable
+- disable with `[observability] enabled = false` in `sidequests.toml` or `~/.sidequests/config.toml`
+- override project with `PHOENIX_PROJECT=<name>` environment variable
+- override endpoint with `PHOENIX_ENDPOINT=<url>` environment variable
 
 ### Why This Matters
 
@@ -256,6 +310,14 @@ ARC_AGI/
 ├── pyproject.toml
 ├── run_single_puzzle.py
 ├── sidequest_mcp_client/
+│   ├── mcp_session.py
+│   ├── mcp_brain_client.py
+│   ├── readiness.py
+│   ├── observability.py
+│   └── test_compat/
+├── arc_runtime/
+│   ├── config.py
+│   └── llm.py
 ├── agents/
 │   └── arc3/
 ├── benchmarks/
@@ -265,6 +327,23 @@ ARC_AGI/
 │   └── arc3/
 └── tests/
 ```
+
+## Current Operational Status
+
+The architectural split is now real:
+
+- `ARC_AGI` owns solver, harness, evaluation, and ARC runtime behavior
+- `sidequests-brain` owns durable memory, retrieval, graph storage, and MCP tool implementation
+- production integration is MCP over stdio, not direct import
+
+Recent stabilization work also made the runtime more honest:
+
+- MCP/tool timeouts are classified separately from LLM timeouts
+- expensive MCP calls have explicit per-tool timeout budgets
+- local LLM startup fails early with actionable messages when runtime dependencies are missing
+
+That means the doc should be read as a description of the current production
+boundary, not the earlier extraction-in-progress state.
 
 ## Current Extraction Status
 

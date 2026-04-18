@@ -1326,6 +1326,10 @@ class PlanChunker:
         tested_count = int(action_coverage.get("tested_count", 0))
         untested_count = int(action_coverage.get("untested_count", max(available_total - tested_count, 0)))
         coverage_ratio = min(tested_count / available_total, 1.0)
+        # A010: detect when exploration has nothing left to find
+        coverage_saturated = (
+            action_coverage.get("initial_exploration_complete") or coverage_ratio >= 1.0
+        ) and untested_count == 0
 
         player_conf = float(player_role.confidence if player_role else 0.0)
         goal_conf = float(goal_role.confidence if goal_role else 0.0)
@@ -1402,7 +1406,7 @@ class PlanChunker:
         progress_decay_applied = 0.0
         pre_cap_score = score
 
-        if evidence_score < 0.3 and chunk_progress == 0.0 and steps_using_chunk >= 3:
+        if not coverage_saturated and evidence_score < 0.3 and chunk_progress == 0.0 and steps_using_chunk >= 3:
             # No empirical evidence that this plan works despite trying for 3+ steps
             max_allowed = max(0.4, evidence_score * 2)
             if score > max_allowed:
@@ -1413,25 +1417,35 @@ class PlanChunker:
         # B142: Progress-decay penalty — graduation degrades with consecutive failures
         if consecutive_zero_reward_steps > 0:
             decay = 0.05 * consecutive_zero_reward_steps
+            # A010: cap decay when saturated so structural confidence can still win
+            if coverage_saturated:
+                decay = min(0.25, decay)
             score = max(0.2, score - decay)
             progress_decay_applied = decay
             if graduation_capped_reason is None:
                 graduation_capped_reason = "progress_decay"
 
-        ready = (
-            geometry_high_conf
-            and (
-                # Normal path: exploration is healthy and complete enough
-                (
-                    (action_coverage.get("initial_exploration_complete") or coverage_ratio >= self.MIN_EXPLORATION_COMPLETENESS)
-                    and not action_coverage.get("top_two_low_value")
-                    and not context.get("loop_detected")
-                    and score >= self.GRADUATION_THRESHOLD
-                )
-                # B139 Emergency path: we are stuck but we know where to go
-                or (stuck_signals and score >= self.GRADUATION_THRESHOLD)
+        graduation_reason: Optional[str] = None
+        if geometry_high_conf and (
+            # Normal path: exploration is healthy and complete enough
+            (
+                (action_coverage.get("initial_exploration_complete") or coverage_ratio >= self.MIN_EXPLORATION_COMPLETENESS)
+                and not action_coverage.get("top_two_low_value")
+                and not context.get("loop_detected")
+                and score >= self.GRADUATION_THRESHOLD
             )
-        )
+            # B139 Emergency path: we are stuck but we know where to go
+            or (stuck_signals and score >= self.GRADUATION_THRESHOLD)
+            # A010: Coverage saturated + high confidence — no point in more exploration
+            or coverage_saturated
+        ):
+            ready = True
+            if coverage_saturated and score < self.GRADUATION_THRESHOLD:
+                graduation_reason = "coverage_saturated_high_confidence"
+            else:
+                graduation_reason = "standard_graduation"
+        else:
+            ready = False
 
         components = {
             "player_score": round(player_score, 3),
@@ -1481,12 +1495,14 @@ class PlanChunker:
             "ready": ready,
             "score": score,
             "reason": reason,
+            "graduation_reason": graduation_reason,
             "components": components,
             # B142: Evidence floor and progress-decay trace fields
             "graduation_capped_reason": graduation_capped_reason,
             "evidence_floor_applied": evidence_floor_applied,
             "progress_decay_applied": progress_decay_applied,
             "pre_cap_score": pre_cap_score,
+            "coverage_saturated": coverage_saturated,
         }
 
     def _map_actions_to_vectors(self, action_facts: List[Dict[str, Any]]) -> Dict[str, tuple[float, float]]:

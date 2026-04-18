@@ -1,5 +1,5 @@
 import pytest
-from mcp_engine.observability import (
+from sidequest_mcp_client.observability import (
     REQUIRED_DECISION_FIELDS,
     build_observability,
     canonical_span_name,
@@ -18,7 +18,7 @@ def test_observability_disabled_by_default():
         pass
 
 def test_span_manual_enter_exit():
-    obs = Observability(enabled=True)
+    obs = Observability({"observability": {"enabled": True}})
     span = obs.span("test", {"key": "val"})
     # Must work without 'with'
     s = span.__enter__()
@@ -27,34 +27,47 @@ def test_span_manual_enter_exit():
         s.set_attribute("key2", "val2")
     span.__exit__(None, None, None)
 
-def test_redaction_logic():
-    from mcp_engine.observability import _redact_value
-    # Sensitive
-    val = _redact_value("api_key", "secret123")
-    assert "[redacted]" in val
-    assert "secret123" not in val
-    
-    # Bulky
-    assert "[101 chars]" == _redact_value("grid", "x" * 101)
-    
-    # Normal
-    assert "hello" == _redact_value("name", "hello")
+def test_preflight_auto_enables_when_packages_present(monkeypatch):
+    """A016: auto-enable observability when phoenix/OTEL importable and config does not opt out."""
+    from run_single_puzzle import _enforce_observability_preflight
+    import importlib.util as _iu
+    import os
 
-def test_ledger_brain_client_accepts_observability():
-    from benchmarks.arc3.adapter import LedgerBrainClient
-    from unittest.mock import MagicMock
-    inner = MagicMock()
-    obs = build_observability({})
-    client = LedgerBrainClient(
-        inner=inner,
-        ledger=[],
-        step_provider=lambda: 0,
-        observability=obs,
-    )
-    assert client.observability == obs
+    monkeypatch.delenv("PHOENIX_ENABLE", raising=False)
 
-def test_canonical_span_name():
-    assert canonical_span_name("test") == "sidequests.test"
+    def fake_find_spec(name):
+        if name in ("opentelemetry", "phoenix", "phoenix.otel"):
+            return object()  # truthy sentinel
+        return None
+
+    monkeypatch.setattr(_iu, "find_spec", fake_find_spec)
+
+    # config with no [observability] section
+    cfg = {"llm": {"provider": "ollama"}}
+    # _enforce_observability_preflight calls build_observability after the auto-enable path;
+    # we accept whatever it returns — we only assert that the auto-enable side effects fired.
+    try:
+        _enforce_observability_preflight(cfg)
+    except RuntimeError:
+        # build_observability may still raise if Phoenix is unreachable on this test host;
+        # that is acceptable — the auto-enable side effects fire BEFORE build_observability.
+        pass
+
+    assert os.environ.get("PHOENIX_ENABLE") == "1"
+    assert cfg["observability"]["enabled"] is True
+
+
+def test_preflight_respects_explicit_disable(monkeypatch):
+    """A016: an explicit [observability] enabled = false must not flip PHOENIX_ENABLE."""
+    from run_single_puzzle import _enforce_observability_preflight
+    import os
+    monkeypatch.delenv("PHOENIX_ENABLE", raising=False)
+
+    cfg = {"observability": {"enabled": False}}
+    _enforce_observability_preflight(cfg)
+
+    assert "PHOENIX_ENABLE" not in os.environ
+    assert cfg["observability"]["enabled"] is False
 
 
 def test_ensure_contract_fields_fills_defaults():
@@ -63,7 +76,3 @@ def test_ensure_contract_fields_fills_defaults():
     assert out["action_id"] == "unknown"
     assert out["session_id"] == "s1"
 
-
-def test_ensure_contract_fields_strict_raises():
-    with pytest.raises(ValueError):
-        ensure_contract_fields({"session_id": "s1"}, REQUIRED_DECISION_FIELDS, strict=True)

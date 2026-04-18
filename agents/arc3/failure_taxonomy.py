@@ -18,6 +18,7 @@ class FailureTaxonomy(str, Enum):
     API_ERROR = "api_error"
     BUDGET_EXCEEDED = "budget_exceeded"
     STRATEGY_EXHAUSTED = "strategy_exhausted"
+    COVERAGE_SATURATED_ABORT = "coverage_saturated_abort"
     STUCK_IN_LOOP = "stuck_in_loop"
     MAX_STEPS_REACHED = "max_steps_reached"
     CRASH = "crash"
@@ -36,6 +37,8 @@ def classify_failure(
     budget_exhausted: bool = False,
     max_steps_reached: bool = False,
     loop_detected: bool = False,
+    graduation_reason: str | None = None,
+    coverage_saturated: bool = False,
 ) -> FailureTaxonomy:
     """Return the best-effort taxonomy bucket for a failed run.
 
@@ -51,7 +54,15 @@ def classify_failure(
             message_parts.append(type(exc).__name__)
         if final_state:
             message_parts.append(str(final_state))
+        if graduation_reason:
+            message_parts.append(str(graduation_reason))
         haystack = " | ".join(message_parts).lower()
+
+        # A015: detect when we learned everything but still couldn't reach goal.
+        # This is prioritized over budget/timeout/crash because it's a structural 
+        # environment-capacity signal.
+        if coverage_saturated or (graduation_reason and "coverage_saturated" in graduation_reason.lower()):
+            return FailureTaxonomy.COVERAGE_SATURATED_ABORT
 
         if budget_exhausted or (
             "budget" in haystack and ("exhaust" in haystack or "exceed" in haystack)

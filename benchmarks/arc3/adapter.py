@@ -182,7 +182,7 @@ class NoOpBrainClient(BrainClientProtocol):
 
 
 class LocalBrainClient(BrainClientProtocol):
-    """Deprecated compatibility shim kept only to fail fast if used."""
+    """Brain client that calls handlers directly (for augmented mode)."""
     @property
     def db(self):
         return self._db
@@ -190,10 +190,38 @@ class LocalBrainClient(BrainClientProtocol):
     def __init__(self, db, config):
         self._db = db
         self.config = config
-        raise RuntimeError(
-            "LocalBrainClient is no longer supported in production. "
-            "Use MCPBrainClient for production paths or add a test-only shim under sidequest_mcp_client/test_compat."
+        # Late import to avoid circular dependencies
+        # (Commented out A012: depends on missing mcp_engine; use MCPBrainClient instead)
+        """
+        from mcp_engine.tools import (
+            notify_turn, current_truth, register_plan, report_outcome,
+            recall_procedures,
+            recall_plans, recall_relevant_lessons, analogical_search,
+            branch_quest, register_task_graph, get_ready_tasks,
+            advance_task, fail_task, get_task_graph, # task graph tools
+            # optional lesson persistence handler (upsert_lesson is the tool name)
+            upsert_lesson as store_lesson,
+            # knowledge-gap handler (B193)
+            get_knowledge_gaps,
         )
+        self._notify_turn_handler = notify_turn
+        self._current_truth_handler = current_truth
+        self._register_plan_handler = register_plan
+        self._report_outcome_handler = report_outcome
+        self._recall_procedures_handler = recall_procedures
+        self._recall_plans_handler = recall_plans
+        self._recall_relevant_lessons_handler = recall_relevant_lessons
+        self._analogical_search_handler = analogical_search
+        self._branch_quest_handler = branch_quest
+        self._register_task_graph_handler = register_task_graph
+        self._get_ready_tasks_handler = get_ready_tasks
+        self._advance_task_handler = advance_task
+        self._fail_task_handler = fail_task
+        self._get_task_graph_handler = get_task_graph
+        self._store_lesson_handler = store_lesson
+        # Optional knowledge-gap handler (B193)
+        self._get_knowledge_gaps_handler = get_knowledge_gaps
+        """
 
     async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         params = {"role": role, "content": content, "session_id": session_id}
@@ -329,39 +357,12 @@ class LedgerBrainClient(BrainClientProtocol):
         self._event_seq = 0
         self.arc_event_timeline: List[dict] = []
 
-    @staticmethod
-    def _brain_operation(call_type: str) -> str:
-        mapping = {
-            "notify_turn": "brain.notify_turn",
-            "current_truth": "brain.current_truth",
-            "register_plan": "brain.register_plan",
-            "recall_plans": "brain.recall_plans",
-            "recall_lessons": "brain.recall_relevant_lessons",
-            "report_outcome": "brain.report_outcome",
-            "branch_quest": "brain.branch_quest",
-            "register_task_graph": "brain.task_graph.register",
-            "get_ready_tasks": "brain.task_graph.get_ready",
-            "advance_task": "brain.task_graph.advance",
-            "fail_task": "brain.task_graph.fail",
-            "get_task_graph": "brain.task_graph.get",
-            "recall_procedures": "brain.recall_procedures",
-            "upsert_lesson": "brain.upsert_lesson",
-            "analogical_search": "brain.analogical_search",
-            "get_knowledge_gaps": "brain.get_knowledge_gaps",
-        }
-        return mapping.get(call_type, f"brain.{call_type}")
-
     def _span_attributes(self, *, phase: str, mode: str, latency_ms: float, extra: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         attrs = {
             "phase": phase if phase != "unknown" else self.current_phase,
             "mode": mode,
             "latency_ms": round(latency_ms, 3),
             "step": self.step_provider(),
-            "agent.name": "ledger_brain_client",
-            "agent.role": "memory_adapter",
-            "emitter.module": "benchmarks.arc3.adapter",
-            "emitter.method": "LedgerBrainClient",
-            "trace.contract.version": "v1",
         }
         if extra:
             attrs.update(extra)
@@ -408,37 +409,6 @@ class LedgerBrainClient(BrainClientProtocol):
                 "received": arc_api_io.get("response", {}).get("received", True),
             }
         self.ledger.append(entry)
-        if self.observability and self.observability.enabled:
-            try:
-                span_attrs = self._span_attributes(
-                    phase=entry.get("phase", "unknown"),
-                    mode=mode,
-                    latency_ms=latency_ms,
-                    extra={
-                        "operation": self._brain_operation(call_type),
-                        "input_summary": entry.get("input_summary"),
-                        "result_summary": entry.get("result_summary"),
-                    },
-                )
-                with self.observability.span(canonical_span_name(self._brain_operation(call_type)), span_attrs):
-                    pass
-                self.observability.emit_structured_event(
-                    event_type="tool_call",
-                    operation=self._brain_operation(call_type),
-                    details={
-                        "phase": entry.get("phase"),
-                        "mode": mode,
-                        "step": entry.get("step"),
-                        "latency_ms": round(latency_ms, 3),
-                        "input_summary": entry.get("input_summary"),
-                    },
-                    result={
-                        "result_summary": entry.get("result_summary"),
-                    },
-                    elapsed_ms=latency_ms,
-                )
-            except Exception:
-                logger.debug("Failed to emit observability event for %s", call_type, exc_info=True)
 
     @staticmethod
     def _humanize_arc_operation(method: str, endpoint: str, request_payload: Any = None) -> str:
@@ -501,47 +471,6 @@ class LedgerBrainClient(BrainClientProtocol):
             "method": method,
             "endpoint": endpoint
         })
-
-        actual_status = http_status or (200 if received else None)
-        
-        if self.observability and self.observability.enabled:
-            try:
-                req_attrs = self._span_attributes(
-                    phase=phase,
-                    mode="write" if method.upper() != "GET" else "read",
-                    latency_ms=0.0,
-                    extra={
-                        "endpoint": endpoint,
-                        "method": method.upper(),
-                        "call_seq": self._arc_call_seq,
-                        "operation_label": operation_label,
-                    },
-                )
-                with self.observability.span(canonical_span_name("arc_api.request"), req_attrs):
-                    pass
-                resp_attrs = self._span_attributes(
-                    phase=phase,
-                    mode="read",
-                    latency_ms=latency_ms,
-                    extra={
-                        "endpoint": endpoint,
-                        "method": method.upper(),
-                        "call_seq": self._arc_call_seq,
-                        "http_status": actual_status if actual_status is not None else 0,
-                        "received": bool(received),
-                    },
-                )
-                with self.observability.span(canonical_span_name("arc_api.response"), resp_attrs) as span:
-                    if not received and error_details:
-                        span.add_event(
-                            "arc_api.error",
-                            {
-                                "error_type": error_details.get("error_type"),
-                                "error_message": str(error_details.get("error_message") or "")[:120],
-                            },
-                        )
-            except Exception:
-                logger.debug("Failed to emit ARC API spans", exc_info=True)
         
         # 2. Response Received Event
         self._event_seq += 1
@@ -550,6 +479,7 @@ class LedgerBrainClient(BrainClientProtocol):
         resp_elapsed_mmss = f"{int(resp_elapsed_ms // 60000):02d}:{int((resp_elapsed_ms % 60000) // 1000):02d}"
         
         summary = ""
+        actual_status = http_status or (200 if received else None)
         timeline_payload = self._summarize_arc_payload(response_payload) if received else (error_details if error_details else None)
         if received:
             summary = f"status {actual_status}"
@@ -616,58 +546,25 @@ class LedgerBrainClient(BrainClientProtocol):
     async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         import time
         start = time.time()
-        
-        ctx = (
-            self.observability.span(canonical_span_name("brain.notify_turn"), self._span_attributes(phase="unknown", mode="write", latency_ms=0))
-            if self.observability and self.observability.enabled
-            else nullcontext()
-        )
-        
-        with ctx as span:
-            resp = await self.inner.notify_turn(role=role, content=content, session_id=session_id, precomputed=precomputed)
-            latency = (time.time() - start) * 1000
-            if hasattr(span, "set_attributes"):
-                span.set_attributes({"latency_ms": round(latency, 3), "role": role})
-            
+        resp = await self.inner.notify_turn(role=role, content=content, session_id=session_id, precomputed=precomputed)
+        latency = (time.time() - start) * 1000
         self._record("unknown", "notify_turn", "write", content, self._safe_get(resp, "status", "ok"), latency)
         return resp
 
     async def current_truth(self, *, query: str, session_id: str, scope: str, limit: int) -> Mapping[str, Any]:
         import time
         start = time.time()
-        
-        ctx = (
-            self.observability.span(canonical_span_name("brain.current_truth"), self._span_attributes(phase="unknown", mode="read", latency_ms=0))
-            if self.observability and self.observability.enabled
-            else nullcontext()
-        )
-        
-        with ctx as span:
-            resp = await self.inner.current_truth(query=query, session_id=session_id, scope=scope, limit=limit)
-            latency = (time.time() - start) * 1000
-            results = self._safe_get(resp, "results", []) or []
-            if hasattr(span, "set_attributes"):
-                span.set_attributes({"latency_ms": round(latency, 3), "result_count": len(results)})
-            
+        resp = await self.inner.current_truth(query=query, session_id=session_id, scope=scope, limit=limit)
+        latency = (time.time() - start) * 1000
+        results = self._safe_get(resp, "results", []) or []
         self._record("unknown", "current_truth", "read", query, f"found {len(results)} items", latency)
         return resp
 
     async def register_plan(self, *, goal: str, steps: List[str], session_id: str) -> Mapping[str, Any]:
         import time
         start = time.time()
-        
-        ctx = (
-            self.observability.span(canonical_span_name("brain.register_plan"), self._span_attributes(phase="unknown", mode="write", latency_ms=0))
-            if self.observability and self.observability.enabled
-            else nullcontext()
-        )
-        
-        with ctx as span:
-            resp = await self.inner.register_plan(goal=goal, steps=steps, session_id=session_id)
-            latency = (time.time() - start) * 1000
-            if hasattr(span, "set_attributes"):
-                span.set_attributes({"latency_ms": round(latency, 3), "step_count": len(steps)})
-            
+        resp = await self.inner.register_plan(goal=goal, steps=steps, session_id=session_id)
+        latency = (time.time() - start) * 1000
         self._record("unknown", "register_plan", "write", f"goal={goal}, steps={len(steps)}", f"plan_id={self._safe_get(resp, 'plan_id')}", latency)
         return resp
 

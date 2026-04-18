@@ -159,6 +159,10 @@ class ARCOrchestrator:
         self._observability = build_observability(config if isinstance(config, dict) else {})
         self.cost_tracker = cost_tracker
         self._plan_id: str | None = None
+        self._last_registered_fingerprint: Optional[tuple] = None
+        self._last_registered_payload: Optional[dict] = None
+        self._last_observation_fingerprint: Optional[tuple] = None
+        self._last_llm_action: Optional[dict] = None
         self._reflex_context: dict | None = None
         self._plan_steps: List[str] = []
         self._step_history: List[dict] = []
@@ -200,6 +204,7 @@ class ARCOrchestrator:
         # B90: Retrieval triggering
         self._retrieval_triggered = False
         self._last_retrieval_step = -1
+        self._last_retrieval_kind_fingerprint: Dict[str, tuple[str, int]] = {}  # kind -> (query_hash, step)
         self._consecutive_no_progress_steps = 0
         self._blocked_actions: set[str] = set()
         self._action_fatigue: dict[str, int] = {}  # B149: action_id -> consecutive zero-reward count
@@ -1317,45 +1322,71 @@ class ARCOrchestrator:
 
         if should_retrieve:
             query = self._memory_query(observation)
-            truth_start = time.time()
-            truth = await self.brain.current_truth(
-                query=query, session_id=self.session_id, scope="branch", limit=5
-            )
-            truth_elapsed = (time.time() - truth_start) * 1000
-            self._emit_trace_event(
-                "operation",
-                "current_truth",
-                {"step": step, "query": query},
-                {"results": len(truth.get("results", []))},
-                truth_elapsed,
-            )
+            
+            # current_truth gating/dedup
+            if not self._retrieval_needed_for_prompt("current_truth"):
+                self._emit_trace_event("operation", "retrieval_gated", {"kind": "current_truth", "step": step}, {})
+                truth = {"results": []}
+            elif self._retrieval_dedup_check("current_truth", query, step):
+                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "current_truth", "step": step, "query": query}, {})
+                truth = self._memory_context.get("memories_raw", {"results": []}) if self._memory_context else {"results": []}
+            else:
+                truth_start = time.time()
+                truth = await self.brain.current_truth(
+                    query=query, session_id=self.session_id, scope="branch", limit=5
+                )
+                truth_elapsed = (time.time() - truth_start) * 1000
+                self._emit_trace_event(
+                    "operation",
+                    "current_truth",
+                    {"step": step, "query": query},
+                    {"results": len(truth.get("results", []))},
+                    truth_elapsed,
+                )
 
-            lessons_start = time.time()
-            lessons = await self.brain.recall_relevant_lessons(query=query, limit=4)
-            lessons_elapsed = (time.time() - lessons_start) * 1000
-            self._emit_trace_event(
-                "operation",
-                "recall_relevant_lessons",
-                {"step": step, "query": query},
-                {"results": len(lessons.get("lessons", []))},
-                lessons_elapsed,
-            )
+            # recall_relevant_lessons gating/dedup
+            if not self._retrieval_needed_for_prompt("recall_relevant_lessons"):
+                self._emit_trace_event("operation", "retrieval_gated", {"kind": "recall_relevant_lessons", "step": step}, {})
+                lessons = {"lessons": []}
+            elif self._retrieval_dedup_check("recall_relevant_lessons", query, step):
+                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "recall_relevant_lessons", "step": step, "query": query}, {})
+                lessons = self._memory_context.get("lessons_raw", {"lessons": []}) if self._memory_context else {"lessons": []}
+            else:
+                lessons_start = time.time()
+                lessons = await self.brain.recall_relevant_lessons(query=query, limit=4)
+                lessons_elapsed = (time.time() - lessons_start) * 1000
+                self._emit_trace_event(
+                    "operation",
+                    "recall_relevant_lessons",
+                    {"step": step, "query": query},
+                    {"results": len(lessons.get("lessons", []))},
+                    lessons_elapsed,
+                )
 
-            analog_start = time.time()
-            analogies = await self.brain.analogical_search(
-                query=query,
-                current_quest_id=observation.get("dataset_id", ""),
-                limit=3,
-                min_similarity=0.35,
-            )
-            analog_elapsed = (time.time() - analog_start) * 1000
-            self._emit_trace_event(
-                "operation",
-                "analogical_search",
-                {"step": step, "query": query},
-                {"results": len(analogies.get("results", []))},
-                analog_elapsed,
-            )
+            # analogical_search gating/dedup
+            if not self._retrieval_needed_for_prompt("analogical_search"):
+                self._emit_trace_event("operation", "retrieval_gated", {"kind": "analogical_search", "step": step}, {})
+                analogies = {"results": []}
+            elif self._retrieval_dedup_check("analogical_search", query, step):
+                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "analogical_search", "step": step, "query": query}, {})
+                analogies = self._memory_context.get("analogies_raw", {"results": []}) if self._memory_context else {"results": []}
+            else:
+                analog_start = time.time()
+                analogies = await self.brain.analogical_search(
+                    query=query,
+                    current_quest_id=observation.get("dataset_id", ""),
+                    limit=3,
+                    min_similarity=0.35,
+                )
+                analog_elapsed = (time.time() - analog_start) * 1000
+                self._emit_trace_event(
+                    "operation",
+                    "analogical_search",
+                    {"step": step, "query": query},
+                    {"results": len(analogies.get("results", []))},
+                    analog_elapsed,
+                )
+            
             # B89: Track retrieval payload sizes
             retrieval_payload = {
                 "memories_size": len(json.dumps(truth.get("results", []))),
@@ -1387,6 +1418,9 @@ class ARCOrchestrator:
                 "memories": truth.get("results", []),
                 "lessons": lessons.get("lessons", []),
                 "analogies": analogies.get("results", []),
+                "memories_raw": truth, # Stored for dedup reuse
+                "lessons_raw": lessons,
+                "analogies_raw": analogies,
                 "query": query,
                 "_retrieval_payload_size": retrieval_payload["total_size"],
                 "_triggered": True,
@@ -2088,13 +2122,35 @@ class ARCOrchestrator:
         reason_elapsed = (time.time() - reason_start) * 1000
         self._emit_trace_event("operation", "notify_turn[plan_reasoning]", {"content": reasoning_narrative}, {}, reason_elapsed)
         
-        register_start = time.time()
-        plan_payload = await self.brain.register_plan(
-            goal=goal, steps=self._plan_steps, session_id=self.session_id
+        # A011: Plan-registration idempotency
+        sc = self._solve_context or {}
+        active_chunk = sc.get("active_chunk") or {}
+        ch_desc = str(active_chunk.get("description", "fallback"))
+        vc = sc.get("victory_condition") or {}
+        vc_type = vc.get("type") if isinstance(vc, dict) else (getattr(vc, "condition_type", None).value if hasattr(vc, "condition_type") and hasattr(vc.condition_type, "value") else str(vc))
+        
+        fingerprint = (
+            goal,
+            tuple(self._plan_steps),
+            str(sc.get("archetype")),
+            str(vc_type),
+            ch_desc
         )
-        register_elapsed = (time.time() - register_start) * 1000
-        self._emit_trace_event("operation", "register_plan", {"goal": goal, "steps": len(self._plan_steps)}, {"plan_id": plan_payload.get("plan_id")}, register_elapsed)
-        self._plan_id = plan_payload.get("plan_id")
+        
+        if getattr(self, "_last_registered_fingerprint", None) == fingerprint and getattr(self, "_last_registered_payload", None):
+            self._emit_trace_event("operation", "register_plan", {"goal": goal, "steps": len(self._plan_steps), "idempotent": True}, {"plan_id": self._plan_id}, 0.0)
+            plan_payload = self._last_registered_payload
+        else:
+            register_start = time.time()
+            plan_payload = await self.brain.register_plan(
+                goal=goal, steps=self._plan_steps, session_id=self.session_id
+            )
+            register_elapsed = (time.time() - register_start) * 1000
+            self._emit_trace_event("operation", "register_plan", {"goal": goal, "steps": len(self._plan_steps)}, {"plan_id": plan_payload.get("plan_id")}, register_elapsed)
+            self._last_registered_fingerprint = fingerprint
+            self._last_registered_payload = plan_payload
+            self._plan_id = plan_payload.get("plan_id")
+
         self._reflex_context = plan_payload
         self._record_write_event(
             kind="register_plan",
@@ -2387,7 +2443,61 @@ class ARCOrchestrator:
             pass
 
         available_actions = observation.get("available_actions") or [f"ACTION{i}" for i in range(1, 8)]
+
+        # A013: Prompt-skip no-op short-circuit logic
+        hyp_ctx = self._hypothesis_context or {}
+        roles = (self._solve_context or {}).get("object_roles", {})
+        grounded_roles_sig = tuple(sorted([(cid, getattr(r, 'role', None).value if hasattr(getattr(r, 'role', None), 'value') else str(getattr(r, 'role', None))) for cid, r in roles.items()]))
         
+        current_fingerprint = (
+            observation.get("frame_hash"),
+            tuple(sorted(available_actions)),
+            grounded_roles_sig,
+            len(hyp_ctx.get("action_facts", []))
+        )
+        
+        # If fingerprint matches and we have a previous action, we can short-circuit
+        if self._last_observation_fingerprint == current_fingerprint and self._last_llm_action:
+            self._emit_trace_event(
+                "operation", 
+                "prompt_skip_noop", 
+                {"step": step_num, "reason": "identical observation and facts"}, 
+                {"action_id": self._last_llm_action.get("action_id")}
+            )
+            # Add a small skip notification to step history trace
+            self._record_write_event(
+                kind="prompt_skip",
+                summary="skipped LLM call (identical observation)",
+                detail={"action_id": self._last_llm_action.get("action_id")},
+                source_step=step_num
+            )
+            # Re-use the last cached action result (contains rationale etc)
+            action = dict(self._last_llm_action)
+            # Update the step count in history correctly
+            self._step_history.append({
+                "step": len(self._step_history) + 1,
+                "state_before": observation.get("state"),
+                "board_before": self._snapshot_for_trace(observation),
+                "solve_context": dict(self._solve_context) if self._solve_context else None,
+                "available_actions": list(available_actions),
+                "prompt": "(skipped: same as last step)",
+                "decision_flow": {
+                    "proposed_by": "short_circuit",
+                    "executed_by": "short_circuit",
+                    "candidate_action": action.get("action_id"),
+                    "executed_action": action.get("action_id"),
+                    "decision_source": "short_circuit",
+                },
+                "action_id": action.get("action_id"),
+                "x": action.get("x"),
+                "y": action.get("y"),
+                "rationale": f"[REUSED] {action.get('rationale')}",
+                "thinking_trace": action.get("thinking_trace", []),
+            })
+            return action
+
+        self._last_observation_fingerprint = current_fingerprint
+
         # B117: Use PromptPacket model
         packet = self.build_action_packet(
             observation=observation,
@@ -2633,6 +2743,9 @@ class ARCOrchestrator:
             "done": False,
             "prompt_tokens": prompt_tokens,
         })
+        # A013: cache the action for potential short-circuit in the next step
+        self._last_llm_action = dict(action)
+
         self._emit_trace_event(
             "phase_end",
             "act",
@@ -5081,6 +5194,58 @@ class ARCOrchestrator:
             },
         }
 
+    def _retrieval_needed_for_prompt(self, kind: str) -> bool:
+        """A012: Return True if the retrieved content for 'kind' will likely be rendered.
+        
+        Uses block_trace from prior step if available to know which blocks are active.
+        """
+        # Mapping kind to block types
+        kind_to_blocks = {
+            "current_truth": {"MEMORY", "ACTION_FACTS", "EXPLORATION_SUMMARY"},
+            "recall_relevant_lessons": {"MEMORY", "PATH_HYPOTHESES", "HYPOTHESIS"},
+            "analogical_search": {"MEMORY", "TRAINING_EXAMPLES"},
+            "recall_procedures": {"PLAN", "NAVIGATION"},
+        }
+        
+        target_blocks = kind_to_blocks.get(kind, set())
+        
+        # If no history yet, assume needed (bootstrap)
+        if not self._step_history:
+            return True
+            
+        # Check last prompt trace blocks
+        try:
+            # Look at the most recent snapshot in execution trace for prompt metadata
+            for event in reversed(self._execution_trace):
+                if event.get("event_type") == "operation" and event.get("operation") == "build_prompt":
+                    block_trace = event.get("result", {}).get("block_trace", [])
+                    if not block_trace: continue
+                    
+                    active_blocks = {b.get("type") for b in block_trace if not b.get("pruned")}
+                    if target_blocks.intersection(active_blocks):
+                        return True
+                    else:
+                        return False
+        except Exception:
+            pass
+            
+        return True # Default to needed if trace check fails
+
+    def _retrieval_dedup_check(self, kind: str, query: str, step: int) -> bool:
+        """A012: Return True if the exact same query for 'kind' was just performed."""
+        import hashlib
+        fingerprint = hashlib.sha256(query.encode()).hexdigest()
+        
+        last_fp, last_step = self._last_retrieval_kind_fingerprint.get(kind, (None, -1))
+        
+        if last_fp == fingerprint and (step - last_step) <= 1:
+            # Refresh last step so the sliding window moves forward
+            self._last_retrieval_kind_fingerprint[kind] = (fingerprint, step)
+            return True # Duplicate
+            
+        self._last_retrieval_kind_fingerprint[kind] = (fingerprint, step)
+        return False
+
     def _memory_query(self, observation: ARC3Observation) -> str:
         """B155: Build memory query from grid structural characteristics."""
         grid = observation.get("grid") or []
@@ -5315,12 +5480,29 @@ class ARCOrchestrator:
     def _format_action_fact_section(self, hyp_ctx: dict | None) -> List[str]:
         if not hyp_ctx:
             return []
+        
+        # A013: Aggregate and prioritize facts
+        facts = hyp_ctx.get("action_facts", [])
+        if not facts:
+            return []
+
+        # Sort facts: deterministic first, then by consistency, then by evidence count
+        def fact_sort_key(f):
+            priority = 0
+            if f.get("fact_type") == "deterministic_effect": priority = 2
+            elif f.get("fact_type") == "localized_change": priority = 1
+            return (priority, f.get("consistency", 0.0), f.get("evidence_count", 0))
+
+        sorted_facts = sorted(facts, key=fact_sort_key, reverse=True)
+        
         lines = []
-        for fact in hyp_ctx.get("action_facts", [])[: self.MAX_PROMPT_ACTIONS]:
+        for fact in sorted_facts[: self.MAX_PROMPT_ACTIONS]:
+            # Compact summary of the fact
             lines.append(
                 f"{fact.get('action')}: {fact.get('fact_type', 'unknown').upper()} "
-                f"(consistency {fact.get('consistency', 0.0):.2f}, value {fact.get('value_status', 'unknown')}, "
-                f"evidence {fact.get('evidence_count', 0)}): {fact.get('description')}"
+                f"(consistency {fact.get('consistency', 0.0):.2f}, "
+                f"evidence {fact.get('evidence_count', 0)}, "
+                f"value {fact.get('value_status', 'unknown')}): {fact.get('description')}"
             )
         return lines
 
@@ -5519,15 +5701,41 @@ class ARCOrchestrator:
     def _format_history_section(self, history: List[dict]) -> str:
         if not history:
             return "No steps taken yet."
-        entries = []
+        
+        # A013: Collapse adjacent identical rationales
+        compact_history = []
         for record in history[-self.MAX_PROMPT_HISTORY :]:
+            action_id = record.get("action_id")
+            rationale = self._truncate_text(record.get("rationale") or "", 120)
             reward = record.get("reward")
-            reward_text = f"reward {reward:.2f}" if isinstance(reward, float) else "reward pending"
-            entries.append(
-                f"Step {record['step']} → {record.get('action_id')} "
-                f"({self._truncate_text(record.get('rationale') or '', 120)}) · {reward_text}"
-            )
-        return "\n".join(entries)
+            reward_text = f"{reward:.2f}" if isinstance(reward, (float, int)) else "pending"
+            step = record["step"]
+            
+            entry = {
+                "action": action_id,
+                "rationale": rationale,
+                "reward": reward_text,
+                "steps": [step]
+            }
+            
+            if compact_history and compact_history[-1]["action"] == entry["action"] and compact_history[-1]["rationale"] == entry["rationale"] and compact_history[-1]["reward"] == entry["reward"]:
+                compact_history[-1]["steps"].append(step)
+            else:
+                compact_history.append(entry)
+
+        lines = []
+        for h in compact_history:
+            s_list = h["steps"]
+            if len(s_list) > 1:
+                step_range = f"Steps {s_list[0]}–{s_list[-1]}"
+                action_text = f"{h['action']} ×{len(s_list)}"
+            else:
+                step_range = f"Step {s_list[0]}"
+                action_text = h["action"]
+            
+            lines.append(f"{step_range} → {action_text} ({h['rationale']}) · reward {h['reward']}")
+            
+        return "\n".join(lines)
 
     def _format_observation_section(self, observation: ARC3Observation) -> str:
         grid = observation.get("grid", [])
@@ -5535,23 +5743,58 @@ class ARCOrchestrator:
         cols = len(grid[0]) if grid else 0
         colors = observation.get("colors", [])
         
-        # B120: Annotate color summary with roles
+        # A013: Fix goal-labeling bug using grounded roles from solve_context
+        sc = getattr(self, "_solve_context", {}) or {}
+        player_cid = None
+        goal_cid = None
+        
+        roles = sc.get("object_roles", {}) or {}
+        for cid, role_obj in roles.items():
+            if getattr(role_obj, "role", None) and hasattr(role_obj.role, "value"):
+                if role_obj.role.value == "player": player_cid = int(cid)
+                elif role_obj.role.value == "goal": goal_cid = int(cid)
+
         if colors:
             color_parts = []
             for c in colors[:6]:
-                cid = c["value"]
+                cid = int(c["value"])
                 part = f"{cid}:{c['count']}"
-                entity = self._entity_map.get(cid) if self._entity_map else None
-                if entity and entity["role"] != "unknown":
-                    part += f"({entity['role']})"
+                
+                labels = []
+                if cid == player_cid: labels.append("player")
+                if cid == goal_cid: labels.append("goal")
+                
+                # Fallback to entity_map if roles are not yet grounded
+                if not labels:
+                    entity = self._entity_map.get(cid) if self._entity_map else None
+                    if entity and entity["role"] != "unknown":
+                        labels.append(entity["role"])
+                
+                if labels:
+                    part += f"({'+'.join(labels)})"
                 color_parts.append(part)
             color_summary = ", ".join(color_parts)
         else:
             color_summary = "none"
 
+        # A013: Add grid delta summary
+        delta_summary = ""
+        if self._last_grid and grid:
+            from .grid_analysis import GridDiffEngine
+            try:
+                diff_engine = GridDiffEngine()
+                diff = diff_engine.diff_frames(self._last_grid, grid, "prev_step")
+                n_changed = diff.get("n_cells_changed", 0)
+                if n_changed == 0:
+                    delta_summary = " (no change from last step)"
+                else:
+                    delta_summary = f" ({n_changed} cells changed from last step)"
+            except Exception:
+                pass
+
         coarse_map = self._coarse_grid_summary(grid)
         return (
-            f"Grid: {rows}x{cols}\n"
+            f"Grid: {rows}x{cols}{delta_summary}\n"
             f"Top colors (value:count): {color_summary}\n"
             f"Frame hash: {observation.get('frame_hash', 'unknown')[:12]}\n"
             f"Coarse map (8x8 majority colors):\n{coarse_map}"

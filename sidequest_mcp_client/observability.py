@@ -1,15 +1,29 @@
 """Observability bridge for SideQuests helpers consumed by ARC_AGI.
 
-This module provides a very small, dependency-free observability shim so
-production ARC code can import `sidequest_mcp_client.observability` without
-pulling SideQuests internals into the runtime. It intentionally does not
-depend on `mcp_engine` at import time. If richer observability is required
-from SideQuests, that should be provided via MCP endpoints or a follow-up
-card in the SideQuests repo.
+This module provides a small observability shim that optionally integrates
+with Phoenix (OpenTelemetry) for live trace capturing.
 """
 
+import os
+import datetime
 from contextlib import AbstractContextManager
 from typing import Any, Mapping, Optional
+
+# OTEL imports (optional dependencies)
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    HAS_OTEL = True
+except ImportError:
+    HAS_OTEL = False
+    SERVICE_NAME = "service.name"
+    Resource = None
+    TracerProvider = None
+    BatchSpanProcessor = None
+    OTLPSpanExporter = None
 
 
 class _NoopSpan(AbstractContextManager):
@@ -22,22 +36,62 @@ class _NoopSpan(AbstractContextManager):
     def set_attribute(self, *args, **kwargs):
         return None
 
+    def set_attributes(self, attrs: Mapping[str, Any]):
+        return None
+
     def add_event(self, *args, **kwargs):
         return None
 
 
 class Observability:
-    """Minimal, dependency-free observability surface used by ARC.
+    """Observability surface with optional Phoenix OTEL support.
 
-    This intentionally implements only the tiny contract consumers expect: a
-    `span()` context manager. It is a noop implementation suitable for
-    production usage when a SideQuests-backed observability implementation
-    is not available.
+    Enabled when either:
+      - PHOENIX_ENABLE=1 is set in the environment, OR
+      - config["observability"]["enabled"] is True.
+
+    ARC smoke runs auto-enable this via run_single_puzzle.py when the
+    phoenix and opentelemetry packages are importable, unless the user
+    explicitly sets [observability] enabled = false in their config.
     """
 
-    enabled = False
+    def __init__(self, config: Optional[dict] = None):
+        self.config = config or {}
+        # Support both env and explicit config
+        self.enabled = str(os.environ.get("PHOENIX_ENABLE", "0")) == "1"
+        if not self.enabled:
+             self.enabled = bool(self.config.get("observability", {}).get("enabled", False))
+        
+        self._tracer = None
 
-    def span(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> _NoopSpan:
+        if self.enabled and HAS_OTEL:
+            endpoint = os.environ.get("PHOENIX_ENDPOINT", "http://127.0.0.1:6006/v1/traces")
+            # Canonical Phoenix project for ARC_AGI smoke runs; override via PHOENIX_PROJECT env.
+            project = os.environ.get("PHOENIX_PROJECT", "arc-agi-sidequests")
+            
+            try:
+                resource = Resource(attributes={SERVICE_NAME: project})
+                provider = TracerProvider(resource=resource)
+                processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+                provider.add_span_processor(processor)
+                
+                # Set the global tracer provider if not already set
+                if not isinstance(trace.get_tracer_provider(), TracerProvider):
+                    trace.set_tracer_provider(provider)
+                self._tracer = trace.get_tracer(__name__)
+            except Exception:
+                import logging
+                logging.getLogger("observability").exception("Failed to initialize OTEL/Phoenix tracer")
+                self.enabled = False
+        else:
+            if self.enabled and not HAS_OTEL:
+                import logging
+                logging.getLogger("observability").warning("PHOENIX_ENABLE=1 but opentelemetry-sdk not installed.")
+                self.enabled = False
+
+    def span(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> AbstractContextManager:
+        if self.enabled and self._tracer:
+            return self._tracer.start_as_current_span(name, attributes=attrs or {})
         return _NoopSpan()
 
     def emit_structured_event(self, *args, **kwargs) -> None:
@@ -49,20 +103,12 @@ REQUIRED_OUTCOME_FIELDS: list[str] = []
 
 
 def canonical_span_name(name: str) -> str:
-    """Normalize a span name into a canonical dotted form.
-
-    This mirrors the small transformation consumers expect; it deliberately
-    does not require SideQuests internals.
-    """
+    """Normalize a span name into a canonical dotted form."""
     return name.replace(" ", ".")
 
 
 def ensure_contract_fields(data: Mapping[str, Any], fields: list[str], strict: bool = False, defaults: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
-    """Return the input data as-is, simulating a satisfied contract.
-    
-    This no-op implementation ensures production code does not crash when
-    SideQuests-backed contract validation is unavailable.
-    """
+    """No-op contract validator."""
     res = dict(data)
     if defaults:
         for k, v in defaults.items():
@@ -71,10 +117,5 @@ def ensure_contract_fields(data: Mapping[str, Any], fields: list[str], strict: b
 
 
 def build_observability(config: Optional[dict] = None) -> Observability:
-    """Return a production-safe Observability implementation.
-
-    Avoids importing SideQuests internals so production code can import this
-    module safely. If a richer implementation is needed, create a SideQuests
-    MCP endpoint and add a follow-up card.
-    """
-    return Observability()
+    """Return a production-ready Observability implementation."""
+    return Observability(config)
