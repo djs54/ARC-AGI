@@ -18,6 +18,20 @@ def test_classify_failure_timeout():
     assert result is FailureTaxonomy.LLM_TIMEOUT
 
 
+def test_classify_failure_mcp_tool_timeout():
+    from sidequest_mcp_client.mcp_session import MCPTimeoutError
+    exc = MCPTimeoutError("timeout waiting for response to abc during tools/call:current_truth")
+    result = classify_failure(exc)
+    assert result is FailureTaxonomy.TOOL_TIMEOUT
+
+
+def test_classify_failure_mcp_general_timeout():
+    from sidequest_mcp_client.mcp_session import MCPTimeoutError
+    exc = MCPTimeoutError("timeout waiting for response during initialize")
+    result = classify_failure(exc)
+    assert result is FailureTaxonomy.TOOL_TIMEOUT
+
+
 def test_classify_failure_parse_error():
     err = json.JSONDecodeError("Expecting value", "{", 0)
     result = classify_failure(err)

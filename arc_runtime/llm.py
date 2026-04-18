@@ -55,8 +55,13 @@ class LLMClient:
         return await asyncio.to_thread(self.chat, messages)
 
 
-def create_llm_client(config: Dict[str, Any]) -> LLMClient | None:
-    """Return an ARC-owned OpenAI-compatible client or None if unavailable."""
+class LLMInitializationError(Exception):
+    """Raised when the configured LLM provider cannot be initialized."""
+    pass
+
+
+def create_llm_client(config: Dict[str, Any]) -> LLMClient:
+    """Return an ARC-owned OpenAI-compatible client or raise LLMInitializationError."""
     llm_cfg = config.get("llm", {})
     provider = str(llm_cfg.get("provider", "ollama")).lower()
     model = str(llm_cfg.get("model", "llama3.1:8b"))
@@ -70,7 +75,16 @@ def create_llm_client(config: Dict[str, Any]) -> LLMClient | None:
         client_options["max_retries"] = max_retries
 
     try:
-        from openai import OpenAI
+        if provider not in ("ollama", "openai", "anthropic", "google"):
+            raise LLMInitializationError(f"Unknown provider '{provider}'.")
+
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise LLMInitializationError(
+                f"The '{provider}' provider requires the 'openai' Python package.\n"
+                f"Fix: pip install openai>=1.50.0"
+            )
 
         if provider == "ollama":
             base_url = llm_cfg.get("base_url", "http://localhost:11434/v1")
@@ -79,24 +93,30 @@ def create_llm_client(config: Dict[str, Any]) -> LLMClient | None:
 
         if provider == "openai":
             api_key = llm_cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+            if not api_key:
+                raise LLMInitializationError("OpenAI provider selected but no API key provided (use llm.api_key or OPENAI_API_KEY env var).")
             client = OpenAI(api_key=api_key, **client_options)
             return LLMClient(client, model)
 
         if provider == "anthropic":
             base_url = llm_cfg.get("base_url", "https://api.anthropic.com/v1")
             api_key = llm_cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                raise LLMInitializationError("Anthropic provider selected but no API key provided (use llm.api_key or ANTHROPIC_API_KEY env var).")
             client = OpenAI(base_url=base_url, api_key=api_key, **client_options)
             return LLMClient(client, model)
 
         if provider == "google":
             base_url = llm_cfg.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai/")
             api_key = llm_cfg.get("api_key") or os.environ.get("GOOGLE_API_KEY", "")
+            if not api_key:
+                raise LLMInitializationError("Google provider selected but no API key provided (use llm.api_key or GOOGLE_API_KEY env var).")
             client = OpenAI(base_url=base_url, api_key=api_key, **client_options)
             return LLMClient(client, model)
 
-        print(f"[LLM] Unknown provider '{provider}'. Running without an LLM client.")
-        return None
+        raise LLMInitializationError(f"Unknown provider '{provider}'.")
+    except LLMInitializationError:
+        raise
     except Exception as exc:
-        print(f"[LLM] Could not initialize provider '{provider}': {exc}. Running without an LLM client.")
-        return None
+        raise LLMInitializationError(f"Could not initialize provider '{provider}': {exc}")
 

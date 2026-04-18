@@ -11,6 +11,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 from .mcp_session import MCPStdIOSession, MCPToolNotFound
+from .readiness import _cmd_from_env
 
 
 class MCPBrainClient:
@@ -23,11 +24,19 @@ class MCPBrainClient:
     def __init__(self, db: Optional[Any] = None, config: Optional[Dict[str, Any]] = None, cmd: Optional[List[str]] = None, session: Optional[MCPStdIOSession] = None):
         self.db = db
         self.config = config
-        self._cmd = cmd
+        self._cmd = cmd or _cmd_from_env()
         self._session = session or MCPStdIOSession(cmd=self._cmd)
         self._started = False
         self._initialized = False
         self._init_payload: Optional[Dict[str, Any]] = None
+        # B220: allow per-tool timeout overrides via config or explicit tool settings
+        self.timeouts = {
+            "current_truth": 15.0,  # expensive retrieval
+            "analogical_search": 10.0,
+            "recall_relevant_lessons": 10.0,
+            "register_plan": 15.0,  # slow DB write
+            "notify_turn": 10.0,    # ingestion can be slow
+        }
 
     async def start(self, cmd: Optional[List[str]] = None, startup_timeout: float = 3.0) -> None:
         if cmd is not None:
@@ -45,7 +54,7 @@ class MCPBrainClient:
     async def list_tools(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
         return await asyncio.to_thread(self._session.list_tools, timeout)
 
-    async def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None, timeout: float = 5.0) -> Dict[str, Any]:
+    async def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Dict[str, Any]:
         # Lazy start/initialize to preserve compatibility with code that
         # constructs clients without explicit startup.
         if not self._started:
@@ -56,7 +65,13 @@ class MCPBrainClient:
             except Exception:
                 # allow calls to proceed even if initialization payload is not needed
                 pass
-        return await asyncio.to_thread(self._session.call_tool, name, arguments or {}, timeout)
+        
+        # Use explicit timeout if provided, else fallback to per-tool override, else 5.0
+        final_timeout = timeout
+        if final_timeout is None:
+            final_timeout = self.timeouts.get(name, 5.0)
+
+        return await asyncio.to_thread(self._session.call_tool, name, arguments or {}, final_timeout)
 
     # --- ARC method-style wrappers ---
     async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -65,9 +80,9 @@ class MCPBrainClient:
             args["precomputed"] = precomputed
         return await self.call_tool("notify_turn", args)
 
-    async def current_truth(self, *, query: str, session_id: str, scope: str, limit: int) -> Dict[str, Any]:
+    async def current_truth(self, *, query: str, session_id: str, scope: str, limit: int, timeout: Optional[float] = None) -> Dict[str, Any]:
         args = {"query": query, "session_id": session_id, "scope": scope, "limit": limit}
-        return await self.call_tool("current_truth", args)
+        return await self.call_tool("current_truth", args, timeout=timeout)
 
     async def register_plan(self, *, goal: str, steps: List[str], session_id: str) -> Dict[str, Any]:
         args = {"goal": goal, "steps": steps, "session_id": session_id}

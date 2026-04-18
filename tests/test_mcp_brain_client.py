@@ -25,40 +25,41 @@ for line in sys.stdin:
         sys.stdout.write('NOT_JSON\n')
         sys.stdout.flush()
         continue
-    typ = msg.get('type')
+    method = msg.get('method')
     id = msg.get('id')
-    if typ == 'initialize':
-        resp = {'id': id, 'type': 'initialize_response', 'status': 'ok', 'payload': {'ready': True}}
+    if method == 'initialize':
+        resp = {'jsonrpc': '2.0', 'id': id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '0.1.0'}}}
         print(json.dumps(resp), flush=True)
-    elif typ == 'list_tools':
-        resp = {'id': id, 'type': 'list_tools_response', 'status': 'ok', 'payload': [
+    elif method == 'tools/list':
+        resp = {'jsonrpc': '2.0', 'id': id, 'result': {'tools': [
             {'name': 'notify_turn', 'schema': {}},
             {'name': 'current_truth', 'schema': {}},
             {'name': 'register_plan', 'schema': {}},
             {'name': 'report_outcome', 'schema': {}},
             {'name': 'recall_plans', 'schema': {}},
             {'name': 'analogical_search', 'schema': {}},
-        ]}
+        ]}}
         print(json.dumps(resp), flush=True)
-    elif typ == 'call_tool':
-        name = msg.get('name')
-        args = msg.get('arguments') or {}
+    elif method == 'tools/call':
+        params = msg.get('params') or {}
+        name = params.get('name')
+        args = params.get('arguments') or {}
         if name == 'notify_turn':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'status': 'accepted'}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'status': 'accepted'})}]}}), flush=True)
         elif name == 'current_truth':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'results': []}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'results': []})}]}}), flush=True)
         elif name == 'register_plan':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'plan_id': 'plan-1'}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'plan_id': 'plan-1'})}]}}), flush=True)
         elif name == 'report_outcome':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'updated': True}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'updated': True})}]}}), flush=True)
         elif name == 'recall_plans':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'plans': []}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'plans': []})}]}}), flush=True)
         elif name == 'analogical_search':
-            print(json.dumps({'id': id, 'status': 'ok', 'payload': {'results': []}}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'results': []})}]}}), flush=True)
         else:
-            print(json.dumps({'id': id, 'status': 'error', 'error': 'tool_not_found'}), flush=True)
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'Unknown method: ' + str(name)}}), flush=True)
     else:
-        print(json.dumps({'id': id, 'status': 'error', 'error': 'unknown'}), flush=True)
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'Unknown method: ' + str(method)}}), flush=True)
 """)
 
 

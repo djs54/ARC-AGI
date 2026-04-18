@@ -35,8 +35,13 @@ class Observability:
     is not available.
     """
 
+    enabled = False
+
     def span(self, name: str, attrs: Optional[Mapping[str, Any]] = None) -> _NoopSpan:
         return _NoopSpan()
+
+    def emit_structured_event(self, *args, **kwargs) -> None:
+        return None
 
 
 REQUIRED_DECISION_FIELDS: list[str] = []
@@ -52,11 +57,17 @@ def canonical_span_name(name: str) -> str:
     return name.replace(" ", ".")
 
 
-def ensure_contract_fields(decision: Mapping[str, Any], outcome: Mapping[str, Any]) -> bool:
-    """No-op validator used when SideQuests-backed contract checks are
-    unavailable. Returns True (contract satisfied) by default.
+def ensure_contract_fields(data: Mapping[str, Any], fields: list[str], strict: bool = False, defaults: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
+    """Return the input data as-is, simulating a satisfied contract.
+    
+    This no-op implementation ensures production code does not crash when
+    SideQuests-backed contract validation is unavailable.
     """
-    return True
+    res = dict(data)
+    if defaults:
+        for k, v in defaults.items():
+            res.setdefault(k, v)
+    return res
 
 
 def build_observability(config: Optional[dict] = None) -> Observability:

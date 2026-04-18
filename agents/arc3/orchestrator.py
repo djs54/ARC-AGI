@@ -967,17 +967,18 @@ class ARCOrchestrator:
                 for k, v in result_dict.items():
                     base_attrs[f"result.{k}"] = v
 
-                if operation.startswith(("brain.", "arc_api.", "agent.", "eval.", "monitor.")):
-                    span_name = operation
+                op_str = str(operation)
+                if op_str.startswith(("brain.", "arc_api.", "agent.", "eval.", "monitor.")):
+                    span_name = op_str
                 elif event_type in {"phase_start", "phase_end", "phase_transition", "agent_phase_transition"}:
-                    span_name = f"agent.phase.{operation}"
+                    span_name = f"agent.phase.{op_str}"
                 else:
-                    span_name = f"agent.operation.{operation}"
+                    span_name = f"agent.operation.{op_str}"
                 with self._observability.span(span_name, base_attrs):
                     pass
 
                 # Promote decision payloads into a dedicated child span for easier tree navigation.
-                if operation == "act" and event_type == "phase_end":
+                if op_str == "act" and event_type == "phase_end":
                     step_entry = (getattr(self, "_step_history", []) or [{}])[-1] or {}
                     decision_attrs = ensure_contract_fields({
                         "session_id": self.session_id,

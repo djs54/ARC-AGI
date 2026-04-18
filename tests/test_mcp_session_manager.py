@@ -28,25 +28,26 @@ for line in sys.stdin:
         sys.stdout.write("NOT_JSON\n")
         sys.stdout.flush()
         continue
-    typ = msg.get('type')
+    method = msg.get('method')
     id = msg.get('id')
-    if typ == 'initialize':
-        resp = {'id': id, 'type': 'initialize_response', 'status': 'ok', 'payload': {'ready': True}}
+    if method == 'initialize':
+        resp = {'jsonrpc': '2.0', 'id': id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '0.1.0'}}}
         print(json.dumps(resp), flush=True)
-    elif typ == 'list_tools':
-        resp = {'id': id, 'type': 'list_tools_response', 'status': 'ok', 'payload': [{'name': 'echo', 'schema': {}}, {'name': 'add', 'schema': {}}]}
+    elif method == 'tools/list':
+        resp = {'jsonrpc': '2.0', 'id': id, 'result': {'tools': [{'name': 'echo', 'schema': {}}, {'name': 'add', 'schema': {}}]}}
         print(json.dumps(resp), flush=True)
-    elif typ == 'call_tool':
-        name = msg.get('name')
-        args = msg.get('arguments')
+    elif method == 'tools/call':
+        params = msg.get('params') or {}
+        name = params.get('name')
+        args = params.get('arguments')
         if name == 'echo':
-            resp = {'id': id, 'type': 'call_tool_response', 'status': 'ok', 'payload': {'result': args}}
+            resp = {'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'result': args})}]}}
             print(json.dumps(resp), flush=True)
         else:
-            resp = {'id': id, 'type': 'call_tool_response', 'status': 'error', 'error': 'tool_not_found'}
+            resp = {'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'Unknown method: ' + str(name)}}
             print(json.dumps(resp), flush=True)
     else:
-        resp = {'id': id, 'type': 'unknown', 'status': 'error', 'error': 'unknown'}
+        resp = {'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'Unknown method: ' + str(method)}}
         print(json.dumps(resp), flush=True)
 """)
 
@@ -61,7 +62,7 @@ def test_initialize_list_and_call_success():
     s.start(cmd)
 
     payload = s.initialize(timeout=2.0)
-    assert isinstance(payload, dict) and payload.get("ready") is True
+    assert isinstance(payload, dict) and payload.get("serverInfo", {}).get("name") == "fake"
 
     tools = s.list_tools(timeout=2.0)
     assert any(t.get("name") == "echo" for t in tools)

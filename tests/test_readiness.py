@@ -22,14 +22,14 @@ for line in sys.stdin:
     except Exception:
         print('BAD', flush=True)
         continue
-    typ = msg.get('type')
+    method = msg.get('method')
     id = msg.get('id')
-    if typ == 'initialize':
-        print(json.dumps({'id': id, 'status': 'ok', 'payload': {'ready': True}}), flush=True)
-    elif typ == 'list_tools':
-        print(json.dumps({'id': id, 'status': 'ok', 'payload': [{'name': 'notify_turn'}, {'name': 'current_truth'}, {'name': 'register_plan'}, {'name': 'report_outcome'}, {'name': 'recall_plans'}]}), flush=True)
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '0.1.0'}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'tools': [{'name': 'notify_turn'}, {'name': 'current_truth'}, {'name': 'register_plan'}, {'name': 'report_outcome'}, {'name': 'recall_plans'}]}}), flush=True)
     else:
-        print(json.dumps({'id': id, 'status': 'error', 'error': 'unknown'}), flush=True)
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'unknown'}}), flush=True)
 """)
 
 

@@ -13,6 +13,7 @@ class FailureTaxonomy(str, Enum):
     """
 
     LLM_TIMEOUT = "llm_timeout"
+    TOOL_TIMEOUT = "tool_timeout"
     LLM_PARSE_ERROR = "llm_parse_error"
     API_ERROR = "api_error"
     BUDGET_EXCEEDED = "budget_exceeded"
@@ -47,6 +48,7 @@ def classify_failure(
             message_parts.append(str(error_message))
         if exc is not None:
             message_parts.append(str(exc))
+            message_parts.append(type(exc).__name__)
         if final_state:
             message_parts.append(str(final_state))
         haystack = " | ".join(message_parts).lower()
@@ -68,6 +70,8 @@ def classify_failure(
             "readtimeout",
             "connecttimeout",
         )):
+            if "tools/call:" in haystack or "mcptimeouterror" in haystack:
+                return FailureTaxonomy.TOOL_TIMEOUT
             return FailureTaxonomy.LLM_TIMEOUT
 
         if any(token in haystack for token in (

@@ -19,6 +19,7 @@ from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
 from sidequest_mcp_client.observability import build_observability
 from arc_runtime.config import load_config
+from arc_runtime.llm import create_llm_client, LLMInitializationError
 from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
 
 # Configuration paths
@@ -155,10 +156,19 @@ def _enforce_observability_preflight(config: dict) -> None:
         )
 
 
+def _enforce_llm_preflight(config: dict) -> None:
+    """Fail fast when configured LLM provider cannot be initialized."""
+    try:
+        create_llm_client(config)
+    except LLMInitializationError as exc:
+        raise RuntimeError(f"LLM preflight failed: {exc}")
+
+
 class SingleTaskRunner:
     def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None):
         resolved_config_path = Path(config_path) if config_path else (CONFIG_PATH if CONFIG_PATH.exists() else None)
         self.config = _apply_llm_overrides(load_config(resolved_config_path), llm_overrides)
+        _enforce_llm_preflight(self.config)
         _enforce_observability_preflight(self.config)
         self.db = None
         self.harness = None

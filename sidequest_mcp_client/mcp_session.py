@@ -73,25 +73,65 @@ class MCPStdIOSession:
         return self
 
     def initialize(self, timeout: float = 5.0) -> Dict[str, Any]:
-        resp = self._request({"type": "initialize"}, timeout=timeout)
-        if resp.get("status") == "ok":
-            return resp.get("payload", {})
+        resp = self._request(
+            {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {},
+            },
+            timeout=timeout,
+        )
+        if "result" in resp:
+            return resp.get("result", {})
         raise MCPError(resp)
 
     def list_tools(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
-        resp = self._request({"type": "list_tools"}, timeout=timeout)
-        if resp.get("status") == "ok":
-            return resp.get("payload", [])
+        resp = self._request(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "params": {},
+            },
+            timeout=timeout,
+        )
+        if "result" in resp:
+            return resp.get("result", {}).get("tools", [])
         raise MCPError(resp)
 
     def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None, timeout: float = 5.0) -> Dict[str, Any]:
-        resp = self._request({"type": "call_tool", "name": name, "arguments": arguments or {}}, timeout=timeout)
-        if resp.get("status") == "ok":
-            return resp.get("payload", {})
-        err = resp.get("error")
-        if err == "tool_not_found":
+        resp = self._request(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments or {},
+                },
+            },
+            timeout=timeout,
+        )
+        if "result" in resp:
+            return self._normalize_tool_result(resp.get("result", {}))
+        err = resp.get("error", {})
+        if err.get("code") == -32601:
             raise MCPToolNotFound(name)
         raise MCPError(resp)
+
+    def _normalize_tool_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        content = result.get("content")
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict):
+                text = first.get("text")
+                if isinstance(text, str):
+                    try:
+                        parsed = json.loads(text)
+                    except Exception:
+                        return {"text": text}
+                    if isinstance(parsed, dict):
+                        return parsed
+                    return {"value": parsed}
+        return result
 
     def _request(self, body: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
         if not self.proc or not self.proc.stdin or not self.proc.stdout:
@@ -101,6 +141,7 @@ class MCPStdIOSession:
         body = dict(body)
         body["id"] = req_id
         raw = json.dumps(body)
+        op_name = self._describe_operation(body)
 
         with self._lock:
             try:
@@ -146,7 +187,19 @@ class MCPStdIOSession:
                 if resp.get("id") == req_id or "id" not in resp:
                     return resp
 
-            raise MCPTimeoutError(f"timeout waiting for response to {req_id}")
+            raise MCPTimeoutError(f"timeout waiting for response to {req_id} during {op_name}")
+
+    def _describe_operation(self, body: Dict[str, Any]) -> str:
+        method = body.get("method")
+        if method == "tools/call":
+            params = body.get("params")
+            if isinstance(params, dict):
+                tool_name = params.get("name")
+                if isinstance(tool_name, str) and tool_name:
+                    return f"tools/call:{tool_name}"
+        if isinstance(method, str) and method:
+            return method
+        return "unknown_operation"
 
     def close(self, timeout: float = 2.0) -> None:
         if not self.proc:
