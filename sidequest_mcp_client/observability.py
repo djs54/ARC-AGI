@@ -70,7 +70,10 @@ class Observability:
             project = os.environ.get("PHOENIX_PROJECT", "ARC-AGI")
             
             try:
-                resource = Resource(attributes={SERVICE_NAME: project})
+                resource = Resource(attributes={
+                    SERVICE_NAME: project,
+                    "openinference.project.name": project
+                })
                 provider = TracerProvider(resource=resource)
                 processor = SimpleSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
                 provider.add_span_processor(processor)
