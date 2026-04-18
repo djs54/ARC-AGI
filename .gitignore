@@ -8,3 +8,5 @@ submission_results*.jsonl
 agent_execution_trace.json
 master_timeline.json
 
+.arc/
+benchmarks/results/
