@@ -83,9 +83,8 @@ def test_ensure_contract_fields_fills_defaults():
 
 def test_preflight_auto_enable_soft_fails_on_phoenix_unreachable(monkeypatch):
     """A022: auto-enable path must not raise when Phoenix cannot initialize."""
-    from run_single_puzzle import _enforce_observability_preflight
+    import run_single_puzzle as rsp
     import importlib.util as _iu
-    import sidequest_mcp_client.observability as obs_mod
     import os
 
     monkeypatch.delenv("PHOENIX_ENABLE", raising=False)
@@ -100,11 +99,11 @@ def test_preflight_auto_enable_soft_fails_on_phoenix_unreachable(monkeypatch):
     class _Broken:
         enabled = False
 
-    monkeypatch.setattr(obs_mod, "build_observability", lambda cfg: _Broken())
+    monkeypatch.setattr(rsp, "build_observability", lambda cfg: _Broken())
 
     cfg = {"llm": {}}
     # Should not raise when auto-enabled and build_observability reports disabled
-    _enforce_observability_preflight(cfg)
+    rsp._enforce_observability_preflight(cfg)
 
     assert cfg.get("observability", {}).get("enabled") is False
     assert "PHOENIX_ENABLE" not in os.environ
