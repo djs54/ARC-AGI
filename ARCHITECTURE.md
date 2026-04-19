@@ -282,6 +282,10 @@ decision sources, and it does not fire when the active chunk already calls
 for an untested action next. It emits `guard_untested_probe` and
 `exploration_coverage_snapshot` trace events for auditability.
 
+The `exploration_coverage_snapshot` event fires once per step at PERCEIVE
+phase entry, guarded by `_last_coverage_snapshot_step` to prevent duplicate
+emission within a step (A025).
+
 ### Phase 2: Goal-Directed Solving
 
 Goal: turn exploration evidence into a goal-directed policy.

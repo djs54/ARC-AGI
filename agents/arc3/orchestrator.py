@@ -212,6 +212,10 @@ class ARCOrchestrator:
         # A023: count of times the untested-probe guard fired in this run,
         # for test assertions and operator visibility.
         self._untested_probes_forced_in_run: int = 0
+        # A025: guard against duplicate coverage-snapshot emission within a single step.
+        # None means "no snapshot emitted yet this puzzle"; otherwise holds the last
+        # step number that emitted a snapshot.
+        self._last_coverage_snapshot_step: Optional[int] = None
         self._blocked_actions: set[str] = set()
         self._action_fatigue: dict[str, int] = {}  # B149: action_id -> consecutive zero-reward count
         self._forced_exploration_count = 0  # B154
@@ -1034,6 +1038,37 @@ class ARCOrchestrator:
         except Exception:
             logger.debug("Observability event emission failed", exc_info=True)
 
+    def _emit_coverage_snapshot(self) -> None:
+        """A025: Emit exploration_coverage_snapshot once-per-distinct-step.
+
+        Uses `len(self._step_history)` as the canonical step counter and
+        `_last_coverage_snapshot_step` to prevent duplicate emits within a
+        single runtime step (e.g., PERCEIVE re-entry during REPLAN loops).
+        """
+        try:
+            coverage = (self._hypothesis_context or {}).get("action_coverage") or {}
+            tested = sorted(
+                a for a in getattr(self, "_available_actions", [])
+                if a not in (coverage.get("untested_actions") or [])
+            )
+            untested = sorted(coverage.get("untested_actions") or [])
+            initial_exploration_complete = bool(coverage.get("initial_exploration_complete"))
+            step = len(getattr(self, "_step_history", []))
+            if self._last_coverage_snapshot_step != step:
+                self._emit_trace_event(
+                    "operation",
+                    "exploration_coverage_snapshot",
+                    {"step": step},
+                    {
+                        "tested": tested,
+                        "untested": untested,
+                        "initial_exploration_complete": initial_exploration_complete,
+                    },
+                )
+                self._last_coverage_snapshot_step = step
+        except Exception:
+            pass
+
     def _handle_notify_turn_response(self, response: dict | None, step: int | None = None) -> None:
         """Parse `proactive_context` from notify_turn responses (B198).
 
@@ -1205,6 +1240,12 @@ class ARCOrchestrator:
                 "state": observation.get("state"),
             },
         )
+
+        # A025: emit per-step exploration coverage snapshot at PERCEIVE entry
+        try:
+            self._emit_coverage_snapshot()
+        except Exception:
+            pass
 
         # Feed puzzle structure into SideQuests (raw → short-term → entities via consolidation)
         structure_summary = self._summarize_puzzle_structure(observation)
@@ -2117,28 +2158,7 @@ class ARCOrchestrator:
         )
         draft_elapsed = (time.time() - draft_start) * 1000
         self._emit_trace_event("operation", "draft_plan_steps", {}, {"steps_count": len(self._plan_steps)}, draft_elapsed)
-        # A023: emit a per-step exploration coverage snapshot for auditability
-        try:
-            coverage = (self._hypothesis_context or {}).get("action_coverage") or {}
-            tested = sorted(
-                a for a in getattr(self, "_available_actions", [])
-                if a not in (coverage.get("untested_actions") or [])
-            )
-            untested = sorted(coverage.get("untested_actions") or [])
-            initial_exploration_complete = bool(coverage.get("initial_exploration_complete"))
-            step = len(self._step_history)
-            self._emit_trace_event(
-                "operation",
-                "exploration_coverage_snapshot",
-                {"step": step},
-                {
-                    "tested": tested,
-                    "untested": untested,
-                    "initial_exploration_complete": initial_exploration_complete,
-                },
-            )
-        except Exception:
-            pass
+        # A025: per-step coverage snapshot relocated to PERCEIVE phase entry
         
         # B131: Emit reasoning trace explaining plan strategy
         sc = self._solve_context
@@ -6085,6 +6105,7 @@ class ARCOrchestrator:
         self._plan_steps = []
         self._consecutive_no_progress_steps = 0
         self._untested_probes_forced_in_run = 0
+        self._last_coverage_snapshot_step = None
         self._blocked_actions = set()
         self._exploitation_switch_budget = 2
         self._forced_exploration_count = 0

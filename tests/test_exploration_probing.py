@@ -22,6 +22,8 @@ def _make_orchestrator():
     orch._forced_exploration_count = 0
     orch._exploration_budget_multiplier = 1.0
     orch._total_forced_exploration = 0
+    orch._step_history = []
+    orch._last_coverage_snapshot_step = None
     return orch
 
 
@@ -87,3 +89,35 @@ def test_guard_yields_to_autopilot():
     )
     assert result["action_id"] == "ACTION1"
     assert orch._untested_probes_forced_in_run == 0
+
+
+def test_coverage_snapshot_fires_once_per_step():
+    """A025: coverage snapshot must fire exactly once per distinct step number.
+
+    Simulate PERCEIVE re-entry on the same step and ensure only one snapshot
+    is emitted per distinct step.
+    """
+    orch = _make_orchestrator()
+    orch._hypothesis_context = {
+        "action_coverage": {"untested_actions": ["ACTION2", "ACTION3"]},
+    }
+    orch._available_actions = ["ACTION1", "ACTION2", "ACTION3"]
+
+    emitted = []
+    def _collector(event_type, op, details, result=None, elapsed=None):
+        if op == "exploration_coverage_snapshot":
+            emitted.append({"op": op, "step": (details or {}).get("step")})
+    orch._emit_trace_event = _collector
+
+    # Simulate 3 distinct steps, with the first step re-entering PERCEIVE twice
+    orch._step_history = ["s0"]
+    orch._emit_coverage_snapshot()
+    orch._step_history = ["s0"]
+    orch._emit_coverage_snapshot()  # re-entry — should be skipped
+    orch._step_history = ["s0", "s1"]
+    orch._emit_coverage_snapshot()
+    orch._step_history = ["s0", "s1", "s2"]
+    orch._emit_coverage_snapshot()
+
+    steps = [e["step"] for e in emitted]
+    assert steps == [1, 2, 3], f"expected one emit per distinct step, got {steps}"
