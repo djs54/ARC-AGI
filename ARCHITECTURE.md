@@ -109,6 +109,30 @@ Production ARC code MUST NOT directly import SideQuests internals (for example
 above. If a test still needs direct-import compatibility, that helper must live
 under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 
+Adapter ownership
+
+The MCP stdio adapter that serves this seam — the binary `SIDEQUESTS_MCP_CMD`
+points at — lives in `sidequests-brain/sidequests/adapters/mcp_server.py`, not
+in this repo. It is a brain-side artifact: it imports the unix-socket path,
+offline-queue format, and git-context detection from the `sidequests` package,
+and bridges MCP stdio JSON-RPC to the brain daemon at `~/.sidequests/brain.sock`.
+`ARC_AGI` must not vendor or reimplement it. Other MCP clients (Smithery,
+Claude Desktop, Cursor) connect to the same adapter through their own
+`SIDEQUESTS_MCP_CMD`-equivalent configuration.
+
+Operator setup
+
+From inside `ARC_AGI/`, point the env var at the sibling repo's venv + adapter:
+
+```bash
+export SIDEQUESTS_MCP_CMD="../sidequests-brain/.venv/bin/python ../sidequests-brain/sidequests/adapters/mcp_server.py"
+```
+
+The brain daemon (socket at `~/.sidequests/brain.sock`) must already be
+running. `check_mcp_readiness` starts the adapter as a subprocess, performs
+the MCP `initialize` + `tools/list` handshake, and fails fast with a
+`ReadinessError` if the adapter or the brain is unavailable.
+
 ## System Overview
 
 ```

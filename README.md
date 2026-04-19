@@ -42,6 +42,8 @@ That means the intended relationship is:
 
 For production (v1) the canonical seam between `ARC_AGI` and SideQuests is MCP over stdio. Production code now uses only the MCP-facing client modules in `sidequest_mcp_client/` (`mcp_brain_client`, `mcp_session`, `readiness`, `observability`). Any direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` for tests only. Production code should not rely on direct imports of `mcp_engine.*` or other SideQuests internals.
 
+The MCP stdio adapter that serves this seam lives in the sibling `sidequests-brain` repo at `sidequests/adapters/mcp_server.py`. `ARC_AGI` is a pure consumer — it spawns the adapter as a subprocess at runtime via the `SIDEQUESTS_MCP_CMD` environment variable. Do not vendor the adapter into this repo: it imports brain internals (unix-socket path, offline-queue format) and is shared with other MCP clients (Smithery, Claude Desktop, Cursor).
+
 ## Local Development
 
 From inside `ARC_AGI/`, the intended setup is:
@@ -53,6 +55,17 @@ pytest
 ```
 
 If `sidequests-brain` is published where you want to consume it from, you can install that package instead of using the parent path.
+
+### Running a smoke
+
+Point `SIDEQUESTS_MCP_CMD` at the sibling repo's adapter, then run the live smoke:
+
+```bash
+export SIDEQUESTS_MCP_CMD="../sidequests-brain/.venv/bin/python ../sidequests-brain/sidequests/adapters/mcp_server.py"
+PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
+```
+
+`--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.sidequests/brain.sock`).
 
 ## Current Status
 
