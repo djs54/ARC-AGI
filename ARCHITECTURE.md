@@ -219,6 +219,14 @@ selection instead of treating every stall as a generic crash.
 - `rebuild_route_from_saturation` → coverage saturated and geometry known → ROUTE (A010 has already graduated the chunker)
 - `default` → no evidence gate fired → ROUTE
 
+A011 covers only the orchestrator-side `register_plan`. The solver has two
+additional register paths (`_register_chunk_plan`, `_register_solve_plan`) which
+A024 extends with the same fingerprint semantics:
+`(plan_type, goal, tuple(steps), archetype, vc_type, chunk_desc_or_None)`.
+Chunk descriptions are normalized (trailing "(step N)" parentheticals are
+stripped) before entering the fingerprint so that cosmetic step-ordinal
+rewording does not defeat dedup.
+
 ### Phase 1: Exploration / Modeling
 
 Goal: learn what the puzzle environment does before overcommitting to a solve theory.

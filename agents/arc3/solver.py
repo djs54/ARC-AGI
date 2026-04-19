@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import json
 import time
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
@@ -1840,6 +1841,10 @@ class SolveEngine:
         self._role_resolution_notes: List[str] = []
         self._last_registered_top_plan: Optional[Dict[str, Any]] = None
         self._last_registered_chunk_plan: Optional[Dict[str, Any]] = None
+        # A024: fingerprint-based idempotency cache (mirrors orchestrator A011 semantics)
+        self._last_registered_top_fingerprint: Optional[tuple] = None
+        self._last_registered_chunk_fingerprint: Optional[tuple] = None
+        self._last_registered_chunk_plan_id: Optional[str] = None
         self._last_graduation_reevaluation: Dict[str, Any] = {}
         self._plateau_locked_family: Optional[str] = None
         self._plateau_active: bool = False
@@ -3373,6 +3378,7 @@ class SolveEngine:
         plan_type: str,  # "top" | "chunk"
         goal: str,
         steps: List[str],
+        chunk_desc: Optional[str] = None,
         force: bool = False,
     ) -> bool:
         """B137: Check if a plan has materially changed.
@@ -3388,17 +3394,40 @@ class SolveEngine:
         if force:
             return True
 
-        last_plan = (
-            self._last_registered_top_plan if plan_type == "top"
-            else self._last_registered_chunk_plan
+        # A024: Use fingerprint-based comparison to determine idempotency.
+        fingerprint = self._plan_fingerprint(plan_type, goal, steps, chunk_desc)
+        last_fp = (
+            self._last_registered_top_fingerprint if plan_type == "top"
+            else self._last_registered_chunk_fingerprint
         )
+        return last_fp != fingerprint
 
-        if last_plan is None:
-            return True
 
-        # Compare goal and steps
-        return (last_plan.get("goal") != goal or
-                last_plan.get("steps") != steps)
+    def _plan_fingerprint(
+        self,
+        plan_type: str,
+        goal: str,
+        steps: List[str],
+        chunk_desc: Optional[str] = None,
+    ) -> tuple:
+        """A024: Build the idempotency fingerprint for a register_plan call.
+
+        Mirrors the orchestrator-side schema so both sides dedupe with identical semantics.
+        """
+        archetype_str = str(getattr(self._archetype, "value", self._archetype or "unknown"))
+        vc = self._victory_condition
+        if vc is not None:
+            vc_type_str = str(getattr(vc.condition_type, "value", vc.condition_type))
+        else:
+            vc_type_str = "unknown"
+        return (
+            plan_type,
+            goal,
+            tuple(steps or []),
+            archetype_str,
+            vc_type_str,
+            chunk_desc if plan_type == "chunk" else None,
+        )
 
     async def _register_chunk_plan(self, chunk: PlanChunk, step: int = 0) -> None:
         """B109: Register an active chunk as a plan in SideQuests.
@@ -3407,19 +3436,43 @@ class SolveEngine:
         B138: Emits trace events for solve-internal brain I/O.
         """
         # B137: Check if plan has changed before registering
+        steps_list = chunk.estimated_actions or ["Execute strategy toward goal"]
+        # A024: normalize trailing '(step N)' annotations so cosmetic rewording
+        # does not defeat plan deduplication.
+        goal_norm = re.sub(r"\s*\(step\s+\d+\)\s*$", "", chunk.description).strip()
+
+        fingerprint = self._plan_fingerprint(
+            plan_type="chunk",
+            goal=goal_norm,
+            steps=steps_list,
+            chunk_desc=goal_norm,
+        )
+
         if not self._plan_changed(
             plan_type="chunk",
-            goal=chunk.description,
-            steps=chunk.estimated_actions or ["Execute strategy toward goal"],
+            goal=goal_norm,
+            steps=steps_list,
+            chunk_desc=goal_norm,
         ):
-            logger.debug("Skipping chunk plan registration (identical to last): %s", chunk.description)
+            logger.debug("Skipping chunk plan registration (identical fingerprint): %s", chunk.description)
+            # A024: reuse prior plan_id so downstream code still has a valid id
+            if self._last_registered_chunk_plan_id:
+                chunk.plan_id = self._last_registered_chunk_plan_id
+            # A024 dedup hit trace event
+            self._trace(
+                "operation",
+                "plan_registration_dedup_hit",
+                {"plan_type": "chunk", "fingerprint": list(fingerprint)},
+                {"reused_plan_id": self._last_registered_chunk_plan_id},
+                0.0,
+            )
             # Emit trace event for audit trail
             try:
                 await self.brain.trace_event(
                     event_type="plan_registration_skipped",
                     metadata={
                         "plan_type": "chunk",
-                        "reason": "identical_to_last_registered",
+                        "reason": "identical_fingerprint",
                         "chunk_description": chunk.description,
                     },
                 )
@@ -3429,7 +3482,6 @@ class SolveEngine:
 
         try:
             # B138: Trace register_plan call
-            steps_list = chunk.estimated_actions or ["Execute strategy toward goal"]
             self._trace("solve_register_plan", "register_plan", {
                 "step": step,
                 "plan_type": "chunk",
@@ -3444,7 +3496,10 @@ class SolveEngine:
             )
             _elapsed = (time.perf_counter() - _t0) * 1000
             chunk.plan_id = plan_payload.get("plan_id")
-            # B137: Cache the registered plan
+            # A024: cache fingerprint + plan_id for reuse
+            self._last_registered_chunk_fingerprint = fingerprint
+            self._last_registered_chunk_plan_id = chunk.plan_id
+            # Legacy dict cache (kept to minimize diff surface)
             self._last_registered_chunk_plan = {
                 "goal": chunk.description,
                 "steps": steps_list,
@@ -3525,6 +3580,10 @@ class SolveEngine:
         # B137: Reset plan tracking to allow fresh registrations on retry
         self._last_registered_top_plan = None
         self._last_registered_chunk_plan = None
+        # A024: reset fingerprint-based caches
+        self._last_registered_top_fingerprint = None
+        self._last_registered_chunk_fingerprint = None
+        self._last_registered_chunk_plan_id = None
         self._last_graduation_reevaluation = {}
         self.dissonance_detector.reset_chunk()
         self.dissonance_detector._zero_progress_streak = 0
@@ -3741,20 +3800,30 @@ class SolveEngine:
             "Execute and revise chunked solve path",
         ]
 
-        # B137: Check if plan has changed before registering
-        if not self._plan_changed(
+        # A024: fingerprint-based dedup for top-level solve plan
+        fingerprint = self._plan_fingerprint(
             plan_type="top",
             goal=goal,
             steps=steps,
-        ):
-            logger.debug("Skipping solve plan registration (identical to last)")
+        )
+
+        if not self._plan_changed(plan_type="top", goal=goal, steps=steps):
+            logger.debug("Skipping solve plan registration (identical fingerprint)")
+            # A024 dedup hit trace event
+            self._trace(
+                "operation",
+                "plan_registration_dedup_hit",
+                {"plan_type": "top", "fingerprint": list(fingerprint)},
+                {"reused_plan_id": self._solve_plan_id},
+                0.0,
+            )
             # Emit trace event for audit trail
             try:
                 await self.brain.trace_event(
                     event_type="plan_registration_skipped",
                     metadata={
                         "plan_type": "top",
-                        "reason": "identical_to_last_registered",
+                        "reason": "identical_fingerprint",
                         "goal": goal,
                     },
                 )
@@ -3778,7 +3847,9 @@ class SolveEngine:
             )
             _elapsed = (time.perf_counter() - _t0) * 1000
             self._solve_plan_id = plan_payload.get("plan_id")
-            # B137: Cache the registered plan
+            # A024: cache fingerprint
+            self._last_registered_top_fingerprint = fingerprint
+            # Legacy dict cache (kept to minimize diff surface)
             self._last_registered_top_plan = {
                 "goal": goal,
                 "steps": steps,
