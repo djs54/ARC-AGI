@@ -209,6 +209,9 @@ class ARCOrchestrator:
         self._last_retrieval_step = -1
         self._last_retrieval_kind_fingerprint: Dict[str, tuple[str, int]] = {}  # kind -> (query_hash, step)
         self._consecutive_no_progress_steps = 0
+        # A023: count of times the untested-probe guard fired in this run,
+        # for test assertions and operator visibility.
+        self._untested_probes_forced_in_run: int = 0
         self._blocked_actions: set[str] = set()
         self._action_fatigue: dict[str, int] = {}  # B149: action_id -> consecutive zero-reward count
         self._forced_exploration_count = 0  # B154
@@ -2114,6 +2117,28 @@ class ARCOrchestrator:
         )
         draft_elapsed = (time.time() - draft_start) * 1000
         self._emit_trace_event("operation", "draft_plan_steps", {}, {"steps_count": len(self._plan_steps)}, draft_elapsed)
+        # A023: emit a per-step exploration coverage snapshot for auditability
+        try:
+            coverage = (self._hypothesis_context or {}).get("action_coverage") or {}
+            tested = sorted(
+                a for a in getattr(self, "_available_actions", [])
+                if a not in (coverage.get("untested_actions") or [])
+            )
+            untested = sorted(coverage.get("untested_actions") or [])
+            initial_exploration_complete = bool(coverage.get("initial_exploration_complete"))
+            step = len(self._step_history)
+            self._emit_trace_event(
+                "operation",
+                "exploration_coverage_snapshot",
+                {"step": step},
+                {
+                    "tested": tested,
+                    "untested": untested,
+                    "initial_exploration_complete": initial_exploration_complete,
+                },
+            )
+        except Exception:
+            pass
         
         # B131: Emit reasoning trace explaining plan strategy
         sc = self._solve_context
@@ -4600,11 +4625,62 @@ class ARCOrchestrator:
         active_chunk = (self._solve_context or {}).get("active_chunk")
         skip_chunk_enforcement = False  # Set True below for fallback decisions
 
+        # A023: proactive untested-action probe.
+        #
+        # Fires when the agent has not made progress for two or more consecutive
+        # steps AND at least one available action has never been tried. Takes
+        # precedence over the LLM's ranked pick, the B209 route-execute contract,
+        # and plateau-mode selection — but yields to autopilot and plateau_override
+        # decision sources which carry higher authority.
+        if (
+            unexplored
+            and self._consecutive_no_progress_steps >= 2
+            and source not in ("autopilot", "plateau_override")
+        ):
+            # Does the active chunk already call for an untested action next?
+            chunk_next = None
+            if active_chunk and active_chunk.get("estimated_actions"):
+                chunk_next = active_chunk["estimated_actions"][0]
+            chunk_already_probing = chunk_next in unexplored
+
+            if not chunk_already_probing:
+                forced = sorted(unexplored)[0]  # deterministic pick for reproducibility
+                self._untested_probes_forced_in_run += 1
+                try:
+                    self._emit_trace_event(
+                        "operation",
+                        "guard_untested_probe",
+                        {
+                            "original_action": action_id,
+                            "forced_action": forced,
+                            "untested_available": sorted(unexplored),
+                            "no_progress_steps": self._consecutive_no_progress_steps,
+                        },
+                        {
+                            "reason": "A023 proactive coverage probe",
+                            "probes_this_run": self._untested_probes_forced_in_run,
+                        },
+                    )
+                except Exception:
+                    pass
+                action.update({
+                    "action_id": forced,
+                    "rationale": (
+                        f"A023 proactive coverage probe: {forced} has not been "
+                        f"tried yet. Original rationale: {rationale}"
+                    ),
+                    "decision_source": "policy_untested_probe",
+                    "original_action": action_id,
+                    "adherence_ok": False,
+                })
+                return action
+
         # B209: Route->Execute adherence contract.
         # If route provided an expected action, enforce it unless we have an explicit override class.
         expected_action = (self._solve_context or {}).get("expected_action")
         explicit_override_sources = {
             "autopilot",
+            "policy_untested_probe",
             "policy_override",
             "guard_override",
             "guard_blocked_fallback",
@@ -6008,6 +6084,7 @@ class ARCOrchestrator:
         self._reflex_context = None
         self._plan_steps = []
         self._consecutive_no_progress_steps = 0
+        self._untested_probes_forced_in_run = 0
         self._blocked_actions = set()
         self._exploitation_switch_budget = 2
         self._forced_exploration_count = 0

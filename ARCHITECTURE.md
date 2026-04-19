@@ -239,6 +239,17 @@ Primary outputs:
 - structural summaries
 - failure evidence for later retrieval
 
+#### Exploration-coverage policy (A023)
+
+The orchestrator enforces a proactive exploration guard before the LLM's
+ranking and the B209 route-execute contract run. When two consecutive steps
+have produced no reward AND at least one action in `available_actions` has
+never been tried, the next action is forced to the alphabetically-first
+untested candidate. The guard yields to `autopilot` and `plateau_override`
+decision sources, and it does not fire when the active chunk already calls
+for an untested action next. It emits `guard_untested_probe` and
+`exploration_coverage_snapshot` trace events for auditability.
+
 ### Phase 2: Goal-Directed Solving
 
 Goal: turn exploration evidence into a goal-directed policy.
