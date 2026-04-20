@@ -44,7 +44,7 @@ class EntityGraphBuilder:
       Tier 4 — LLM causal reasoning on CORRELATES_WITH edges (background, non-blocking)
     """
 
-    def __init__(self, db: KuzuClient, task_id: str, llm_client: Any = None):
+    def __init__(self, db: "KuzuClient", task_id: str, llm_client: Any = None):
         self.db = db
         self.task_id = task_id
         self.llm = llm_client
