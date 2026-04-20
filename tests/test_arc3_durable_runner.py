@@ -142,8 +142,17 @@ async def test_continues_after_task_failure(tmp_path):
     runner._run_puzzle = AsyncMock(side_effect=[RuntimeError("boom"), (success_result, 0.2)])
 
     results = await runner.run(tasks, "card-2")
-    assert len(results) == 1
+    assert len(results) == 2
     runner._run_puzzle.assert_called()
+
+    # Verify both results are present in output
+    assert results[0]["task_id"] == "task-1"
+    assert results[0]["correct"] is False
+    assert results[0].get("failure_class") == "crash"
+    assert results[1]["task_id"] == "task-2"
+    assert results[1].get("correct") is True
+
+    # Verify checkpoint state matches
     mgr = CheckpointManager("card-2")
     mgr.CHECKPOINT_DIR = tmp_path
     cp = mgr.load_or_create(tasks)
@@ -829,9 +838,10 @@ async def test_upsert_lesson_round_trip():
     from mcp_engine.graph.kuzu_client import KuzuClient
     from mcp_engine.graph import embeddings as emb
     from mcp_engine.tools import upsert_lesson, recall_relevant_lessons
+    import sidequests
 
     SEED_PATH = str(
-        (Path(__file__).resolve().parents[1] / "sidequests/data/GistSeedExamples.md")
+        Path(sidequests.__file__).resolve().parent / "data" / "GistSeedExamples.md"
     )
 
     tmp = tempfile.mkdtemp()
