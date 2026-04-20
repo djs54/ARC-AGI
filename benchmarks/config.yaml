@@ -1,0 +1,17 @@
+# ARC3 offline runtime configuration.
+#
+# Consumed by `benchmarks/arc3/verify_offline_bundle.py::_verify_config` and
+# by the offline submission runtime. The verifier requires:
+#   - `global.provider` to be `ollama` (offline model provider).
+#   - a top-level `benchmarks` section.
+#
+# Model specs here align with `benchmarks/arc3/model_budget.yaml` selected_models.
+
+global:
+  provider: ollama
+
+benchmarks:
+  arc3:
+    description: "ARC-AGI-3 offline submission benchmark"
+    primary_model: "llama3.1:8b-instruct-q5"
+    fallback_model: "llama2:7b-q4"
