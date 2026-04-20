@@ -60,7 +60,11 @@ The desired end state is:
 - SideQuests owns memory behavior
 - integration happens through a stable, documented interface
 
-### MCP v1 — stdio-only production seam
+### MCP v1 — stdio-only production seam (runtime scope)
+
+The MCP stdio seam policy applies to the interactive runtime path — `agents/arc3/`, `run_single_puzzle.py`, and `sidequest_mcp_client/`. Offline scoring and submission packaging under `benchmarks/arc3/` embed the brain directly (Kuzu client, schema init, loop queue, centroids) and are exempt from the seam policy, because submission packages cannot depend on a running MCP subprocess. The import-boundary test (`tests/test_import_boundary.py`) enforces the runtime scope; `benchmarks/` is not in its `PROD_PATHS` list (A030).
+
+
 
 For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP
 over stdio only. Production ARC components interact with SideQuests through the

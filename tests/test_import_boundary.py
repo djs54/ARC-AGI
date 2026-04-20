@@ -7,7 +7,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-PROD_PATHS = [ROOT / "agents", ROOT / "benchmarks", ROOT / "run_single_puzzle.py", ROOT / "sidequest_mcp_client"]
+
+# A030: the MCP stdio seam policy applies to the interactive runtime only.
+# `benchmarks/arc3/` is offline scoring / submission packaging that embeds
+# the brain directly (submission-pack deployment model) and is intentionally
+# exempt from this guard. Do not re-add `benchmarks` here without a card.
+PROD_PATHS = [
+    ROOT / "agents",
+    ROOT / "run_single_puzzle.py",
+    ROOT / "sidequest_mcp_client",
+]
 
 # Use regex patterns so we don't false-positive on the local MCP client package name.
 BAD_REGEXES = [

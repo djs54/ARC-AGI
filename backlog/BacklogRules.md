@@ -12,7 +12,7 @@ Core rules
 
 3. Tracker requirement: All active `A###` items must be listed in `backlog/masterBacklogTracker.md` with a plan path pointing to the matching plan file.
 
-4. No direct SideQuests imports: Production code MUST NOT import SideQuests internals or rely on migrated SideQuests process files. SideQuests artifacts are archive-only; integrations must occur via documented MCP-client interfaces or approved shims.
+4. No direct SideQuests imports (runtime scope): Runtime production code under `agents/`, `arc_runtime/`, `run_single_puzzle.py`, and `sidequest_mcp_client/` MUST NOT import SideQuests internals or rely on migrated SideQuests process files. Offline scoring and submission packaging under `benchmarks/arc3/` are exempt (A030) because they embed the brain directly and cannot depend on a running MCP subprocess. SideQuests artifacts are archive-only; integrations must occur via documented MCP-client interfaces or approved shims.
 
 5. PR/CI enforcement: Pull requests that add or modify active `A###` items should include validation that both the card and plan exist and that the numeric IDs match. Recommended checks include a lightweight script verifying file presence and filename patterns.
 
