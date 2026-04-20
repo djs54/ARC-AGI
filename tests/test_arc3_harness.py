@@ -56,16 +56,20 @@ def manifest_path(tmp_path):
     return str(p)
 
 @pytest.mark.asyncio
-async def test_arc3_harness_baseline_vs_sidequests(mock_db, arc_config):
-    # Initialize harness in mock mode
-    harness = ARC3Harness(arc_config, db=mock_db, mock_api=True)
-    
+async def test_arc3_harness_baseline_vs_sidequests(arc_config):
+    # Initialize harness in mock mode without a real brain client.
+    # Use mock_api=True to skip real API calls and db=None to avoid
+    # attempting LocalBrainClient handler initialization (which requires
+    # real mcp_engine imports). The harness falls back to NoOpBrainClient
+    # for both variants in mock mode.
+    harness = ARC3Harness(arc_config, db=None, mock_api=True)
+
     tasks = [
         ABTask(task_id="t1", category="c1", prompt="p1")
     ]
     setattr(tasks[0], "game_id", "g1")
     harness.create_task_manifest(tasks)
-    
+
     # Run comparison
     comparison, baseline_meta, sidequests_meta = await harness.run_ab_comparison()
     

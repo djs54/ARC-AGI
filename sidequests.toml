@@ -1,0 +1,8 @@
+# SideQuests configuration for ARC-AGI-3 offline submission compliance.
+#
+# Consumed by `benchmarks/arc3/pre_submit_check.py::verify_offline_mode` to
+# ensure the submission runtime uses Ollama (offline LLM provider).
+# The verifier requires `llm.provider` to be `ollama`.
+
+[llm]
+provider = "ollama"
