@@ -129,11 +129,14 @@ def test_replan_target_escalates_when_signature_repeats():
     orchestrator.solve_engine._archetype_confidence = 0.57
     orchestrator._emit_trace_event = MagicMock()
 
-    first = runner._replan_target(orchestrator)
-    second = runner._replan_target(orchestrator)
+    # A031/A017: `_replan_target` returns `(phase, reason)`.
+    first_phase, first_reason = runner._replan_target(orchestrator)
+    second_phase, second_reason = runner._replan_target(orchestrator)
 
-    assert first is SolvePhase.ROUTE
-    assert second is SolvePhase.MODEL
+    assert first_phase is SolvePhase.ROUTE
+    assert first_reason == "rebuild_route_from_saturation"
+    assert second_phase is SolvePhase.MODEL
+    assert second_reason == "signature_escalation"
     orchestrator._emit_trace_event.assert_called()
 
 
@@ -155,9 +158,12 @@ def test_replan_target_allows_route_when_signature_changes():
     orchestrator.solve_engine._archetype_confidence = 0.57
     orchestrator._emit_trace_event = MagicMock()
 
-    first = runner._replan_target(orchestrator)
+    # A031/A017: `_replan_target` returns `(phase, reason)`.
+    first_phase, first_reason = runner._replan_target(orchestrator)
     orchestrator._solve_context["plateau_locked_family"] = "ACTION4"
-    second = runner._replan_target(orchestrator)
+    second_phase, second_reason = runner._replan_target(orchestrator)
 
-    assert first is SolvePhase.ROUTE
-    assert second is SolvePhase.ROUTE
+    assert first_phase is SolvePhase.ROUTE
+    assert first_reason == "rebuild_route_from_saturation"
+    assert second_phase is SolvePhase.ROUTE
+    assert second_reason == "rebuild_route_from_saturation"

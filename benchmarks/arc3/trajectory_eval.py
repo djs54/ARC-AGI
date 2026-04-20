@@ -44,7 +44,7 @@ class TrajectoryEvaluator:
         action_diversity, action_details = self._score_action_diversity(normalized_steps)
         convergence, convergence_details = self._score_hypothesis_convergence(normalized_steps, trace_list)
         exploration, exploration_details = self._score_exploration_efficiency(normalized_steps, trace_list)
-        adherence, adherence_details = self._score_plan_adherence(normalized_steps)
+        adherence, adherence_details = self._score_plan_adherence(normalized_steps, trace_list)
         escalation, escalation_details = self._score_escalation_quality(trace_list, normalized_steps)
 
         total = action_diversity + convergence + exploration + adherence + escalation
@@ -326,7 +326,11 @@ class TrajectoryEvaluator:
             "novel_ratio": round(novel_ratio, 4),
         }
 
-    def _score_plan_adherence(self, step_history: Sequence[dict]) -> Tuple[int, Dict[str, Any]]:
+    def _score_plan_adherence(
+        self,
+        step_history: Sequence[dict],
+        trace: Sequence[dict] = (),
+    ) -> Tuple[int, Dict[str, Any]]:
         planned_steps = 0
         matches = 0
 
@@ -340,6 +344,31 @@ class TrajectoryEvaluator:
             planned_steps += 1
             if action_id in estimated_actions:
                 matches += 1
+
+        # A033: when step_history carries no per-step `active_chunk.estimated_actions`
+        # (which happens for traces produced before per-step plan snapshotting
+        # landed), fall back to the union of `register_plan` events recorded in
+        # the trace. Any `step_history` action that appears in that union counts
+        # as a match; any step_history action that does not counts as a miss.
+        if planned_steps == 0 and trace:
+            planned_union: set = set()
+            for event in trace:
+                if not isinstance(event, dict):
+                    continue
+                if str(event.get("operation") or "") != "register_plan":
+                    continue
+                result = event.get("result") or {}
+                for action in (result.get("steps") or []):
+                    if isinstance(action, str):
+                        planned_union.add(action)
+            if planned_union:
+                for step in step_history:
+                    action_id = step.get("action_id")
+                    if not action_id:
+                        continue
+                    planned_steps += 1
+                    if action_id in planned_union:
+                        matches += 1
 
         if planned_steps == 0:
             return 10, {"reason": "no active chunk plans recorded"}

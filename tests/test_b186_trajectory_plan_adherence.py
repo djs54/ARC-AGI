@@ -37,6 +37,9 @@ def test_plan_adherence_extraction_from_trace():
     # Before A012, this would return 10 (neutral) with "no active chunk plans recorded"
     # Now it should successfully find the match
     assert score.plan_adherence > 10
-    details = score.details.get("plan_adherence_details", {})
+    # A033: evaluator emits details under the `plan_adherence` key (matches
+    # the other dimension keys in `score.details`). The old draft used a
+    # `plan_adherence_details` key that never existed.
+    details = score.details.get("plan_adherence", {})
     assert details.get("planned_steps") == 2
     assert details.get("adherence_ratio") == 1.0

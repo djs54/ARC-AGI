@@ -76,7 +76,11 @@ async def test_plateau_lock_threshold_decay(engine):
     ctx = {
         "observed_action_effects": [{"action": "ACTION1", "avg_meaningful_change": 2.0, "zero_reward_streak": 0}],
         "consecutive_zero_reward_steps": 10,
-        "last_transition_effect": {"reward_signal": 0.0, "meaningful_change_score": 1.0}
+        "last_transition_effect": {"reward_signal": 0.0, "meaningful_change_score": 1.0},
+        # A032: clear the B215 MIN_DISTINCT gate (solver.py:3076) that requires
+        # >= 3 distinct tried families before plateau mode activates. The test's
+        # intent is to exercise the lock-threshold decay, not the entry gate.
+        "action_coverage": {"tested_count": 3},
     }
     # ACTION1 score: 2.0 * 0.5 = 1.0
     # ACTION2 score: curiosity bonus = 0.5
