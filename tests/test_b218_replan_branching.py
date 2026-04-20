@@ -31,10 +31,12 @@ def test_replan_branch_exploration_incomplete():
     }
     orchestrator.solve_engine = MagicMock(_archetype_confidence=0.5)
     
-    target = runner._replan_target(orchestrator)
+    # A031: _replan_target returns (phase, reason); assert reason via the tuple.
+    # The `replan_exit` trace is emitted downstream by `_record_phase_transition`,
+    # not by `_replan_target` itself.
+    target, reason = runner._replan_target(orchestrator)
     assert target == SolvePhase.MODEL
-    # Verify trace reason (optional but good)
-    orchestrator._emit_trace_event.assert_called_with("replan_exit", "route", {"target": "model", "route_reason": "exploration_incomplete"})
+    assert reason == "exploration_incomplete"
 
 def test_replan_branch_all_low_value_high_geometry():
     harness = MagicMock()
@@ -66,9 +68,10 @@ def test_replan_branch_all_low_value_high_geometry():
     }
     orchestrator.solve_engine = MagicMock(_archetype_confidence=0.5)
     
-    target = runner._replan_target(orchestrator)
+    # A031: route_reason is returned in the tuple, not emitted by _replan_target.
+    target, reason = runner._replan_target(orchestrator)
     assert target == SolvePhase.MODEL
-    orchestrator._emit_trace_event.assert_called_with("replan_exit", "route", {"target": "model", "route_reason": "low_value_but_known_geometry"})
+    assert reason == "low_value_but_known_geometry"
 
 def test_replan_branch_signature_escalation():
     harness = MagicMock()
@@ -90,9 +93,18 @@ def test_replan_branch_signature_escalation():
     runner._replan_target(orchestrator)
     
     # Second time with same signature -> MODEL (escalation)
-    target = runner._replan_target(orchestrator)
+    # A031: route_reason is returned in the tuple; the only trace event emitted by
+    # `_replan_target` itself is `replan_escalation` on the repeat signature path.
+    target, reason = runner._replan_target(orchestrator)
     assert target == SolvePhase.MODEL
-    orchestrator._emit_trace_event.assert_called_with("replan_exit", "route", {"target": "model", "route_reason": "signature_escalation"})
+    assert reason == "signature_escalation"
+    # `replan_escalation` is the one trace emit owned by `_replan_target` (A017);
+    # `replan_exit` itself is recorded downstream via `_record_phase_transition`.
+    escalation_calls = [
+        c for c in orchestrator._emit_trace_event.call_args_list
+        if c.args and c.args[0] == "replan_escalation"
+    ]
+    assert len(escalation_calls) == 1
 
 def test_replan_branch_low_archetype_conf():
     harness = MagicMock()
@@ -110,9 +122,10 @@ def test_replan_branch_low_archetype_conf():
     }
     orchestrator.solve_engine = MagicMock(_archetype_confidence=0.1) # Low conf
     
-    target = runner._replan_target(orchestrator)
+    # A031: route_reason is returned in the tuple, not emitted by _replan_target.
+    target, reason = runner._replan_target(orchestrator)
     assert target == SolvePhase.HYPOTHESIZE
-    orchestrator._emit_trace_event.assert_called_with("replan_exit", "route", {"target": "hypothesize", "route_reason": "low_archetype_conf"})
+    assert reason == "low_archetype_conf"
 
 def test_replan_branch_default_route():
     harness = MagicMock()
@@ -130,6 +143,7 @@ def test_replan_branch_default_route():
     }
     orchestrator.solve_engine = MagicMock(_archetype_confidence=0.8)
     
-    target = runner._replan_target(orchestrator)
+    # A031: route_reason is returned in the tuple, not emitted by _replan_target.
+    target, reason = runner._replan_target(orchestrator)
     assert target == SolvePhase.ROUTE
-    orchestrator._emit_trace_event.assert_called_with("replan_exit", "route", {"target": "route", "route_reason": "rebuild_route_from_saturation"})
+    assert reason == "rebuild_route_from_saturation"
