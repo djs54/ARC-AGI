@@ -51,8 +51,10 @@ From inside `ARC_AGI/`, the intended setup is:
 ```bash
 pip install -e ../sidequests-brain
 pip install -e .
-pytest
+make test-a
 ```
+
+`make test-a` runs the A-series observability, plan-registration, exploration-probing, and trace-durability test files — the subset that is guaranteed green on `master`. The broader `pytest -q` run has known failures and collection issues tracked under A029; do not treat a red full-suite run as a regression signal until A029 completes.
 
 If `sidequests-brain` is published where you want to consume it from, you can install that package instead of using the parent path.
 
@@ -81,9 +83,10 @@ What is already done:
 What still remains if you want a fully independent git repo:
 
 - initialize a separate git repo inside `ARC_AGI/`
-- trim or replace any imports that should no longer come from the parent repo
-- decide whether ARC should keep importing `mcp_engine` directly or call SideQuests only through a narrower API/client package
+- complete the A029 full-suite triage so `pytest -q` becomes a reliable signal (A024-A028 already settled the A-series baseline)
 - move ARC-only docs and result artifacts over time
+
+The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 moved all production paths behind the MCP stdio seam, and `BacklogRules.md` rule 4 forbids re-introducing direct imports. See [ARCHITECTURE.md](ARCHITECTURE.md) for the seam contract.
 
 ## Recommendation
 

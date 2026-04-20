@@ -417,7 +417,7 @@ boundary, not the earlier extraction-in-progress state.
 
 ## Current Extraction Status
 
-The repo split is clean at the folder level, but not yet complete at the interface level.
+The repo split is clean at both the folder level and the interface level (A002-A006).
 
 ### Already Separated
 
@@ -425,21 +425,17 @@ The repo split is clean at the folder level, but not yet complete at the interfa
 - ARC docs now have their own canonical architecture file
 - ARC tests live with ARC code
 - packaging metadata is separate
+- production runtime integration is MCP over stdio; direct `mcp_engine.*` / `sidequests.*` imports are forbidden in production paths by `BacklogRules.md` rule 4 and enforced by `tests/test_import_boundary.py`
 
-### Still Shared Through Imports
+### Known Remaining Test-Side Drift (A029)
 
-- SideQuests config and schema bootstrap
-- SideQuests observability utilities
-- SideQuests graph client
-- SideQuests memory tool handlers
-- SideQuests loop preload helpers
+Full-suite `pytest -q` is not yet green on `master`. The A-series baseline (`make test-a`) is green; the broader suite has 22 known problems tracked under A029 — 2 collection errors and 20 assertion drifts that surfaced once A023/A024 landed. A029 triages these into per-category follow-up cards and forbids closing the gap via direct `mcp_engine.*` imports. Until A029 completes, use `make test-a` as the regression signal.
 
 ## Recommended Next Steps
 
-1. Introduce a narrower SideQuests client boundary for ARC.
-2. Stop importing `mcp_engine.*` internals directly from ARC where possible.
-3. Keep ARC docs and benchmarks evolving in this sibling repo only.
-4. Keep `sidequests-brain` architecture focused on memory-system responsibilities only.
+1. Complete A029 so `pytest -q` becomes a reliable green baseline again.
+2. Keep ARC docs and benchmarks evolving in this sibling repo only.
+3. Keep `sidequests-brain` architecture focused on memory-system responsibilities only.
 
 ## Non-Goals
 

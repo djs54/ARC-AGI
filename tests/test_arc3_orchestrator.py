@@ -887,7 +887,9 @@ def test_policy_override_forces_unexplored_action(sample_observation):
         ["ACTION1", "ACTION2", "ACTION3", "ACTION4"],
     )
     assert action["action_id"] == "ACTION3"
-    assert "exploration step 1/5 (level 1)" in action["rationale"]
+    # A023: untested-action probing overrides B154 exploration rationale
+    assert action["decision_source"] == "policy_untested_probe"
+    assert "A023 proactive coverage probe" in action["rationale"]
 
 
 def test_policy_override_broadens_exploration_after_decay(sample_observation):
@@ -914,7 +916,9 @@ def test_policy_override_broadens_exploration_after_decay(sample_observation):
         ["ACTION1", "ACTION2", "ACTION3", "ACTION4"],
     )
     assert action["action_id"] == "ACTION4"
-    assert "exploration step 1/5 (level 1)" in action["rationale"]
+    # A023: untested-action probing overrides B154 exploration rationale
+    assert action["decision_source"] == "policy_untested_probe"
+    assert "A023 proactive coverage probe" in action["rationale"]
 
 
 def test_select_ranked_action_prefers_best_under_budget():

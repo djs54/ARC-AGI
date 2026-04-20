@@ -41,11 +41,12 @@ class TestPlanChanged:
 
     def test_plan_changed_returns_false_for_identical_plan(self, solver):
         """When plan matches last registered, should return False."""
-        # Register a plan first
-        solver._last_registered_chunk_plan = {
-            "goal": "Test goal",
-            "steps": ["step1", "step2"],
-        }
+        # A024: dedup is driven by the fingerprint tuple, not the legacy dict.
+        solver._last_registered_chunk_fingerprint = solver._plan_fingerprint(
+            plan_type="chunk",
+            goal="Test goal",
+            steps=["step1", "step2"],
+        )
 
         # Same plan should not be re-registered
         assert solver._plan_changed(
@@ -82,10 +83,11 @@ class TestPlanChanged:
 
     def test_plan_changed_force_flag_always_returns_true(self, solver):
         """When force=True, should always return True."""
-        solver._last_registered_chunk_plan = {
-            "goal": "Test goal",
-            "steps": ["step1", "step2"],
-        }
+        solver._last_registered_chunk_fingerprint = solver._plan_fingerprint(
+            plan_type="chunk",
+            goal="Test goal",
+            steps=["step1", "step2"],
+        )
 
         assert solver._plan_changed(
             plan_type="chunk",
@@ -96,14 +98,17 @@ class TestPlanChanged:
 
     def test_plan_changed_distinguishes_plan_types(self, solver):
         """Should separately track top and chunk plans."""
-        solver._last_registered_top_plan = {
-            "goal": "Top goal",
-            "steps": ["step1"],
-        }
-        solver._last_registered_chunk_plan = {
-            "goal": "Chunk goal",
-            "steps": ["step2"],
-        }
+        # A024: populate fingerprint caches rather than the legacy dicts.
+        solver._last_registered_top_fingerprint = solver._plan_fingerprint(
+            plan_type="top",
+            goal="Top goal",
+            steps=["step1"],
+        )
+        solver._last_registered_chunk_fingerprint = solver._plan_fingerprint(
+            plan_type="chunk",
+            goal="Chunk goal",
+            steps=["step2"],
+        )
 
         # Same content for chunk plan should not be re-registered
         assert solver._plan_changed(
@@ -165,7 +170,8 @@ async def test_register_chunk_plan_duplicate_skipped(solver, mock_brain):
     trace_call = mock_brain.trace_event.call_args
     assert trace_call[1]["event_type"] == "plan_registration_skipped"
     assert trace_call[1]["metadata"]["plan_type"] == "chunk"
-    assert trace_call[1]["metadata"]["reason"] == "identical_to_last_registered"
+    # A024: dedup trace reason aligned with fingerprint-based semantics.
+    assert trace_call[1]["metadata"]["reason"] == "identical_fingerprint"
 
 
 @pytest.mark.asyncio
