@@ -1,2 +1,2 @@
-"""Test-only compatibility helpers for SideQuests internals."""
+"""Test-only compatibility helpers for HippoCampy/Campy internals."""
 

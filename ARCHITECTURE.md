@@ -1,7 +1,7 @@
 # ARC_AGI Architecture
 
 > Canonical architecture reference for the `ARC_AGI` sibling repo.
-> This document covers the ARC solver, harness, and the dependency boundary to SideQuests/Campy.
+> This document covers the ARC solver, harness, and the dependency boundary to HippoCampy/Campy.
 
 ## Mission
 
@@ -12,18 +12,18 @@ Its job is to:
 - run ARC-AGI experiments
 - host the ARC solver/orchestration logic
 - evaluate strategy, prompt shape, and runtime behavior
-- use SideQuests/Campy as the external local-memory substrate
+- use HippoCampy/Campy as the external local-memory substrate
 
 It is not the memory engine.
 
-## Relationship To SideQuests / Campy
+## Relationship To HippoCampy / Campy
 
 The architectural split is:
 
-1. `sidequests-brain` / Campy provides persistent local memory, retrieval, graph storage, and MCP-oriented tooling
+1. `hippocampy` / Campy provides persistent local memory, retrieval, graph storage, and MCP-oriented tooling
 2. `ARC_AGI` provides the puzzle-solving agent, evaluation harness, and ARC-specific orchestration
 
-That means `ARC_AGI` should depend on SideQuests, not absorb it.
+That means `ARC_AGI` should depend on HippoCampy/Campy, not absorb it.
 
 ### Current Dependency Boundary
 
@@ -34,11 +34,11 @@ That means `ARC_AGI` should depend on SideQuests, not absorb it.
 - `sidequest_mcp_client/readiness.py`
 - `sidequest_mcp_client/observability.py`
 
-That seam talks to SideQuests through the generic stdio MCP adapter:
+That seam talks to HippoCampy/Campy through the generic stdio MCP adapter:
 
-- `python -m sidequests.adapters.mcp_server`
+- `python -m campy.adapters.mcp_server`
 
-Production ARC code should not directly import `mcp_engine.*` or `sidequests.*`.
+Production ARC code should not directly import `mcp_engine.*` or `campy.*` / `sidequests.*`.
 Any compatibility helpers that still rely on direct imports must live under
 `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 
@@ -50,14 +50,14 @@ isolated to test-only support.
 
 Longer term, `ARC_AGI` should depend on one of these narrower surfaces:
 
-- a published `sidequests-brain` package API
+- a published `hippocampy` package API
 - a dedicated client/SDK layer for memory access
-- MCP/tool calls only, with no direct import of SideQuests internals
+- MCP/tool calls only, with no direct import of HippoCampy/Campy internals
 
 The desired end state is:
 
 - `ARC_AGI` owns ARC behavior
-- SideQuests owns memory behavior
+- HippoCampy/Campy owns memory behavior
 - integration happens through a stable, documented interface
 
 ### MCP v1 — stdio-only production seam (runtime scope)
@@ -66,8 +66,8 @@ The MCP stdio seam policy applies to the interactive runtime path — `agents/ar
 
 
 
-For v1, the canonical production seam between `ARC_AGI` and SideQuests is MCP
-over stdio only. Production ARC components interact with SideQuests through the
+For v1, the canonical production seam between `ARC_AGI` and HippoCampy/Campy is MCP
+over stdio only. Production ARC components interact with HippoCampy/Campy through the
 ARC-owned client package `sidequest_mcp_client/`.
 
 Allowed production seam:
@@ -80,7 +80,7 @@ Allowed production seam:
 Not allowed in production:
 
 - direct `mcp_engine.*` imports
-- direct `sidequests.*` imports
+- direct `campy.*` / `sidequests.*` imports
 - `sidequest_mcp_client/test_compat/*`
 
 ARC-side client responsibilities (v1)
@@ -96,7 +96,7 @@ Session lifecycle and startup/readiness expectations
 
 - Startup: on process start, ARC clients must connect and perform a handshake; callers must wait for the client `ready` signal before issuing operations.
 - Session scope: sessions may be reused across episodes or scoped per worker — the client implementation should document lifetime semantics and resource cleanup procedures.
-- Shutdown: expose graceful close semantics to allow SideQuests to flush state and release resources.
+- Shutdown: expose graceful close semantics to allow HippoCampy/Campy to flush state and release resources.
 - Observability: the client should emit readiness, last-activity, and error metrics for operational monitoring.
 
 Canonical ARC-side client interface (recommended)
@@ -108,31 +108,31 @@ Canonical ARC-side client interface (recommended)
 
 Policy statement
 
-Production ARC code MUST NOT directly import SideQuests internals (for example
+Production ARC code MUST NOT directly import HippoCampy/Campy internals (for example
 `mcp_engine.*`); instead it must use the documented MCP stdio client contract
 above. If a test still needs direct-import compatibility, that helper must live
 under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 
 Adapter ownership
 
-The MCP stdio adapter that serves this seam — the binary `SIDEQUESTS_MCP_CMD`
-points at — lives in `sidequests-brain/sidequests/adapters/mcp_server.py`, not
+The MCP stdio adapter that serves this seam — the binary `CAMPY_MCP_CMD`
+points at — lives in `sidequests-brain/campy/adapters/mcp_server.py`, not
 in this repo. It is a brain-side artifact: it imports the unix-socket path,
-offline-queue format, and git-context detection from the `sidequests` package,
-and bridges MCP stdio JSON-RPC to the brain daemon at `~/.sidequests/brain.sock`.
+offline-queue format, and git-context detection from the `campy` package,
+and bridges MCP stdio JSON-RPC to the brain daemon at `~/.campy/brain.sock`.
 `ARC_AGI` must not vendor or reimplement it. Other MCP clients (Smithery,
 Claude Desktop, Cursor) connect to the same adapter through their own
-`SIDEQUESTS_MCP_CMD`-equivalent configuration.
+`CAMPY_MCP_CMD`-equivalent configuration.
 
 Operator setup
 
 From inside `ARC_AGI/`, point the env var at the sibling repo's venv + adapter:
 
 ```bash
-export SIDEQUESTS_MCP_CMD="../sidequests-brain/.venv/bin/python ../sidequests-brain/sidequests/adapters/mcp_server.py"
+export CAMPY_MCP_CMD="../sidequests-brain/.venv/bin/python -m campy.adapters.mcp_server"
 ```
 
-The brain daemon (socket at `~/.sidequests/brain.sock`) must already be
+The brain daemon (socket at `~/.campy/brain.sock`, with legacy `~/.sidequests/brain.sock` fallback) must already be
 running. `check_mcp_readiness` starts the adapter as a subprocess, performs
 the MCP `initialize` + `tools/list` handshake, and fails fast with a
 `ReadinessError` if the adapter or the brain is unavailable.
@@ -145,7 +145,7 @@ ARC_AGI Repo
   ├── ARC benchmark harness
   ├── evaluation + compliance tooling
   └── SideQuests integration layer
-          └── uses SideQuests/Campy memory services
+          └── uses HippoCampy/Campy memory services
 ```
 
 ### Runtime Shape
@@ -351,7 +351,7 @@ The ARC stack treats SideQuests as a memory substrate, not as solver logic.
 - `run_single_puzzle.py` now performs fail-fast preflight for:
   - LLM initialization
   - observability initialization
-  - SideQuests MCP readiness
+  - HippoCampy MCP readiness
 - local `provider=ollama` still uses the OpenAI-compatible Python SDK in this
   repo architecture, so the `openai` package is a real runtime dependency
 - timeout attribution distinguishes MCP/tool stalls from true LLM timeouts so
@@ -359,10 +359,10 @@ The ARC stack treats SideQuests as a memory substrate, not as solver logic.
 
 ### Observability defaults
 
-- default project: `arc-agi-sidequests`
+- default project: `arc-agi-campy`
 - default endpoint: `http://127.0.0.1:6006/v1/traces`
 - auto-enabled in `run_single_puzzle.py` when `opentelemetry`, `phoenix`, and `phoenix.otel` are all importable
-- disable with `[observability] enabled = false` in `sidequests.toml` or `~/.sidequests/config.toml`
+- disable with `[observability] enabled = false` in `campy.toml` or `~/.campy/config.toml` (legacy `sidequests.toml` / `~/.sidequests/config.toml` still supported)
 
 Note: Phoenix auto-enable is best-effort in the default auto-enable path (A022); when unavailable the runtime falls back to the JSON trace as the primary diagnostic surface. See `docs/trace_recipes.md` for canonical jq recipes to analyze `agent_execution_trace.json` and related artifacts.
 - override project with `PHOENIX_PROJECT=<name>` environment variable
@@ -371,7 +371,7 @@ Note: Phoenix auto-enable is best-effort in the default auto-enable path (A022);
 ### Why This Matters
 
 The ARC agent should not need to remember everything inside its prompt.
-It should be able to offload durable state into SideQuests and retrieve only what is useful for the next decision.
+It should be able to offload durable state into HippoCampy/Campy and retrieve only what is useful for the next decision.
 
 That makes `ARC_AGI` a good consumer of the memory system, but not the owner of memory-system architecture.
 
@@ -407,7 +407,7 @@ ARC_AGI/
 The architectural split is now real:
 
 - `ARC_AGI` owns solver, harness, evaluation, and ARC runtime behavior
-- `sidequests-brain` owns durable memory, retrieval, graph storage, and MCP tool implementation
+- `hippocampy` / Campy owns durable memory, retrieval, graph storage, and MCP tool implementation
 - production integration is MCP over stdio, not direct import
 
 Recent stabilization work also made the runtime more honest:
@@ -429,7 +429,7 @@ The repo split is clean at both the folder level and the interface level (A002-A
 - ARC docs now have their own canonical architecture file
 - ARC tests live with ARC code
 - packaging metadata is separate
-- production runtime integration is MCP over stdio; direct `mcp_engine.*` / `sidequests.*` imports are forbidden in production paths by `BacklogRules.md` rule 4 and enforced by `tests/test_import_boundary.py`
+- production runtime integration is MCP over stdio; direct `mcp_engine.*` / `campy.*` / `sidequests.*` imports are forbidden in production paths by `BacklogRules.md` rule 4 and enforced by `tests/test_import_boundary.py`
 
 ### Known Remaining Test-Side Drift (A029)
 

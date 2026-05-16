@@ -12,7 +12,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL_BUDGET_PATH = REPO_ROOT / "benchmarks/arc3/model_budget.yaml"
-CONFIG_PATH = REPO_ROOT / "sidequests.toml"
+CONFIG_PATH = (REPO_ROOT / "campy.toml") if (REPO_ROOT / "campy.toml").exists() else (REPO_ROOT / "sidequests.toml")
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ def verify_offline_mode():
     """Confirm configuration enforces offline mode."""
     logger.info("Verifying offline configuration...")
     if not CONFIG_PATH.exists():
-        logger.error("Missing sidequests.toml")
+        logger.error("Missing campy.toml or legacy sidequests.toml")
         return False
         
     try:

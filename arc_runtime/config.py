@@ -24,7 +24,9 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
         return config
 
     search_paths = [
+        Path.cwd() / "campy.toml",
         Path.cwd() / "sidequests.toml",
+        Path.home() / ".campy" / "config.toml",
         Path.home() / ".sidequests" / "config.toml",
     ]
     for path in search_paths:
@@ -34,5 +36,5 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
             config["_config_path"] = str(path)
             return config
 
-    raise FileNotFoundError("No ARC/SideQuests config file found. Expected sidequests.toml or ~/.sidequests/config.toml")
+    raise FileNotFoundError("No ARC/HippoCampy config file found. Expected campy.toml or sidequests.toml or ~/.sidequests/config.toml")
 

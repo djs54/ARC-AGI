@@ -1,7 +1,7 @@
 """Simple MCP-over-stdio session manager for ARC_AGI.
 
 This module implements a minimal, testable stdio-backed MCP client used by
-the ARC runtime to talk to a SideQuests MCP stdio server. It intentionally
+the ARC runtime to talk to a HippoCampy/Campy MCP stdio server. It intentionally
 keeps transport-level normalization and error handling in one place.
 """
 

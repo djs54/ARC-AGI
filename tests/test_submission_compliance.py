@@ -18,7 +18,7 @@ def test_model_budget_validation():
 
 def test_offline_mode_validation():
     """Ensure offline mode check correctly verifies provider."""
-    # This should pass if sidequests.toml is set to 'ollama'
+    # This should pass if campy.toml or legacy sidequests.toml is set to 'ollama'
     assert verify_offline_mode() is True
 
 def test_output_format_validation(tmp_path):

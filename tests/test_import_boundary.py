@@ -24,6 +24,8 @@ BAD_REGEXES = [
     r"\bmcp_engine\.schema\b",
     r"\bmcp_engine\.graph\.kuzu_client\b",
     r"\bmcp_engine\.loop\.",
+    r"\bfrom\s+campy\b",
+    r"\bimport\s+campy\b",
     r"\bfrom\s+sidequests\b",
     r"\bimport\s+sidequests\b",
     r"\bfrom\s+mcp_engine\b",
@@ -63,4 +65,4 @@ def test_no_direct_bootstrap_imports_in_production_paths():
             if pat.search(text):
                 offending.append((str(f.relative_to(ROOT)), pat.pattern))
 
-    assert not offending, f"Found direct SideQuests bootstrap imports in production files: {offending}"
+    assert not offending, f"Found direct HippoCampy/Campy bootstrap imports in production files: {offending}"

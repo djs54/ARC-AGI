@@ -1,4 +1,4 @@
-"""Bridge package that isolates ARC_AGI from SideQuests internals.
+"""Bridge package that isolates ARC_AGI from HippoCampy/Campy internals.
 
 This package exposes the MCP-facing transport and client helpers that
 production ARC code may consume. Non-MCP compatibility helpers should be

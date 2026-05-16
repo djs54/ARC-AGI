@@ -838,11 +838,24 @@ async def test_upsert_lesson_round_trip():
     from mcp_engine.graph.kuzu_client import KuzuClient
     from mcp_engine.graph import embeddings as emb
     from mcp_engine.tools import upsert_lesson, recall_relevant_lessons
-    import sidequests
+    try:
+        import campy as memory_package
+        seed_path = Path(memory_package.__file__).resolve().parent / "data" / "GistSeedExamples.md"
+    except Exception:
+        try:
+            import sidequests as memory_package
+            seed_path = Path(memory_package.__file__).resolve().parent / "data" / "GistSeedExamples.md"
+        except Exception:
+            import mcp_engine
+            repo_root = Path(mcp_engine.__file__).resolve().parents[1]
+            candidates = [
+                repo_root / "campy" / "data" / "GistSeedExamples.md",
+                Path.cwd().parent / "sidequests-brain" / "campy" / "data" / "GistSeedExamples.md",
+                Path.cwd().parent / "hippocampy" / "campy" / "data" / "GistSeedExamples.md",
+            ]
+            seed_path = next((path for path in candidates if path.exists()), candidates[0])
 
-    SEED_PATH = str(
-        Path(sidequests.__file__).resolve().parent / "data" / "GistSeedExamples.md"
-    )
+    SEED_PATH = str(seed_path)
 
     tmp = tempfile.mkdtemp()
     db_path = os.path.join(tmp, "b214_test.db")

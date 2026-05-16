@@ -1,4 +1,4 @@
-"""Test-only compatibility helpers that import SideQuests internals directly."""
+"""Test-only compatibility helpers that import HippoCampy/Campy internals directly."""
 
 from __future__ import annotations
 

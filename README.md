@@ -2,11 +2,11 @@
 
 `ARC_AGI/` is the repo-shaped extraction workspace for the ARC effort.
 
-The goal is to keep ARC work separate from the core SideQuests/Campy memory product:
+The goal is to keep ARC work separate from the core HippoCampy/Campy memory product:
 
-- `sidequests-brain` remains the local memory engine
+- `hippocampy` remains the local memory engine
 - `ARC_AGI` becomes the ARC solver/evaluation project
-- `ARC_AGI` consumes `sidequests-brain` as a dependency
+- `ARC_AGI` consumes `hippocampy` as a dependency
 
 For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -25,7 +25,7 @@ For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE
 
 This workspace is intentionally not a memory engine by itself.
 
-It still relies on SideQuests for:
+It still relies on HippoCampy for:
 
 - `mcp_engine`
 - graph schema and Kuzu setup
@@ -35,39 +35,39 @@ It still relies on SideQuests for:
 
 That means the intended relationship is:
 
-1. `sidequests-brain` provides local memory and retrieval
+1. `hippocampy` provides local memory and retrieval
 2. `ARC_AGI` imports and uses it
 
 ### MCP v1 — stdio-only production seam
 
-For production (v1) the canonical seam between `ARC_AGI` and SideQuests is MCP over stdio. Production code now uses only the MCP-facing client modules in `sidequest_mcp_client/` (`mcp_brain_client`, `mcp_session`, `readiness`, `observability`). Any direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` for tests only. Production code should not rely on direct imports of `mcp_engine.*` or other SideQuests internals.
+For production (v1) the canonical seam between `ARC_AGI` and HippoCampy is MCP over stdio. Production code now uses only the MCP-facing client modules in `sidequest_mcp_client/` (`mcp_brain_client`, `mcp_session`, `readiness`, `observability`). Any direct-import compatibility helpers are isolated under `sidequest_mcp_client/test_compat/` for tests only. Production code should not rely on direct imports of `mcp_engine.*` or other HippoCampy internals.
 
-The MCP stdio adapter that serves this seam lives in the sibling `sidequests-brain` repo at `sidequests/adapters/mcp_server.py`. `ARC_AGI` is a pure consumer — it spawns the adapter as a subprocess at runtime via the `SIDEQUESTS_MCP_CMD` environment variable. Do not vendor the adapter into this repo: it imports brain internals (unix-socket path, offline-queue format) and is shared with other MCP clients (Smithery, Claude Desktop, Cursor).
+The MCP stdio adapter that serves this seam lives in the sibling `hippocampy` repo at `campy/adapters/mcp_server.py`. `ARC_AGI` is a pure consumer — it spawns the adapter as a subprocess at runtime via the `CAMPY_MCP_CMD` environment variable. Do not vendor the adapter into this repo: it imports brain internals (unix-socket path, offline-queue format) and is shared with other MCP clients (Smithery, Claude Desktop, Cursor).
 
 ## Local Development
 
 From inside `ARC_AGI/`, the intended setup is:
 
 ```bash
-pip install -e ../sidequests-brain
+pip install -e ../sidequests-brain  # HippoCampy/Campy repo; use ../hippocampy if your checkout was renamed
 pip install -e .
 make test-a
 ```
 
 `make test-a` runs the A-series observability, plan-registration, exploration-probing, and trace-durability test files — the subset that is guaranteed green on `master`. The broader `pytest -q` run has known failures and collection issues tracked under A029; do not treat a red full-suite run as a regression signal until A029 completes.
 
-If `sidequests-brain` is published where you want to consume it from, you can install that package instead of using the parent path.
+If `hippocampy` is published where you want to consume it from, you can install that package instead of using the parent path.
 
 ### Running a smoke
 
-Point `SIDEQUESTS_MCP_CMD` at the sibling repo's adapter, then run the live smoke:
+Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke:
 
 ```bash
-export SIDEQUESTS_MCP_CMD="../sidequests-brain/.venv/bin/python ../sidequests-brain/sidequests/adapters/mcp_server.py"
+export CAMPY_MCP_CMD="../sidequests-brain/.venv/bin/python -m campy.adapters.mcp_server"
 PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
 ```
 
-`--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.sidequests/brain.sock`).
+`--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.campy/brain.sock`).
 
 ## Current Status
 
@@ -91,6 +91,6 @@ The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 m
 ## Recommendation
 
 Keep `ARC_AGI` as the ARC lab and benchmark project.
-Keep `sidequests-brain` as the memory product.
+Keep `hippocampy` as the memory product.
 
 That separation matches the product direction much better than continuing to let both efforts share the same top-level codebase.

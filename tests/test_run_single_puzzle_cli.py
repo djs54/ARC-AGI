@@ -54,3 +54,46 @@ def test_ensure_arc_api_key_loads_from_arc_json(tmp_path: Path, monkeypatch):
 
     assert loaded == "secret-key"
     assert os.environ["ARC_API_KEY"] == "secret-key"
+
+
+def test_single_task_runner_prefers_campy_config(tmp_path: Path, monkeypatch):
+    campy_config = tmp_path / "campy.toml"
+    legacy_config = tmp_path / "sidequests.toml"
+    campy_config.write_text("[llm]\nprovider = 'ollama'\n")
+    legacy_config.write_text("[llm]\nprovider = 'legacy'\n")
+    loaded_paths = []
+
+    def fake_load_config(path):
+        loaded_paths.append(Path(path))
+        return {"llm": {"provider": "ollama"}}
+
+    monkeypatch.setattr(rsp, "CONFIG_PATH", campy_config)
+    monkeypatch.setattr(rsp, "LEGACY_CONFIG_PATH", legacy_config)
+    monkeypatch.setattr(rsp, "load_config", fake_load_config)
+    monkeypatch.setattr(rsp, "_enforce_llm_preflight", lambda config: None)
+    monkeypatch.setattr(rsp, "_enforce_observability_preflight", lambda config: None)
+
+    rsp.SingleTaskRunner()
+
+    assert loaded_paths == [campy_config]
+
+
+def test_single_task_runner_uses_legacy_config_fallback(tmp_path: Path, monkeypatch):
+    campy_config = tmp_path / "campy.toml"
+    legacy_config = tmp_path / "sidequests.toml"
+    legacy_config.write_text("[llm]\nprovider = 'ollama'\n")
+    loaded_paths = []
+
+    def fake_load_config(path):
+        loaded_paths.append(Path(path))
+        return {"llm": {"provider": "ollama"}}
+
+    monkeypatch.setattr(rsp, "CONFIG_PATH", campy_config)
+    monkeypatch.setattr(rsp, "LEGACY_CONFIG_PATH", legacy_config)
+    monkeypatch.setattr(rsp, "load_config", fake_load_config)
+    monkeypatch.setattr(rsp, "_enforce_llm_preflight", lambda config: None)
+    monkeypatch.setattr(rsp, "_enforce_observability_preflight", lambda config: None)
+
+    rsp.SingleTaskRunner()
+
+    assert loaded_paths == [legacy_config]

@@ -25,10 +25,10 @@ from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[0]
-CONFIG_PATH = REPO_ROOT / "sidequests.toml"
+CONFIG_PATH = REPO_ROOT / "campy.toml"
+LEGACY_CONFIG_PATH = REPO_ROOT / "sidequests.toml"
 MANIFEST_PATH = REPO_ROOT / "benchmarks/arc3/tasks_manifest.json"
 DB_PATH = Path.home() / ".sidequests" / "brain_single_test.db"
-SEED_PATH = REPO_ROOT / "sidequests/data/GistSeedExamples.md"
 TASK_BATCH_SIZE = 5
 FINAL_OUTPUT_PATH = REPO_ROOT / "submission_results_single.json"
 ARC_SERVER_OUTPUT_PATH = REPO_ROOT / "submission_results_arcServer.json"
@@ -177,7 +177,7 @@ def _enforce_observability_preflight(config: dict) -> None:
             obs_cfg = config.get("observability", {})
             logger.info(
                 "Phoenix observability auto-enabled (PHOENIX_ENABLE=1, project=%s, endpoint=%s)",
-                os.environ.get("PHOENIX_PROJECT", "arc-agi-sidequests"),
+                os.environ.get("PHOENIX_PROJECT", "arc-agi-campy"),
                 os.environ.get("PHOENIX_ENDPOINT", "http://127.0.0.1:6006/v1/traces"),
             )
         else:
@@ -203,7 +203,7 @@ def _enforce_observability_preflight(config: dict) -> None:
             "Observability preflight failed: required tracing packages are missing in this interpreter.\n"
             f"python_executable={sys.executable}\n"
             f"missing={', '.join(missing)}\n"
-            "Fix: run the smoke test with the SideQuests interpreter or install tracing deps into the current interpreter."
+            "Fix: run the smoke test with the HippoCampy/Campy interpreter or install tracing deps into the current interpreter."
         )
 
     try:
@@ -239,7 +239,11 @@ def _enforce_llm_preflight(config: dict) -> None:
 
 class SingleTaskRunner:
     def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None):
-        resolved_config_path = Path(config_path) if config_path else (CONFIG_PATH if CONFIG_PATH.exists() else None)
+        resolved_config_path = (
+            Path(config_path)
+            if config_path
+            else (CONFIG_PATH if CONFIG_PATH.exists() else (LEGACY_CONFIG_PATH if LEGACY_CONFIG_PATH.exists() else None))
+        )
         self.config = _apply_llm_overrides(load_config(resolved_config_path), llm_overrides)
         if max_steps is not None:
             if "benchmark" not in self.config:
@@ -264,7 +268,7 @@ class SingleTaskRunner:
         # Clean up old database and stale sidecars from prior smoke runs.
         _remove_db_artifacts(DB_PATH)
 
-        # Production startup: verify the SideQuests MCP service is ready
+        # Production startup: verify the HippoCampy MCP service is ready
         required_tools = [
             "notify_turn",
             "current_truth",
@@ -273,7 +277,7 @@ class SingleTaskRunner:
             "recall_plans",
         ]
         try:
-            check_mcp_readiness(required_tools=required_tools)
+            check_mcp_readiness(required_tools=required_tools, require_brain_socket=True)
         except ReadinessError as exc:
             raise RuntimeError(str(exc))
 
@@ -655,7 +659,7 @@ async def main():
     parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run (default: 1 for real, 5 for mock)")
     parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle (overrides config)")
     parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
-    parser.add_argument("--config", type=str, default=None, help="Explicit path to the sidequests.toml file to use for this run")
+    parser.add_argument("--config", type=str, default=None, help="Explicit path to the campy.toml file to use for this run")
     parser.add_argument("--model", type=str, default=None, help="Override llm.model for this run only")
     parser.add_argument("--base-url", type=str, default=None, help="Override llm.base_url for this run only")
     parser.add_argument("--timeout-seconds", type=float, default=None, help="Override llm.timeout_seconds for this run only")

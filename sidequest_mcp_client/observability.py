@@ -1,4 +1,4 @@
-"""Observability bridge for SideQuests helpers consumed by ARC_AGI.
+"""Observability bridge for HippoCampy/Campy helpers consumed by ARC_AGI.
 
 This module provides a small observability shim that optionally integrates
 with Phoenix (OpenTelemetry) for live trace capturing.
