@@ -14,6 +14,7 @@ class FailureTaxonomy(str, Enum):
 
     LLM_TIMEOUT = "llm_timeout"
     TOOL_TIMEOUT = "tool_timeout"
+    WALL_CLOCK_TIMEOUT = "wall_clock_budget_exhausted"
     LLM_PARSE_ERROR = "llm_parse_error"
     API_ERROR = "api_error"
     BUDGET_EXCEEDED = "budget_exceeded"
@@ -21,6 +22,7 @@ class FailureTaxonomy(str, Enum):
     COVERAGE_SATURATED_ABORT = "coverage_saturated_abort"
     STUCK_IN_LOOP = "stuck_in_loop"
     MAX_STEPS_REACHED = "max_steps_reached"
+    TERMINAL_STALL = "terminal_stall"
     CRASH = "crash"
 
 
@@ -40,6 +42,7 @@ def classify_failure(
     graduation_reason: str | None = None,
     coverage_saturated: bool = False,
     plateau_escalation_required: bool = False,
+    wall_clock_timeout: bool = False,
 ) -> FailureTaxonomy:
     """Return the best-effort taxonomy bucket for a failed run.
 
@@ -69,15 +72,42 @@ def classify_failure(
         if is_saturated or (plateau_escalation_required and is_saturated):
             return FailureTaxonomy.COVERAGE_SATURATED_ABORT
 
+        if wall_clock_timeout or "wall-clock" in haystack or "wall clock" in haystack:
+            return FailureTaxonomy.WALL_CLOCK_TIMEOUT
+
         if budget_exhausted or (
             "budget" in haystack and ("exhaust" in haystack or "exceed" in haystack)
         ):
             return FailureTaxonomy.BUDGET_EXCEEDED
 
+        # A058: Detect terminal stall (broad coverage but no levels completed)
+        if "terminal_stall" in haystack or "zero terminal progress" in haystack:
+            return FailureTaxonomy.TERMINAL_STALL
+
         if max_steps_reached or "max attempts reached" in haystack or "max steps" in haystack:
             if loop_detected or no_progress_steps >= 20 or "loop" in haystack:
                 return FailureTaxonomy.STUCK_IN_LOOP
             return FailureTaxonomy.MAX_STEPS_REACHED
+
+        # A091: Classify HTTP bridge transport errors as tool_timeout, not llm_timeout
+        if any(token in haystack for token in (
+            "daemon_http_error", "daemon_offline", "cannot reach http",
+            "daemon_connection_failed", "mcp_transport_error", "connection refused",
+            "connection reset"
+        )):
+            return FailureTaxonomy.TOOL_TIMEOUT
+
+        # A056/A064: High-specificity tool/API errors before generic timeout
+        if any(token in haystack for token in (
+            "tools/call:", "mcptimeouterror", "tool_timeout", "memory_timeout", "daemon_timeout"
+        )):
+            return FailureTaxonomy.TOOL_TIMEOUT
+
+        if any(token in haystack for token in (
+            "api_error", "ratelimit", "quota exceeded", "overloaded",
+            "internal_server_error", "bad_gateway", "service_unavailable"
+        )):
+            return FailureTaxonomy.API_ERROR
 
         if any(token in haystack for token in (
             "timeout",
@@ -85,9 +115,8 @@ def classify_failure(
             "deadline exceeded",
             "readtimeout",
             "connecttimeout",
+            "apitimeouterror",
         )):
-            if "tools/call:" in haystack or "mcptimeouterror" in haystack:
-                return FailureTaxonomy.TOOL_TIMEOUT
             return FailureTaxonomy.LLM_TIMEOUT
 
         if any(token in haystack for token in (

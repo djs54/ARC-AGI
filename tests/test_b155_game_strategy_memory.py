@@ -35,9 +35,23 @@ async def test_memory_query_and_parse_and_evaluate_storage():
 
     # _memory_query should include dimensions, color count and action count
     query = orchestrator._memory_query(observation)
+    assert "domain:arc" in query
+    assert "kind:memory_recall" in query
+    assert "grid_rows:2" in query
+    assert "grid_cols:2" in query
+    assert "n_colors:2" in query
+    assert "n_actions:3" in query
     assert "2x2 grid" in query
     assert "2 colors" in query or "2 colors" in query
     assert "3 actions" in query or "3 actions" in query
+
+    analogy_query = orchestrator._analogical_query(observation)
+    assert "kind:analogical_search" in analogy_query
+    assert "fingerprint:2x2-2-3" in analogy_query
+
+    plan_query = orchestrator._plan_recall_query(observation)
+    assert "kind:plan_recall" in plan_query
+    assert "n_actions:3" in plan_query
 
     # _parse_transformation_lessons should convert memories into hypotheses
     memory = {

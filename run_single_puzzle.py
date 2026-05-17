@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import atexit
 import datetime
+import dataclasses
+import enum
 import importlib.util
 import json
 import logging
@@ -15,6 +17,7 @@ import time
 from pathlib import Path
 
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
+from benchmarks.arc3.world_model_eval import WorldModelEvaluator
 from agents.arc3.runner import DurableARCRunner
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
@@ -28,7 +31,6 @@ REPO_ROOT = Path(__file__).resolve().parents[0]
 CONFIG_PATH = REPO_ROOT / "campy.toml"
 LEGACY_CONFIG_PATH = REPO_ROOT / "sidequests.toml"
 MANIFEST_PATH = REPO_ROOT / "benchmarks/arc3/tasks_manifest.json"
-DB_PATH = Path.home() / ".sidequests" / "brain_single_test.db"
 TASK_BATCH_SIZE = 5
 FINAL_OUTPUT_PATH = REPO_ROOT / "submission_results_single.json"
 ARC_SERVER_OUTPUT_PATH = REPO_ROOT / "submission_results_arcServer.json"
@@ -62,6 +64,26 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(leve
 logger = logging.getLogger(__name__)
 
 
+def _json_default(obj):
+    """Best-effort JSON adapter for telemetry/result payloads."""
+    if dataclasses.is_dataclass(obj):
+        return dataclasses.asdict(obj)
+    if isinstance(obj, enum.Enum):
+        return obj.value
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, set):
+        return sorted(obj, key=str)
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return str(obj)
+
+
+def _json_dumps(obj, **kwargs) -> str:
+    return json.dumps(obj, default=_json_default, **kwargs)
+
+
 def _atomic_dump_json(path: Path, obj) -> None:
     """Write JSON atomically: write to <path>.tmp, fsync, then os.replace into place.
 
@@ -74,7 +96,7 @@ def _atomic_dump_json(path: Path, obj) -> None:
     # Ensure parent exists
     tmp.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp, "w") as f:
-        json.dump(obj, f, indent=2)
+        json.dump(obj, f, indent=2, default=_json_default)
         f.flush()
         try:
             os.fsync(f.fileno())
@@ -238,7 +260,7 @@ def _enforce_llm_preflight(config: dict) -> None:
 
 
 class SingleTaskRunner:
-    def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None):
+    def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None, live_smoke: bool = False):
         resolved_config_path = (
             Path(config_path)
             if config_path
@@ -256,17 +278,18 @@ class SingleTaskRunner:
         self.tasks = []
         self.results = []
         self.real_api = real_api
+        self.live_smoke = live_smoke
         self.live_output_path = LIVE_OUTPUT_PATH
         self.final_output_path = FINAL_OUTPUT_PATH
         self.arc_server_output_path = ARC_SERVER_OUTPUT_PATH
         self.agent_execution_trace_path = AGENT_EXECUTION_TRACE_PATH
         self.master_timeline_path = MASTER_TIMELINE_PATH
+        self.world_model_eval = False
+        self.world_model_live_output_path = Path("submission_results_single.world_model.live.jsonl")
+        self.world_model_evaluator = WorldModelEvaluator()
 
     async def initialize(self):
         logger.info("Initializing Single Task Runner...")
-
-        # Clean up old database and stale sidecars from prior smoke runs.
-        _remove_db_artifacts(DB_PATH)
 
         # Production startup: verify the HippoCampy MCP service is ready
         required_tools = [
@@ -275,9 +298,16 @@ class SingleTaskRunner:
             "register_plan",
             "report_outcome",
             "recall_plans",
+            "recall_relevant_lessons",
+            "upsert_lesson",
         ]
         try:
-            check_mcp_readiness(required_tools=required_tools, require_brain_socket=True)
+            check_mcp_readiness(
+                required_tools=required_tools,
+                require_brain_socket=True,
+                probe_memory_backend=True,
+                require_roundtrip_persistence=True,
+            )
         except ReadinessError as exc:
             raise RuntimeError(str(exc))
 
@@ -286,10 +316,12 @@ class SingleTaskRunner:
         self.db = None
 
         # 6. Initialize Harness
+        # A039: Right-size timeout budget for live smokes.
+        timeout_budget = 7200 if self.live_smoke else 3600
         benchmark_config = BenchmarkConfig(
             name="ARC-AGI-3",
             description="Single puzzle test",
-            timeout=3600,
+            timeout=timeout_budget,
             memory_limit_gb=8.0,
             cpu_limit_percent=80.0,
             parameters=self.config.get("benchmark", {})
@@ -313,6 +345,8 @@ class SingleTaskRunner:
             for task, game in zip(self.tasks[:usable_count], live_games[:usable_count]):
                 game_id = game["game_id"]
                 setattr(task, "game_id", game_id)
+                setattr(task, "arc_game_title", game.get("title"))
+                setattr(task, "arc_game_tags", list(game.get("tags") or []))
                 task.prompt = f"Solve live ARC puzzle {game_id}"
 
             logger.info(
@@ -323,6 +357,9 @@ class SingleTaskRunner:
 
     def reset_live_output(self):
         self.live_output_path.write_text("")
+        if self.world_model_eval:
+            self.world_model_evaluator.reset()
+            self.world_model_live_output_path.write_text("")
 
     def append_live_snapshot(self, snapshot: dict):
         normalized = dict(snapshot or {})
@@ -331,7 +368,28 @@ class SingleTaskRunner:
             datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         )
         with open(self.live_output_path, "a") as f:
-            f.write(json.dumps(normalized) + "\n")
+            f.write(_json_dumps(normalized) + "\n")
+
+        # A078: World Model Live Stream
+        if self.world_model_eval:
+            try:
+                task_id = normalized.get("task_id", "unknown")
+                step = normalized.get("step", normalized.get("total_steps", 0))
+                
+                if normalized.get("snapshot_type") == "final_result":
+                    summary_row = self.world_model_evaluator.build_summary_row(task_id, normalized)
+                    with open(self.world_model_live_output_path, "a") as f:
+                        f.write(_json_dumps(summary_row.to_dict()) + "\n")
+                elif normalized.get("snapshot_type") == "world_model_decision":
+                    decision_row = self.world_model_evaluator.build_decision_row(task_id, normalized)
+                    with open(self.world_model_live_output_path, "a") as f:
+                        f.write(_json_dumps(decision_row.to_dict()) + "\n")
+                elif "world_model_node_count" in normalized:
+                    step_row = self.world_model_evaluator.build_step_row(task_id, step, normalized)
+                    with open(self.world_model_live_output_path, "a") as f:
+                        f.write(_json_dumps(step_row.to_dict()) + "\n")
+            except Exception:
+                logger.debug("A078: Failed to emit world model live metrics", exc_info=True)
 
     @staticmethod
     def _phase_question_for_export(phase: str | None) -> str | None:
@@ -359,10 +417,123 @@ class SingleTaskRunner:
             return payload.get("input_summary") or payload.get("result_summary") or fallback
         return payload.get("result_summary") or payload.get("input_summary") or fallback
 
+    @staticmethod
+    def _make_final_result_compact(result: dict) -> dict:
+        """A088: Compact final result by removing large fields and preserving high-signal summaries."""
+        run_review = SingleTaskRunner._build_run_review(result)
+        compact = {
+            "task_id": result.get("task_id"),
+            "game_id": result.get("game_id"),
+            "game_title": result.get("game_title"),
+            "game_tags": result.get("game_tags", []),
+            "correct": result.get("correct"),
+            "steps": result.get("steps"),
+            "runtime_seconds": result.get("runtime_seconds"),
+            "failure_class": result.get("failure_class"),
+            "final_state": result.get("final_state"),
+            "puzzle_description": run_review.get("puzzle_description"),
+            "arc_game_url": run_review.get("arc_game_url"),
+            "test_results_url": run_review.get("test_results_url"),
+            "solve_phase_summary": result.get("solve_phase_summary", {}),
+            "run_review": run_review,
+        }
+        
+        # A088: Preserve world model summary (not full snapshot)
+        world_model_snapshot = result.get("world_model_snapshot", {})
+        if world_model_snapshot:
+            compact["world_model_summary"] = SingleTaskRunner._summarize_world_model_snapshot(world_model_snapshot)
+        
+        # A088: Add artifact path references instead of full payloads
+        artifacts = {}
+        if result.get("has_execution_trace") or result.get("agent_execution_trace"):
+            artifacts["agent_execution_trace"] = "agent_execution_trace.json"
+        if result.get("has_timeline") or result.get("arc_event_timeline") or result.get("chronological_log"):
+            artifacts["master_timeline"] = "master_timeline.json"
+        artifacts["world_model_live"] = "submission_results_single.world_model.live.jsonl"
+        
+        if artifacts:
+            compact["artifacts"] = artifacts
+        
+        # Include metrics if available
+        if "evals" in result:
+            compact["evals"] = result["evals"]
+        if "quality_dimensions" in result:
+            compact["quality_dimensions"] = result["quality_dimensions"]
+        
+        return compact
+
+    @staticmethod
+    def _summarize_world_model_snapshot(snapshot: dict) -> dict:
+        """Return bounded world-model counts without embedding full node/edge payloads."""
+        if not isinstance(snapshot, dict):
+            return {}
+        return {
+            "node_count": snapshot.get("node_count", 0),
+            "edge_count": snapshot.get("edge_count", 0),
+            "contradiction_count": snapshot.get("contradiction_count", 0),
+            "demotion_count": snapshot.get("demotion_count", 0),
+        }
+
+    @staticmethod
+    def _game_slug(result: dict) -> str:
+        title = str(result.get("game_title") or "").strip()
+        if title:
+            return title.lower()
+        game_id = str(result.get("game_id") or "").strip()
+        if game_id and game_id != "unknown":
+            return game_id.split("-", 1)[0].lower()
+        return ""
+
+    @staticmethod
+    def _artifact_url(path: str | Path) -> str:
+        try:
+            return Path(path).resolve().as_uri()
+        except Exception:
+            return str(path)
+
+    @staticmethod
+    def _build_run_review(result: dict, results_path: str | Path | None = None) -> dict:
+        game_id = str(result.get("game_id") or "unknown")
+        title = str(result.get("game_title") or SingleTaskRunner._game_slug(result) or game_id).upper()
+        tags = [str(tag) for tag in (result.get("game_tags") or []) if tag]
+        controls = ", ".join(tags) if tags else "unknown controls"
+        steps = int(result.get("steps", 0) or 0)
+        final_state = str(result.get("final_state") or "unknown")
+        failure_class = str(result.get("failure_class") or "none")
+        correct = bool(result.get("correct") is True)
+        slug = SingleTaskRunner._game_slug(result)
+        arc_game_url = f"https://arcprize.org/tasks/{slug}" if slug else "https://arcprize.org/tasks"
+        result_file = Path(results_path) if results_path else FINAL_OUTPUT_PATH
+        sentence = (
+            f"Played ARC-AGI-3 task {title} ({game_id}), a {controls} game; "
+            f"the smoke test ended {'solved' if correct else 'unsolved'} after {steps} step(s) "
+            f"with final_state={final_state} and failure_class={failure_class}."
+        )
+        return {
+            "puzzle_description": sentence,
+            "arc_game_url": arc_game_url,
+            "test_results_url": SingleTaskRunner._artifact_url(result_file),
+            "artifact_urls": {
+                "submission_results_single": SingleTaskRunner._artifact_url(FINAL_OUTPUT_PATH),
+                "submission_results_single_live": SingleTaskRunner._artifact_url(LIVE_OUTPUT_PATH),
+                "submission_results_single_world_model_live": SingleTaskRunner._artifact_url(REPO_ROOT / "submission_results_single.world_model.live.jsonl"),
+                "agent_execution_trace": SingleTaskRunner._artifact_url(AGENT_EXECUTION_TRACE_PATH),
+                "master_timeline": SingleTaskRunner._artifact_url(MASTER_TIMELINE_PATH),
+            },
+        }
+
     def export_results(self):
         output_path = self.final_output_path
         logger.info(f"Exporting results to {output_path}")
-        _atomic_dump_json(output_path, self.results)
+        for result in self.results:
+            if isinstance(result, dict):
+                result.setdefault("run_review", self._build_run_review(result, output_path))
+        results_for_export = (
+            [self._make_final_result_compact(result) for result in self.results]
+            if (self.live_smoke or self.world_model_eval)
+            else self.results
+        )
+        _atomic_dump_json(output_path, results_for_export)
 
         # Chronological timeline of function calls + ARC API request/response events.
         call_timeline = []
@@ -475,6 +646,21 @@ class SingleTaskRunner:
             return (2, float("inf"), str(item.get("name", "")))
 
         call_timeline.sort(key=_sort_key)
+        if self.results:
+            review = self._build_run_review(self.results[0], self.arc_server_output_path)
+            call_timeline.append(
+                {
+                    "name": "run_review",
+                    "event": "summary",
+                    "data": review,
+                    "timestamp_iso": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "event_detail": "run review summary",
+                    "what": review["puzzle_description"],
+                    "phase": "summary",
+                    "phase_question": "What game was played, and where can I inspect it?",
+                    "phase_answer": review["puzzle_description"],
+                }
+            )
 
         logger.info(f"Exporting ARC-only responses to {self.arc_server_output_path}")
         _atomic_dump_json(self.arc_server_output_path, call_timeline)
@@ -489,6 +675,18 @@ class SingleTaskRunner:
         agent_execution_trace.sort(key=lambda e: e.get("timestamp_iso", ""))
         
         logger.info(f"Exporting agent execution trace to {self.agent_execution_trace_path}")
+        if self.results:
+            review = self._build_run_review(self.results[0], self.agent_execution_trace_path)
+            agent_execution_trace.append(
+                {
+                    "timestamp_iso": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "event_type": "operation",
+                    "operation": "run_review",
+                    "details": review,
+                    "result": {"description": review["puzzle_description"]},
+                    "elapsed_ms": None,
+                }
+            )
         _atomic_dump_json(self.agent_execution_trace_path, agent_execution_trace)
 
         timeline_base_dt = None
@@ -603,6 +801,22 @@ class SingleTaskRunner:
                 })
 
         master_timeline.sort(key=_sort_key)
+        if self.results:
+            review = self._build_run_review(self.results[0], self.master_timeline_path)
+            master_timeline.append(
+                {
+                    "source": "run_review",
+                    "timestamp_iso": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "name": "run_review",
+                    "event": "summary",
+                    "what": review["puzzle_description"],
+                    "phase": "summary",
+                    "phase_question": "What game was played, and where can I inspect it?",
+                    "phase_answer": review["puzzle_description"],
+                    "event_detail": "run review summary",
+                    "data": review,
+                }
+            )
 
         logger.info(f"Exporting master timeline to {self.master_timeline_path}")
         _atomic_dump_json(self.master_timeline_path, master_timeline)
@@ -630,7 +844,7 @@ def _emergency_shutdown(runner: DurableARCRunner):
         path = Path(AGENT_EXECUTION_TRACE_PATH)
         temp_path = path.with_suffix(f"{path.suffix}.tmp")
         with open(temp_path, "w") as f:
-            json.dump(runner._current_trace_snapshot, f, indent=2)
+            json.dump(runner._current_trace_snapshot, f, indent=2, default=_json_default)
         # Check for and create the directory if it doesn't exist
         path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temp_path, path)
@@ -670,6 +884,8 @@ async def main():
         default=None,
         help="Load ARC_API_KEY from this JSON file if the environment variable is not already set",
     )
+    parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
+    parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
     args = parser.parse_args()
 
     real_api = args.real_api or args.live_smoke
@@ -685,7 +901,8 @@ async def main():
         if value is not None
     }
     if args.live_smoke:
-        llm_overrides.setdefault("timeout_seconds", 300.0)
+        # A039: increase per-call timeout and max retries for local Ollama smokes.
+        llm_overrides.setdefault("timeout_seconds", 600.0)
         llm_overrides.setdefault("max_retries", 5)
 
     if real_api and not _ensure_arc_api_key(args.arc_key_path):
@@ -699,7 +916,17 @@ async def main():
     else:
         num_puzzles = 1 if real_api else TASK_BATCH_SIZE
 
-    runner = SingleTaskRunner(real_api=real_api, config_path=args.config, llm_overrides=llm_overrides, max_steps=args.max_steps)
+    runner = SingleTaskRunner(
+        real_api=real_api, 
+        config_path=args.config, 
+        llm_overrides=llm_overrides, 
+        max_steps=args.max_steps, 
+        live_smoke=bool(args.live_smoke)
+    )
+    runner.world_model_eval = bool(args.world_model_eval)
+    if args.world_model_live_output:
+        runner.world_model_live_output_path = Path(args.world_model_live_output)
+        
     try:
         await runner.initialize()
 
@@ -748,22 +975,29 @@ async def main():
         runner.results = await durable.run(runner.tasks, card_id)
 
         for result in runner.results:
-            runner.append_live_snapshot(
-                {
-                    "snapshot_type": "final_result",
-                    "task_id": result.get("task_id"),
-                    "game_id": result.get("game_id"),
-                    "correct": result.get("correct"),
-                    "steps": result.get("steps"),
-                    "runtime_seconds": result.get("runtime_seconds"),
-                    "failure_class": result.get("failure_class"),
-                    "final_state": result.get("final_state"),
-                    "solve_phase_summary": result.get("solve_phase_summary", {}),
-                    "evals": result.get("evals", {}),
-                    "quality_dimensions": result.get("quality_dimensions", {}),
-                    "system_monitoring": result.get("system_monitoring", {}),
-                }
-            )
+            run_review = SingleTaskRunner._build_run_review(result, runner.final_output_path)
+            # A088: Build compact final result for live stream
+            final_snapshot = {
+                "snapshot_type": "final_result",
+                "task_id": result.get("task_id"),
+                "game_id": result.get("game_id"),
+                "game_title": result.get("game_title"),
+                "game_tags": result.get("game_tags", []),
+                "correct": result.get("correct"),
+                "steps": result.get("steps"),
+                "runtime_seconds": result.get("runtime_seconds"),
+                "failure_class": result.get("failure_class"),
+                "final_state": result.get("final_state"),
+                "run_review": run_review,
+                "solve_phase_summary": result.get("solve_phase_summary", {}),
+                "evals": result.get("evals", {}),
+                "quality_dimensions": result.get("quality_dimensions", {}),
+                "system_monitoring": result.get("system_monitoring", {}),
+                "world_model_snapshot": SingleTaskRunner._summarize_world_model_snapshot(
+                    result.get("world_model_snapshot", {})
+                ),
+            }
+            runner.append_live_snapshot(final_snapshot)
 
         # Print result summary
         for idx, result in enumerate(runner.results):

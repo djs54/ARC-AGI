@@ -49,8 +49,43 @@ def test_action_diversity_score_extremes():
     repeated_score, _ = evaluator._score_action_diversity(repeated_action_steps)
     full_score, _ = evaluator._score_action_diversity(full_coverage_steps)
 
-    assert repeated_score == 0
+    # A042: Short runs (<= 5 steps) now floor to 10 diversity to avoid false violations.
+    assert repeated_score == 10
     assert full_score == 20
+
+def test_action_diversity_unconstrained():
+    evaluator = TrajectoryEvaluator()
+    # 6 steps (unconstrained by small-sample rule)
+    repeated_action_steps = [
+        _step(i + 1, "ACTION1", frame_hash=f"a{i}")
+        for i in range(6)
+    ]
+    repeated_score, _ = evaluator._score_action_diversity(repeated_action_steps)
+    assert repeated_score == 0
+
+
+
+def test_action_diversity_single_action_environment_not_penalized():
+    evaluator = TrajectoryEvaluator()
+    steps = [
+        {
+            "step": 1,
+            "action_id": "ACTION6",
+            "available_actions": ["ACTION6"],
+            "frame_hash": "s1",
+            "solve_context": {"archetype": "space", "victory_condition": {"type": "reach_goal"}},
+        },
+        {
+            "step": 2,
+            "action_id": "ACTION6",
+            "available_actions": ["ACTION6"],
+            "frame_hash": "s2",
+            "solve_context": {"archetype": "space", "victory_condition": {"type": "reach_goal"}},
+        },
+    ]
+    score, details = evaluator._score_action_diversity(steps)
+    assert score == 20
+    assert details.get("reason") == "single_action_environment"
 
 
 def test_hypothesis_convergence_scores_stable_vs_oscillating():

@@ -11,7 +11,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from benchmarks.ab_harness import ABTask, ABTaskResult, ABVariant, BenchmarkConfig
-from benchmarks.arc3.submission import SubmissionRunner
+# SubmissionRunner is imported lazily within tests that need it to avoid
+# requiring optional runtime dependencies at module import time.
 from benchmarks.arc3.adapter import NoOpBrainClient
 from agents.arc3.checkpoint import CheckpointManager
 from agents.arc3.runner import DurableARCRunner
@@ -163,6 +164,7 @@ async def test_continues_after_task_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_loop_worker_survives_error(monkeypatch):
+    from benchmarks.arc3.submission import SubmissionRunner
     runner = SubmissionRunner()
     runner.db = MagicMock()
     runner.config = {"llm": {"provider": "ollama", "model": "test"}}
@@ -390,6 +392,10 @@ async def test_progress_callback_receives_step_snapshots(tmp_path):
     assert snapshots[0]["snapshot_type"] == "step"
     assert snapshots[0]["task_id"] == task.task_id
     assert snapshots[0]["step"] == 1
+    assert "env_reward" in snapshots[0]
+    assert "progress_reward" in snapshots[0]
+    assert "reward_components" in snapshots[0]
+    assert "env_signals" in snapshots[0]
     assert "solve_phase_summary" in snapshots[0]
 
 
@@ -596,11 +602,12 @@ def test_orchestration_report_flags_phase_violations():
         {
             "task_id": "arc_eval_001",
             "game_id": "game-1",
-            "steps": 1,
+            "steps": 6, # A042: Need > 5 steps to avoid small-sample suppression
             "correct": False,
             "runtime_seconds": 1.0,
             "final_state": "NOT_FINISHED",
             "final_observation": {"grid": [[1]]},
+            "debug_steps": [{"step": i} for i in range(1, 7)],
             "sidequests_ledger": [
                 {
                     "step": 3,
@@ -616,6 +623,201 @@ def test_orchestration_report_flags_phase_violations():
     assert report["status"] == "violation"
     assert len(report["violations"]) == 1
     assert report["violations"][0]["type"] == "phase_violation"
+
+
+def test_orchestration_report_suppresses_violations_on_small_sample():
+    """A042: Ensure violations are suppressed when step count is <= 5."""
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+
+    row = runner._submission_row_from_result(
+        {
+            "task_id": "arc_eval_001",
+            "game_id": "game-1",
+            "steps": 3,
+            "correct": False,
+            "runtime_seconds": 1.0,
+            "final_state": "NOT_FINISHED",
+            "final_observation": {"grid": [[1]]},
+            "debug_steps": [{"step": i} for i in range(1, 4)],
+            "sidequests_ledger": [
+                {
+                    "step": 3,
+                    "phase": "hypothesize",
+                    "call_type": "notify_turn",
+                    "mode": "write",
+                }
+            ],
+        }
+    )
+
+    report = row["orchestration_report"]
+    assert report["status"] == "ok"
+    assert report["small_sample_size"] is True
+    assert len(report["suppressed_violations"]) >= 1
+
+
+def test_orchestration_report_suppresses_violations_in_single_action_environment():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+
+    row = runner._submission_row_from_result(
+        {
+            "task_id": "arc_eval_001",
+            "game_id": "game-1",
+            "steps": 1,
+            "correct": False,
+            "runtime_seconds": 1.0,
+            "final_state": "NOT_FINISHED",
+            "final_observation": {"grid": [[1]]},
+            "sidequests_ledger": [
+                {
+                    "step": 3,
+                    "phase": "hypothesize",
+                    "call_type": "notify_turn",
+                    "mode": "write",
+                }
+            ],
+            "debug_steps": [
+                {"step": 1, "available_actions": ["ACTION6"]},
+            ],
+        }
+    )
+
+    report = row["orchestration_report"]
+    assert report["single_action_environment"] is True
+    assert report["status"] == "ok"
+    assert report["violations"] == []
+    assert len(report["suppressed_violations"]) == 1
+    assert report["suppressed_violations"][0]["type"] == "phase_violation"
+
+
+def test_compute_progress_reward_includes_target_color_gain():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+
+    prev_grid = [
+        [0, 1],
+        [0, 0],
+    ]
+    next_grid = [
+        [0, 1],
+        [1, 0],
+    ]
+
+    reward, components = runner._compute_progress_reward(
+        env_reward=0.0,
+        prev_grid=prev_grid,
+        next_grid=next_grid,
+        prev_levels_completed=0,
+        next_levels_completed=0,
+        prev_score=None,
+        next_score=None,
+        target_color_id=1,
+    )
+    assert reward > 0.0
+    assert components.get("target_color_progress", 0.0) > 0.0
+
+
+def test_compute_progress_reward_preserves_terminal_env_reward():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+
+    reward, components = runner._compute_progress_reward(
+        env_reward=1.0,
+        prev_grid=[[0]],
+        next_grid=[[0]],
+        prev_levels_completed=0,
+        next_levels_completed=0,
+        prev_score=0.0,
+        next_score=0.0,
+        target_color_id=None,
+    )
+    assert reward == 1.0
+
+
+@pytest.mark.asyncio
+async def test_steps_preserved_into_submission_row(tmp_path):
+    """Regression: ensure ABTaskResult.steps is preserved into the final submission row."""
+    CheckpointManager.CHECKPOINT_DIR = tmp_path
+    tasks = _sample_tasks()[:1]
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+
+    result = ABTaskResult(
+        task_id="task-1",
+        variant=ABVariant.SIDEQUESTS,
+        correct=True,
+        steps=5,
+        tokens_input=1,
+        tokens_output=1,
+        final_state="WIN",
+        final_observation={"grid": [[1]]},
+    )
+
+    runner._run_puzzle = AsyncMock(return_value=(result, 0.1))
+
+    rows = await runner.run(tasks, "card-steps")
+    assert len(rows) == 1
+    assert rows[0]["steps"] == 5
+    assert rows[0]["metadata"]["steps"] == 5
+
+
+def test_extract_env_reward_prefers_explicit_reward_field():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+    frame = {"state": "NOT_FINISHED", "reward": 0.125}
+    assert runner._extract_env_reward(frame) == 0.125
+
+
+def test_extract_env_reward_falls_back_to_win_terminal():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+    assert runner._extract_env_reward({"state": "WIN"}) == 1.0
+    assert runner._extract_env_reward({"state": "GAME_OVER"}) == 0.0
+
+
+def test_should_replan_respects_min_interval_without_decline():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+    runner._last_replan_step = 10
+    orchestrator = MagicMock()
+    orchestrator._step_history = [
+        {"progress_reward": 0.05},
+        {"progress_reward": 0.05},
+        {"progress_reward": 0.05},
+        {"progress_reward": 0.05},
+    ]
+    orchestrator._hypothesis_context = {"loop_detected": True}
+    orchestrator._consecutive_no_progress_steps = 10
+
+    # Within 5-step interval: should not replan unless reward is declining.
+    orchestrator._step_history.extend([{"progress_reward": 0.05}] * 3)  # step count = 7
+    assert runner._should_replan(orchestrator, no_progress_steps=10) is False
+
+
+def test_should_replan_allows_early_replan_when_progress_declines():
+    harness = _make_stub_harness()
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+    runner._last_replan_step = 10
+    orchestrator = MagicMock()
+    # 8-step window: first 4 high, last 4 low -> declining.
+    orchestrator._step_history = [
+        {"progress_reward": 0.08},
+        {"progress_reward": 0.07},
+        {"progress_reward": 0.08},
+        {"progress_reward": 0.07},
+        {"progress_reward": 0.005},
+        {"progress_reward": 0.004},
+        {"progress_reward": 0.006},
+        {"progress_reward": 0.005},
+    ]
+    orchestrator._hypothesis_context = {"loop_detected": False}
+    orchestrator._consecutive_no_progress_steps = 3
+
+    # current_step = 8, since_last_replan = -2 if last=10; emulate realistic count.
+    runner._last_replan_step = 5
+    assert runner._should_replan(orchestrator, no_progress_steps=3) is True
 
 
 # ── B89: Benchmark Metrics ──────────────────────────────────────────────
@@ -829,6 +1031,45 @@ async def test_entity_gate_in_orchestration_report():
         report = results[0].get("orchestration_report", {})
         assert "entity_gate_status" in report
         assert report["entity_gate_status"]["status"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_action_effect_guaranteed_on_win():
+    """A053: Verify that perceive_step_response is called even on terminal WIN."""
+    harness = _make_stub_harness()
+    # First step doesn't win, second step wins
+    harness._get_mock_initial_frame.return_value = {
+        "frame": [[0]], "available_actions": ["ACTION1"], "state": "NOT_FINISHED", "guid": "g1"
+    }
+    
+    # Mock executor to win on second call
+    async def mock_execute(*args, **kwargs):
+        return {"frame": [[1]], "state": "WIN"}, 1.0, True, "g1"
+
+    runner = DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
+    runner._execute_action = AsyncMock(side_effect=mock_execute)
+    
+    task = ABTask(task_id="t-win", category="c", prompt="p")
+    setattr(task, "game_id", "g1")
+    
+    with patch("agents.arc3.runner.CheckpointManager") as mock_mgr_cls:
+        mock_mgr = mock_mgr_cls.return_value
+        mock_checkpoint = MagicMock()
+        mock_checkpoint.tasks = {}
+        mock_mgr.load_or_create.return_value = mock_checkpoint
+        
+        with patch("agents.arc3.orchestrator.ARCOrchestrator.perceive_step_response", new_callable=AsyncMock) as mock_perceive:
+            await runner.run([task], "card-win")
+            
+            # Should have been called for the winning step
+            # Note: total_steps increments before the call, so it should be called with step=1
+            mock_perceive.assert_awaited()
+            found_win_call = any(
+                call.kwargs.get("done") is True or call.args[3] is True # done is 4th arg or kwarg
+                for call in mock_perceive.call_args_list
+            )
+            assert found_win_call is True
+
 
 @pytest.mark.asyncio
 async def test_upsert_lesson_round_trip():

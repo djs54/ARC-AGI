@@ -37,7 +37,9 @@ for line in sys.stdin:
             {'name': 'register_plan', 'schema': {}},
             {'name': 'report_outcome', 'schema': {}},
             {'name': 'recall_plans', 'schema': {}},
+            {'name': 'recall_lessons', 'schema': {}},
             {'name': 'analogical_search', 'schema': {}},
+            {'name': 'upsert_lesson', 'schema': {}},
         ]}}
         print(json.dumps(resp), flush=True)
     elif method == 'tools/call':
@@ -49,13 +51,25 @@ for line in sys.stdin:
         elif name == 'current_truth':
             print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'results': []})}]}}), flush=True)
         elif name == 'register_plan':
-            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'plan_id': 'plan-1'})}]}}), flush=True)
+            if args.get('goal') == 'missing-plan':
+                payload = {'plan_id': None}
+            else:
+                payload = {'plan_id': 'plan-1'}
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps(payload)}]}}), flush=True)
         elif name == 'report_outcome':
             print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'updated': True})}]}}), flush=True)
         elif name == 'recall_plans':
             print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'plans': []})}]}}), flush=True)
+        elif name == 'recall_lessons':
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'lessons': []})}]}}), flush=True)
         elif name == 'analogical_search':
             print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps({'results': []})}]}}), flush=True)
+        elif name == 'upsert_lesson':
+            if args.get('domain') == 'missing_id':
+                payload = {'lesson_id': None}
+            else:
+                payload = {'lesson_id': 'lesson-1'}
+            print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps(payload)}]}}), flush=True)
         else:
             print(json.dumps({'jsonrpc': '2.0', 'id': id, 'error': {'code': -32601, 'message': 'Unknown method: ' + str(name)}}), flush=True)
     else:
@@ -76,13 +90,18 @@ def test_wrapped_methods_success():
         await client.initialize_session()
 
         r1 = await client.notify_turn(role="agent", content="hello", session_id="s1")
-        assert r1.get("status") == "accepted"
+        assert r1.get("status") == "queued_async"
+        assert r1.get("mode") == "async_background"
+
+        r1b = await client.recall_lessons(lesson_type="test", limit=1)
+        assert isinstance(r1b.get("lessons"), list)
 
         r2 = await client.current_truth(query="q", session_id="s1", scope="global", limit=5)
         assert isinstance(r2.get("results"), list)
 
         r3 = await client.register_plan(goal="g", steps=["a","b"], session_id="s1")
         assert r3.get("plan_id") == "plan-1"
+        assert r3.get("write_ok") is True
 
         r4 = await client.report_outcome(valence=0.5, session_id="s1")
         assert r4.get("updated") is True
@@ -92,6 +111,21 @@ def test_wrapped_methods_success():
 
         r6 = await client.analogical_search(query="q", current_quest_id="x", limit=1, min_similarity=0.1)
         assert isinstance(r6.get("results"), list)
+
+        r7 = await client.upsert_lesson(domain="action_effect", text="{}", valence=0.1)
+        assert r7.get("lesson_id") == "lesson-1"
+        assert r7.get("write_ok") is True
+
+        r8 = await client.upsert_lesson(domain="missing_id", text="{}", valence=0.1)
+        assert r8.get("lesson_id") is None
+        assert r8.get("write_ok") is False
+        assert r8.get("error_code") == "missing_lesson_id"
+        assert client.memory_degraded is True
+
+        r9 = await client.register_plan(goal="missing-plan", steps=["a"], session_id="s1")
+        assert r9.get("plan_id") is None
+        assert r9.get("write_ok") is False
+        assert r9.get("error_code") == "missing_plan_id"
 
         await client.close()
 
@@ -107,6 +141,29 @@ def test_missing_tool_raises():
         await client.initialize_session()
         with pytest.raises(MCPToolNotFound):
             await client.call_tool("this_tool_does_not_exist", {})
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_mechanic_memory_missing_tools_degrade_cleanly():
+    cmd = python_cmd_for(SERVER_SCRIPT)
+    client = MCPBrainClient(db=None, config=None, cmd=cmd)
+
+    async def scenario():
+        await client.start()
+        await client.initialize_session()
+
+        priors = await client.recall_mechanic_priors(signature={"action_set": "ACTION1"})
+        assert priors.get("status") == "capability_missing"
+        assert priors.get("results") == []
+        assert priors.get("memory_degraded") is False
+
+        published = await client.publish_mechanic_summary(summary={"id": "m1"})
+        assert published.get("status") == "capability_missing"
+        assert published.get("write_ok") is False
+        assert published.get("memory_degraded") is False
+
         await client.close()
 
     asyncio.run(scenario())

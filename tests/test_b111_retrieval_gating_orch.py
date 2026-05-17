@@ -64,3 +64,19 @@ async def test_orchestrator_retrieval_gating():
     new_obs = {"dataset_id": "d", "task_id": "t", "grid": [[1, 2], [3, 4]]}
     await orchestrator.perceive(new_obs, step=13)
     assert brain.current_truth.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_memory_degraded_throttles_retrieval():
+    brain = AsyncMock()
+    brain.current_truth.return_value = {"results": []}
+    brain.recall_relevant_lessons.return_value = {"lessons": []}
+    brain.analogical_search.return_value = {"results": []}
+    brain.memory_degraded = True
+    brain.memory_degraded_reason = "daemon_offline"
+
+    orchestrator = ARCOrchestrator(brain, MagicMock(), "session-1", MagicMock(), {"llm": {"model": "test"}})
+    observation = {"dataset_id": "d", "task_id": "t", "grid": [[0]], "available_actions": ["ACTION1"]}
+
+    assert orchestrator._should_trigger_retrieval(observation, step=1) is False
+    assert orchestrator._should_trigger_retrieval(observation, step=10) is False

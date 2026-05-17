@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from benchmarks.arc3.schema import ARC3Observation
 from benchmarks.arc3.state_serializer import StateSerializerForARC
 from agents.arc3.orchestrator import ARCOrchestrator
+from agents.arc3.solver import ObjectRole, RoleType, HybridProgressEvidence
 
 
 @pytest.fixture
@@ -38,6 +39,7 @@ def mock_brain() -> MagicMock:
     brain.register_plan = AsyncMock(return_value={"plan_id": "plan-a", "warnings": ["avoided"], "suggestions": []})
     brain.report_outcome = AsyncMock(return_value={"updated": True})
     brain.notify_turn = AsyncMock(return_value={"status": "queued"})
+    brain.upsert_lesson = AsyncMock(return_value={"lesson_id": "L1", "status": "ok"})
     return brain
 
 
@@ -141,6 +143,7 @@ async def test_enforce_action_policy_overrides_stale_low_value_repeat(mock_brain
 
     assert enforced["action_id"] == "ACTION2"
     assert enforced["decision_source"] == "policy_override"
+    assert enforced["override_reason"] == "stale_low_value_decay"
     assert "stale low-value" in enforced["rationale"]
 
 
@@ -331,7 +334,8 @@ def test_detect_split_map_rotate_cross_does_not_exist():
     )
 
 
-def test_autopilot_confidence_drops_on_no_progress_spatial_lock(mock_brain):
+@pytest.mark.asyncio
+async def test_autopilot_confidence_drops_on_no_progress_spatial_lock(mock_brain):
     orchestrator = ARCOrchestrator(
         brain_client=mock_brain,
         llm_client=None,
@@ -348,8 +352,30 @@ def test_autopilot_confidence_drops_on_no_progress_spatial_lock(mock_brain):
     }
     # Pre-seed last target to simulate repeated unsuccessful navigation
     orchestrator._last_autopilot_target = (9, 9)
+    # Force autopilot phase to "finish" so it targets the goal and trips the spatial lock gate.
+    orchestrator._pattern_tracker.update = AsyncMock(return_value=HybridProgressEvidence(
+        local_progress=0.9,
+        local_distance=None,
+        local_monotone_steps=3,
+        scene_wl_hash="h",
+        scene_node_count=2,
+        graph_text_score=0.8,
+        graph_text_evidence_count=2,
+        graph_text_top_lesson_ids=["l1"],
+        graph_vector_score=0.7,
+        graph_vector_top_hash="h",
+        graph_vector_top_trajectory_id=None,
+        graph_prior_score=0.9,
+        graph_prior_evidence_count=1,
+        combined_similarity=0.85,
+        combined_confidence=0.9,
+        channel_agreement_range=0.2,
+        finish_mode_allowed=True,
+        phase="finish",
+        reason="test",
+    ))
     grid = [[0 for _ in range(12)] for _ in range(12)]
-    result = orchestrator._try_autopilot({"grid": grid}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6"])
+    result = await orchestrator._try_autopilot({"grid": grid}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6"])
     assert result is None
 
 
@@ -412,6 +438,103 @@ async def test_mental_sandbox_fallback_attribution(mock_brain, sample_observatio
     mock_brain.recall_relevant_lessons.assert_called_once()
     mock_brain.analogical_search.assert_called_once()
     assert "lessons" in ctx and "memories" in ctx
+
+
+def test_validate_tool_payload_behaviour():
+    """Direct unit test for the tool-payload validator."""
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    # Valid payload should not raise
+    orchestrator._validate_tool_payload({"repl_test": "print(1)"}, "repl_test")
+
+    # None payload should raise and record a trace event
+    with pytest.raises(ValueError):
+        orchestrator._validate_tool_payload({"repl_test": None}, "repl_test")
+
+    # Blank string should raise
+    with pytest.raises(ValueError):
+        orchestrator._validate_tool_payload({"repl_test": "   "}, "repl_test")
+
+
+@pytest.mark.asyncio
+async def test_mental_sandbox_missing_repl_test_records_trace_and_fallback(mock_brain, sample_observation):
+    class BrokenLLM:
+        def chat(self, messages):
+            return json.dumps({"repl_test": None})
+
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=BrokenLLM(),
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    with patch.object(orchestrator, '_query_llm', AsyncMock(return_value={"action_id": "ACTION5", "rationale": "fallback"})) as mock_fallback:
+        action = await orchestrator._mental_sandbox("prompt", ["ACTION1", "ACTION5"], sample_observation)
+        assert action["action_id"] == "ACTION5"
+        assert mock_fallback.called
+        assert any(e.get("operation") == "malformed_model_output" for e in orchestrator._execution_trace)
+
+
+@pytest.mark.asyncio
+async def test_mental_sandbox_blank_repl_test_records_trace_and_fallback(mock_brain, sample_observation):
+    class BlankLLM:
+        def chat(self, messages):
+            return json.dumps({"repl_test": ""})
+
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=BlankLLM(),
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    with patch.object(orchestrator, '_query_llm', AsyncMock(return_value={"action_id": "ACTION5", "rationale": "fallback"})) as mock_fallback:
+        action = await orchestrator._mental_sandbox("prompt", ["ACTION1", "ACTION5"], sample_observation)
+        assert action["action_id"] == "ACTION5"
+        assert mock_fallback.called
+        assert any(e.get("operation") == "malformed_model_output" for e in orchestrator._execution_trace)
+
+
+@pytest.mark.asyncio
+async def test_mental_sandbox_valid_sandbox_thought_executes(mock_brain, sample_observation):
+    class ValidLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages):
+            self.calls += 1
+            # First response is a sandbox thought; second provides final decision
+            if self.calls == 1:
+                return json.dumps({"sandbox_thought": "ACTION1"})
+            return json.dumps({"action_id": "ACTION1", "rationale": "decide"})
+
+    mock_llm = ValidLLM()
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=mock_llm,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    # Make sure peek_action_consequences is available and deterministic
+    orchestrator.solve_engine.peek_action_consequences = MagicMock(return_value={"estimated_score": 0.1, "meaningful_change": False})
+
+    action = await orchestrator._mental_sandbox("prompt", ["ACTION1", "ACTION2"], sample_observation)
+    assert action["action_id"] == "ACTION1"
+    # No malformed payload events
+    assert not any(e.get("operation") == "malformed_model_output" for e in orchestrator._execution_trace)
+    # The returned action should include thinking_trace from the sandbox step
+    assert action.get("thinking_trace") and any(t.get("tool") == "sandbox_thought" for t in action.get("thinking_trace", []))
 
 
 @pytest.mark.asyncio
@@ -889,6 +1012,7 @@ def test_policy_override_forces_unexplored_action(sample_observation):
     assert action["action_id"] == "ACTION3"
     # A023: untested-action probing overrides B154 exploration rationale
     assert action["decision_source"] == "policy_untested_probe"
+    assert action["override_reason"] == "untested_action_probe"
     assert "A023 proactive coverage probe" in action["rationale"]
 
 
@@ -1734,6 +1858,308 @@ def test_packet_skip_empty_blocks(sample_observation):
     assert "=== PLAN ===" in prompt
 
 
+def test_replan_perturbation_forces_targeted_probe(sample_observation):
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    observation = dict(sample_observation)
+    observation["available_actions"] = ["ACTION1", "ACTION2", "ACTION3", "ACTION6"]
+    orchestrator._step_history = [
+        {"step": 1, "action_id": "ACTION2", "reward": 0.0, "x": 1, "y": 1},
+        {"step": 2, "action_id": "ACTION1", "reward": 0.0, "x": 2, "y": 2},
+    ]
+    orchestrator._solve_context = {"plateau_locked_family": "ACTION2"}
+    orchestrator._hypothesis_context = {
+        "observed_action_effects": [
+            {"action": "ACTION2", "value_status": "low_value"},
+            {"action": "ACTION1", "value_status": "low_value"},
+        ],
+        "action_coverage": {"untested_actions": ["ACTION3"]},
+    }
+
+    orchestrator.apply_replan_perturbation(
+        observation,
+        route_reason="signature_escalation",
+        no_progress_steps=4,
+    )
+
+    assert "ACTION2" in orchestrator._blocked_actions
+    assert orchestrator._replan_forced_action is not None
+
+    action = orchestrator._enforce_action_policy(
+        {"action_id": "ACTION1", "rationale": "retry", "decision_source": "llm"},
+        observation["available_actions"],
+        current_frame_hash=observation.get("frame_hash"),
+        observation=observation,
+    )
+    assert action["action_id"] == "ACTION6"
+    assert action["decision_source"] == "replan_forced_probe"
+
+
+def test_replan_temporal_block_expires():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    orchestrator._blocked_actions = {"ACTION2"}
+    orchestrator._replan_temporal_blocked_actions = {"ACTION2"}
+    orchestrator._replan_temporal_blocked_until = {"ACTION2": 3}
+
+    orchestrator._prune_replan_temporal_blocks(step=4)
+
+    assert "ACTION2" not in orchestrator._blocked_actions
+    assert "ACTION2" not in orchestrator._replan_temporal_blocked_until
+
+
+def test_replan_perturbation_does_not_block_progressing_action(sample_observation):
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    observation = dict(sample_observation)
+    observation["available_actions"] = ["ACTION1", "ACTION2", "ACTION6"]
+    orchestrator._step_history = [
+        {"step": 1, "action_id": "ACTION1", "reward": 0.03, "progress_reward": 0.03},
+        {"step": 2, "action_id": "ACTION1", "reward": 0.04, "progress_reward": 0.04},
+        {"step": 3, "action_id": "ACTION2", "reward": 0.0, "progress_reward": 0.0},
+    ]
+    orchestrator._solve_context = {"plateau_locked_family": "ACTION1"}
+    orchestrator._hypothesis_context = {
+        "observed_action_effects": [
+            {"action": "ACTION1", "value_status": "low_value"},
+            {"action": "ACTION2", "value_status": "low_value"},
+        ],
+        "action_coverage": {"untested_actions": []},
+    }
+
+    orchestrator.apply_replan_perturbation(
+        observation,
+        route_reason="signature_escalation",
+        no_progress_steps=3,
+    )
+
+    assert "ACTION1" not in orchestrator._blocked_actions
+    assert "ACTION2" in orchestrator._blocked_actions
+
+
+def test_temporal_block_released_when_action_shows_progress():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    orchestrator._step_history = [
+        {"step": 1, "action_id": "ACTION7", "reward": 0.18, "progress_reward": 0.18},
+    ]
+    orchestrator._blocked_actions = {"ACTION7"}
+    orchestrator._replan_temporal_blocked_actions = {"ACTION7"}
+    orchestrator._replan_temporal_blocked_until = {"ACTION7": 10}
+
+    blocked = orchestrator._is_temporarily_blocked("ACTION7", step=2)
+
+    assert blocked is False
+    assert "ACTION7" not in orchestrator._blocked_actions
+    assert "ACTION7" not in orchestrator._replan_temporal_blocked_until
+
+
+def test_enforce_action_policy_exploits_recent_high_progress():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    orchestrator._step_history = [
+        {"step": 1, "action_id": "ACTION4", "reward": 0.12, "progress_reward": 0.12},
+    ]
+    orchestrator._hypothesis_context = {"action_coverage": {"untested_actions": []}}
+
+    updated = orchestrator._enforce_action_policy(
+        {"action_id": "ACTION3", "rationale": "switch"},
+        ["ACTION3", "ACTION4", "ACTION7"],
+    )
+
+    assert updated["action_id"] == "ACTION4"
+    assert updated.get("override_reason") == "high_progress_exploit"
+
+
+def test_replan_probe_coordinate_rotates():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    obs = {
+        "grid": [[0 for _ in range(8)] for _ in range(8)],
+        "available_actions": ["ACTION6"],
+        "frame_hash": "f",
+    }
+    c1 = orchestrator._select_replan_probe_coordinate(obs)
+    c2 = orchestrator._select_replan_probe_coordinate(obs)
+    assert c1 != c2
+
+
+def test_replan_probe_coordinate_biases_to_target_color():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    grid = [[0 for _ in range(8)] for _ in range(8)]
+    grid[1][1] = 9
+    grid[6][6] = 9
+    obs = {
+        "grid": grid,
+        "available_actions": ["ACTION6"],
+        "frame_hash": "f",
+    }
+    orchestrator._solve_context = {
+        "archetype": "space",
+        "victory_condition": {
+            "type": "reach_goal",
+            "description": "reach color 9",
+            "target_color_id": 9,
+            "confidence": 0.9,
+        },
+        "object_roles": {},
+    }
+    coord = orchestrator._select_replan_probe_coordinate(obs)
+    assert coord in {(1, 1), (6, 6)}
+
+
+def test_replan_goal_rotates_after_zero_reward_saturation(sample_observation):
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+
+    vc = MagicMock()
+    vc.target_color_id = 1
+    vc.description = "reach color 1"
+    vc.confidence = 0.95
+    vc.condition_type = MagicMock(value="reach_goal")
+    orchestrator.solve_engine._victory_condition = vc
+
+    orchestrator._solve_context = {
+        "victory_condition": {
+            "type": "reach_goal",
+            "description": "reach color 1",
+            "target_color_id": 1,
+            "confidence": 0.95,
+        },
+        "object_roles": {},
+        "plateau_locked_family": None,
+    }
+    orchestrator._hypothesis_context = {"observed_action_effects": [], "action_coverage": {"untested_actions": []}}
+    orchestrator._step_history = [
+        {"step": 1, "action_id": "ACTION6", "reward": 0.0, "x": 1, "y": 1},
+        {"step": 2, "action_id": "ACTION6", "reward": 0.0, "x": 2, "y": 2},
+        {"step": 3, "action_id": "ACTION6", "reward": 0.0, "x": 3, "y": 3},
+    ]
+
+    observation = dict(sample_observation)
+    observation["available_actions"] = ["ACTION6"]
+    observation["grid"] = [
+        [0, 0, 0, 8],
+        [0, 1, 0, 8],
+        [0, 0, 0, 8],
+        [8, 8, 8, 8],
+    ]
+
+    orchestrator.apply_replan_perturbation(observation, route_reason="signature_escalation", no_progress_steps=2)
+    orchestrator.apply_replan_perturbation(observation, route_reason="signature_escalation", no_progress_steps=2)
+    orchestrator.apply_replan_perturbation(observation, route_reason="signature_escalation", no_progress_steps=2)
+
+    assert vc.target_color_id != 1
+    assert orchestrator._replan_goal_rotation_count >= 1
+    assert (orchestrator._solve_context.get("victory_condition") or {}).get("target_color_id") == vc.target_color_id
+
+
+def test_replan_goal_rotation_respects_cooldown(sample_observation):
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    orchestrator._replan_goal_rotation_cooldown = 2
+    orchestrator._replan_recent_goal_colors = [11, 0]
+    orchestrator._replan_goal_colors_tried = {11, 0}
+
+    observation = dict(sample_observation)
+    observation["grid"] = [
+        [0, 9, 9],
+        [0, 11, 0],
+        [0, 0, 0],
+    ]
+
+    rotated = orchestrator._pick_rotated_goal_color(observation, current_target=11)
+    assert rotated == 9
+
+
+def test_record_step_result_clears_reuse_cache_on_no_progress(sample_observation):
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    orchestrator._last_llm_action = {"action_id": "ACTION6", "x": 1, "y": 1}
+    orchestrator._last_observation_fingerprint = ("f",)
+    orchestrator._step_history = [
+        {
+            "step": 1,
+            "action_id": "ACTION6",
+            "board_before": {"frame_hash": "h1"},
+        }
+    ]
+    orchestrator.record_step_result(reward=0.0, done=False, next_observation=sample_observation)
+    assert orchestrator._last_llm_action is None
+    assert orchestrator._last_observation_fingerprint is None
+
+
+def test_history_section_uses_single_step_window_for_long_runs():
+    orchestrator = ARCOrchestrator(
+        brain_client=MagicMock(),
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    history = [
+        {"step": i, "action_id": f"ACTION{i % 4 + 1}", "rationale": f"r{i}", "reward": 0.0}
+        for i in range(1, 13)
+    ]
+
+    rendered = orchestrator._format_history_section(history)
+
+    assert "Step 12" in rendered
+    assert "Step 11" not in rendered
+
+
 def test_build_action_prompt_calls_packet_render(sample_observation):
     """B117: build_action_prompt() should delegate to build_action_packet() and render."""
     orchestrator = ARCOrchestrator(
@@ -2212,3 +2638,195 @@ async def test_graph_hypothesize_uses_structured_lesson_query(sample_observation
     brain.recall_relevant_lessons.assert_awaited()
     brain.recall_relevant_lessons.assert_awaited_with(query="lesson_type:action_effect puzzle_archetype:space", limit=5)
 
+
+@pytest.mark.asyncio
+async def test_action6_coordinate_blacklist_prevents_repeat(mock_brain):
+    """A040: Verify that ACTION6 no_effect coordinates are blacklisted."""
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    
+    # 1. Simulate an ACTION6 call that produced no_effect
+    orchestrator._step_history.append({
+        "step": 1,
+        "action_id": "ACTION6",
+        "x": 5,
+        "y": 5,
+        "reward": 0.0,
+        "board_before": {"frame_hash": "h1"}
+    })
+    
+    # We need a next_observation to trigger the diff engine in record_step_result
+    # or we can mock the diff engine outcome.
+    # Let's mock GridDiffEngine to return no_effect
+    with patch("agents.arc3.grid_analysis.GridDiffEngine") as mock_diff_class:
+        mock_diff = mock_diff_class.return_value
+        mock_diff.diff_frames.return_value = MagicMock(apparent_effect="no_effect", n_cells_changed=0)
+        
+        obs = {"grid": [[0]*10 for _ in range(10)], "frame_hash": "h2"}
+        orchestrator._last_grid = [[0]*10 for _ in range(10)]
+        orchestrator.record_step_result(0.0, False, next_observation=obs)
+        
+    assert (5, 5) in orchestrator._action6_no_effect_coords
+    
+    # 2. Check that _infer_action6_coordinates avoids (5, 5)
+    # Mock candidates to include (5, 5)
+    with patch.object(orchestrator, "_candidate_action6_coordinates") as mock_cand:
+        mock_cand.return_value = [("fallback", (5, 5)), ("fallback", (6, 6))]
+        
+        x, y = orchestrator._infer_action6_coordinates(obs)
+        assert (x, y) == (6, 6)
+        assert (x, y) != (5, 5)
+
+    # 3. Check that progress clears the blacklist
+    orchestrator.record_step_result(1.0, True)
+    assert len(orchestrator._action6_no_effect_coords) == 0
+
+
+@pytest.mark.asyncio
+async def test_action6_candidate_ranking_biases_toward_goal(mock_brain):
+    """A040: Verify that ACTION6 candidates include target_color_frontier."""
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    
+    # Mock victory condition with target_color_id=2 (e.g. red)
+    orchestrator.solve_engine._victory_condition = MagicMock(target_color_id=2)
+    
+    obs = {
+        "grid": [
+            [0, 0, 0, 0],
+            [0, 2, 0, 0], # Red pixel at (1, 1)
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]
+    }
+    
+    candidates = orchestrator._candidate_action6_coordinates(obs)
+    
+    # Tier should be "target_color_frontier"
+    tier_names = [t for t, c in candidates]
+    assert "target_color_frontier" in tier_names
+    
+    # Coordinates should be neighbors of (1, 1), e.g. (0, 0), (1, 0), (2, 0), (0, 1), (2, 1) etc.
+    frontier_coords = [c for t, c in candidates if t == "target_color_frontier"]
+    assert (0, 0) in frontier_coords
+    assert (1, 1) in frontier_coords # includes the cell itself since neighbors include dx=0, dy=0
+    assert (2, 2) in frontier_coords
+
+
+@pytest.mark.asyncio
+async def test_action6_quadrant_exploration_candidates(mock_brain):
+    """A049: Verify that ACTION6 candidates include quadrant_exploration centers."""
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    
+    obs = {
+        "grid": [[0]*10 for _ in range(10)]
+    }
+    
+    candidates = orchestrator._candidate_action6_coordinates(obs)
+    
+    tier_names = [t for t, c in candidates]
+    assert "quadrant_exploration" in tier_names
+    
+    quad_coords = [c for t, c in candidates if t == "quadrant_exploration"]
+    # 10 // 4 = 2, 3 * 10 // 4 = 7
+    assert (2, 2) in quad_coords
+    assert (7, 2) in quad_coords
+    assert (2, 7) in quad_coords
+    assert (7, 7) in quad_coords
+
+
+@pytest.mark.asyncio
+async def test_action_effect_entity_identification(mock_brain):
+    """A052: Verify that ActionEffect records include identified entity types."""
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    
+    # 1. Setup roles with a player
+    orchestrator.solve_engine._object_roles = {
+        1: ObjectRole(
+            color_id=1, 
+            role=RoleType.PLAYER, 
+            confidence=1.0, 
+            estimated_position={"row": 5.0, "col": 5.0}
+        )
+    }
+    orchestrator._player_position = (5.0, 5.0)
+    
+    # 2. Trigger an action effect write
+    delta = {"n_cells_changed": 1, "apparent_effect": "move", "direction": "up"}
+    obs = {"task_id": "t1", "dataset_id": "d1"}
+    
+    await orchestrator._write_action_effect_record(
+        observation=obs,
+        action_id="ACTION1",
+        reward=0.0,
+        step=1,
+        delta_summary=delta
+    )
+    
+    # 3. Assertions
+    mock_brain.upsert_lesson.assert_awaited()
+    call_args = mock_brain.upsert_lesson.call_args_list[0]
+    lesson_json = json.loads(call_args.kwargs["text"])
+    
+    assert lesson_json["entity_type"] == "player"
+    assert lesson_json["spatial_role"] == "player"
+    assert "entity=player" in call_args.kwargs["tags"] or any("player" in t for t in call_args.kwargs["tags"])
+
+
+@pytest.mark.asyncio
+async def test_action_effect_entity_identification_secondary(mock_brain):
+    """A052: Verify fallback to goal/intermediate roles."""
+    orchestrator = ARCOrchestrator(
+        brain_client=mock_brain,
+        llm_client=None,
+        session_id="session",
+        serializer=StateSerializerForARC(),
+        config={},
+    )
+    
+    # Player position doesn't match, but we have a goal role
+    orchestrator.solve_engine._object_roles = {
+        2: ObjectRole(
+            color_id=2, 
+            role=RoleType.GOAL, 
+            confidence=1.0, 
+            estimated_position={"row": 10.0, "col": 10.0}
+        )
+    }
+    orchestrator._player_position = (5.0, 5.0)
+    
+    delta = {"n_cells_changed": 1, "apparent_effect": "move"}
+    await orchestrator._write_action_effect_record(
+        observation={"task_id": "t1"},
+        action_id="ACTION1",
+        reward=0.0,
+        step=1,
+        delta_summary=delta
+    )
+    
+    call_args = mock_brain.upsert_lesson.call_args_list[0]
+    lesson_json = json.loads(call_args.kwargs["text"])
+    assert lesson_json["entity_type"] == "goal"
+    assert lesson_json["spatial_role"] == "goal"

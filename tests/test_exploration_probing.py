@@ -11,6 +11,7 @@ def _make_orchestrator():
     orch._consecutive_no_progress_steps = 0
     orch._untested_probes_forced_in_run = 0
     orch._blocked_actions = set()
+    orch._action6_no_effect_coords = set()
     orch._available_actions = []
     orch._action_frame_hashes = {}
     orch._action_fatigue = {}

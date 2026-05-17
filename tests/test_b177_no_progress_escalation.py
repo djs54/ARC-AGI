@@ -62,7 +62,8 @@ async def test_escalation_via_supervisor(orchestrator):
     assert orchestrator.solve_engine._victory_condition is None
     assert orchestrator.solve_engine._plateau_locked_family is None
 
-def test_autopilot_skips_blocked_actions(orchestrator):
+@pytest.mark.asyncio
+async def test_autopilot_skips_blocked_actions(orchestrator):
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
         2: ObjectRole(color_id=2, role=RoleType.GOAL, confidence=0.9, estimated_position={"row": 10.0, "col": 5.0})
@@ -70,12 +71,13 @@ def test_autopilot_skips_blocked_actions(orchestrator):
     # Targeted action would be ACTION2 (down)
     orchestrator._blocked_actions.add("ACTION2")
     
-    action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     
     # ACTION2 is blocked, row delta is 5, col delta is 0.
     assert action is None # No alternative with delta
 
-def test_autopilot_tries_alternative_when_primary_blocked(orchestrator):
+@pytest.mark.asyncio
+async def test_autopilot_tries_alternative_when_primary_blocked(orchestrator):
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
         2: ObjectRole(color_id=2, role=RoleType.GOAL, confidence=0.9, estimated_position={"row": 10.0, "col": 6.0})
@@ -83,7 +85,7 @@ def test_autopilot_tries_alternative_when_primary_blocked(orchestrator):
     # Preferred: ACTION2 (dr=5), Secondary: ACTION4 (dc=1)
     orchestrator._blocked_actions.add("ACTION2")
     
-    action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert action["action_id"] == "ACTION4"
     assert "primary blocked" in action["rationale"]
 

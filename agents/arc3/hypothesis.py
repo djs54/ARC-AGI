@@ -54,6 +54,9 @@ class Transition:
     novelty_signal: float = 0.0
     progress_signal: float = 0.0
     looped: bool = False
+    meaningful_progress: bool = False
+    progress_class: str = "none"
+    progress_gate_reason: str = ""
     zero_reward_streak: int = 0
     changed_bbox: Dict[str, int] | None = None
     changed_center: Dict[str, float] | None = None
@@ -72,6 +75,7 @@ class Hypothesis:
     source_transitions: List[int] = field(default_factory=list)  # step numbers
     effect_consistency: float = 0.0
     value_score: float = 0.0
+    meaningful_progress_ratio: float = 0.0
     value_status: str = "unknown"     # unknown | valuable | tentative | low_value | ineffective
 
     def update(self, supports: bool) -> None:
@@ -688,6 +692,13 @@ class HypothesisManager:
             transition.progress_signal = transition_eval["progress_signal"]
             transition.looped = transition_eval["looped"]
             transition.zero_reward_streak = transition_eval["zero_reward_streak"]
+            
+            # A066: pass through meaningful_progress from runtime components
+            reward_comps = transition_meta.get("reward_components") or {}
+            transition.meaningful_progress = bool(reward_comps.get("meaningful_progress", False))
+            transition.progress_class = str(reward_comps.get("progress_class", "none"))
+            transition.progress_gate_reason = str(reward_comps.get("progress_gate_reason", ""))
+            
             self.graph.add_transition(transition)
 
             # 3. Generate / update hypotheses from this transition
@@ -1009,6 +1020,11 @@ class HypothesisManager:
             no_progress_count = sum(1 for effect in effects if effect.meaningful_change_label == "no_progress")
             novel_state_count = sum(1 for effect in effects if effect.novelty_signal > 0)
             reward_hits = sum(1 for effect in effects if effect.reward_signal > 0)
+            
+            # A066: calculate meaningful progress ratio
+            meaningful_hits = sum(1 for effect in effects if getattr(effect, "meaningful_progress", False))
+            meaningful_ratio = meaningful_hits / len(effects) if effects else 0.0
+            
             zero_reward_streak = self._count_zero_reward_streak(effects)
             avg_pixels_changed = sum(effect.pixels_changed for effect in effects) / len(effects)
             avg_meaningful_change = sum(effect.meaningful_change_score for effect in effects) / len(effects)
@@ -1020,6 +1036,7 @@ class HypothesisManager:
                     "times_seen": len(effects),
                     "avg_pixels_changed": round(avg_pixels_changed, 1),
                     "avg_meaningful_change": round(avg_meaningful_change, 2),
+                    "meaningful_progress_ratio": round(meaningful_ratio, 2),
                     "no_change_count": no_change_count,
                     "no_progress_count": no_progress_count,
                     "novel_state_count": novel_state_count,
@@ -1135,9 +1152,15 @@ class HypothesisManager:
 
         attempts = len(effects)
         no_change_count = sum(1 for effect in effects if effect.pixels_changed == 0)
+        
+        # A066: meaningful progress tracking
         avg_pixels_changed = sum(effect.pixels_changed for effect in effects) / attempts
         avg_meaningful_change = sum(effect.meaningful_change_score for effect in effects) / attempts
         reward_hits = sum(1 for effect in effects if effect.reward_signal > 0)
+        
+        meaningful_hits = sum(1 for effect in effects if getattr(effect, "meaningful_progress", False))
+        meaningful_ratio = meaningful_hits / attempts if attempts > 0 else 0.0
+        
         novel_hits = sum(1 for effect in effects if effect.novelty_signal > 0)
         no_progress_hits = sum(1 for effect in effects if effect.meaningful_change_label == "no_progress")
         zero_reward_streak = self._count_zero_reward_streak(effects)
@@ -1148,6 +1171,7 @@ class HypothesisManager:
 
         action_hypothesis.effect_consistency = round(consistency, 2)
         action_hypothesis.value_score = round(value_score, 2)
+        action_hypothesis.meaningful_progress_ratio = round(meaningful_ratio, 2)
         action_hypothesis.value_status = value_status
         action_hypothesis.confidence = round(consistency, 2)
 

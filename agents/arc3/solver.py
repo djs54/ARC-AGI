@@ -13,6 +13,7 @@ import logging
 import json
 import time
 import re
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
@@ -53,8 +54,90 @@ class VictoryType(str, Enum):
     ELIMINATE        = "eliminate"
     UNKNOWN          = "unknown"
 
+class HypothesisStatus(str, Enum):
+    """A065: Status of a reasoned hypothesis."""
+    ACTIVE    = "active"
+    DEMOTED   = "demoted"
+    CONFIRMED = "confirmed"
+    RETIRED   = "retired"
+
 
 # ── Data Structures ───────────────────────────────────────────────────
+
+@dataclass
+class Hypothesis:
+    """A065: A structured belief about game rules or causality."""
+    id: str
+    scope: str  # rule, action-effect, coordinate-causality, object-role, victory-condition
+    statement: str
+    confidence: float
+    evidence_for: List[str] = field(default_factory=list)
+    evidence_against: List[str] = field(default_factory=list)
+    predicted_next: Optional[str] = None
+    falsification_condition: Optional[str] = None
+    status: HypothesisStatus = HypothesisStatus.ACTIVE
+    step_created: int = 0
+
+@dataclass
+class HypothesisWorkspace:
+    """A065: Auditable reasoning substrate for competing hypotheses."""
+    hypotheses: List[Hypothesis] = field(default_factory=list)
+    active_ids: List[str] = field(default_factory=list)
+    demoted_ids: List[str] = field(default_factory=list)
+    
+    def get_active(self) -> List[Hypothesis]:
+        return [h for h in self.hypotheses if h.status == HypothesisStatus.ACTIVE]
+        
+    def get_demoted(self) -> List[Hypothesis]:
+        return [h for h in self.hypotheses if h.status == HypothesisStatus.DEMOTED]
+
+    def add_hypothesis(self, h: Hypothesis):
+        # Prevent duplicates by statement/scope
+        for existing in self.hypotheses:
+            if existing.scope == h.scope and existing.statement == h.statement:
+                return
+        self.hypotheses.append(h)
+        if h.status == HypothesisStatus.ACTIVE:
+            self.active_ids.append(h.id)
+        elif h.status == HypothesisStatus.DEMOTED:
+            self.demoted_ids.append(h.id)
+
+@dataclass
+class TerminalGroundedScore:
+    """A058/A070: Multi-component score based on terminal benchmark progress."""
+    total_score: float = 0.0
+    win_delta: float = 0.0           # 1.0 if state -> WIN
+    levels_delta: float = 0.0        # positive if levels_completed increased
+    proximity_delta: float = 0.0     # positive if player-goal distance decreased
+    scene_progress_delta: float = 0.0 # from scene-graph similarity
+    novelty_bonus: float = 0.0       # low-priority tie-breaker
+    no_op_penalty: float = 0.0       # negative if pixels_changed == 0
+    loop_penalty: float = 0.0        # negative if frame_hash repeated
+    reason: str = ""
+    
+    # A070: rolling window and monotonicity
+    goal_distance: Optional[float] = None
+    monotonicity: float = 0.0
+    oscillation_penalty: float = 0.0
+    trend: str = "flat"  # improving | flat | regressing | oscillating
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "total": round(self.total_score, 4),
+            "win": self.win_delta,
+            "levels": self.levels_delta,
+            "proximity": round(self.proximity_delta, 4),
+            "scene_progress": round(self.scene_progress_delta, 4),
+            "novelty": round(self.novelty_bonus, 4),
+            "no_op": self.no_op_penalty,
+            "loop": self.loop_penalty,
+            "reason": self.reason,
+            "goal_distance": self.goal_distance,
+            "monotonicity": round(self.monotonicity, 2),
+            "oscillation_penalty": round(self.oscillation_penalty, 2),
+            "trend": self.trend
+        }
+
 
 @dataclass
 class ObjectRole:
@@ -63,6 +146,8 @@ class ObjectRole:
     confidence: float = 0.5
     evidence_steps: List[int] = field(default_factory=list)
     estimated_position: Optional[Dict[str, float]] = None  # {"row": r, "col": c}
+    # A058: Historical terminal progress tracking for this role
+    terminal_score: Optional[TerminalGroundedScore] = None
 
 
 @dataclass
@@ -98,6 +183,8 @@ class PlanChunk:
     graduation_score: float = 0.0
     graduation_reason: str = ""
     graduation_components: Dict[str, float] = field(default_factory=dict)
+    # A058: Terminal-grounded score components for the chunk
+    terminal_score: Optional[TerminalGroundedScore] = None
     plan_id: Optional[str] = None           # SideQuests plan_id for this chunk
 
 
@@ -108,6 +195,9 @@ class ChunkLedgerEntry:
     status: str  # "pending" | "active" | "completed" | "failed"
     steps_used: int
     outcome_summary: str
+    # A058: Terminal-grounded score tracking for the chunk
+    terminal_value_score: float = 0.0
+    terminal_value_components: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -131,6 +221,17 @@ class SolveContext:
     plateau_escalation_required: bool = False
     ranked_action_families: List[str] = field(default_factory=list)
     action_family_scores: Dict[str, float] = field(default_factory=dict)
+    # A058: Terminal-grounded score for the latest transition
+    terminal_value_score: float = 0.0
+    terminal_value_components: Dict[str, Any] = field(default_factory=dict)
+    # A065: Hypothesis workspace
+    hypothesis_workspace: HypothesisWorkspace = field(default_factory=HypothesisWorkspace)
+    # A073: World Model Graph summary
+    world_model_summary: Optional[str] = None
+    # A075: Aggregate mechanic priors
+    mechanic_priors: List[Dict[str, Any]] = field(default_factory=list)
+    # A077: World Model Guided Planner selection
+    planner_selection: Optional[Any] = None
 
 
 # ── Archetype Classifier ──────────────────────────────────────────────
@@ -176,7 +277,7 @@ class ArchetypeClassifier:
             largest = max(region_sizes)
             smallest = min(region_sizes)
             if largest >= max(6, smallest * 3):
-                return GameArchetype.RACE, 0.35
+                return GameArchetype.SPACE, 0.35
 
         return GameArchetype.UNKNOWN, 0.0
 
@@ -209,8 +310,10 @@ class ArchetypeClassifier:
         hud = signals["has_hud"]
         reward = signals["reward_trend"]
 
-        # RACE: few directional actions, HUD (energy/score bar), monotonic reward
-        if hud and d >= 1 and reward >= 1:
+        # RACE: few directional actions plus a repeated monotonic reward signal.
+        # HUD-like rows are common in ARC-AGI-3 task wrappers and maze boards, so
+        # do not let a single weak reward blip turn navigation into a race.
+        if hud and 1 <= d <= 2 and reward >= 2 and signals["path_hypotheses_count"] <= 1:
             scores[GameArchetype.RACE] += 0.5
         # CHASE: multiple directional actions, varying reward, no strong single path
         if d >= 2 and signals["path_hypotheses_count"] == 0:
@@ -286,11 +389,14 @@ class ArchetypeClassifier:
 
         vote_scores: Dict[str, float] = {}
         for result in analogy_results[:5]:
-            # Analogical results include text_raw; parse archetype tag if present
+            # Analogical results include text_raw; only parse explicit archetype
+            # tags. Substring matching lets unrelated text such as "race-safe"
+            # vote for the race archetype.
             text = (result.get("text_raw") or "").lower()
-            for a in GameArchetype:
-                if a.value in text and a != GameArchetype.UNKNOWN:
-                    vote_scores[a.value] = vote_scores.get(a.value, 0.0) + result.get("similarity", 0.5)
+            matches = re.findall(r"(?:puzzle_)?archetype\s*[:=]\s*([a-z_]+)", text)
+            for match in matches:
+                if match in {a.value for a in GameArchetype if a != GameArchetype.UNKNOWN}:
+                    vote_scores[match] = vote_scores.get(match, 0.0) + result.get("similarity", 0.5)
 
         if not vote_scores:
             return archetype, confidence
@@ -920,83 +1026,350 @@ class ObjectRoleMapper:
 
 # ── Pattern Match Tracker ─────────────────────────────────────────────
 
+@dataclass
+class HybridPatternConfig:
+    """A050: Configuration for hybrid pattern matching."""
+    disagreement_threshold: float = 0.4
+    w_local: float = 0.4
+    w_text: float = 0.2
+    w_vector: float = 0.2
+    w_prior: float = 0.2  # A050/A051: Weight for Cypher-based graph priors
+    min_step_for_finish: int = 2
+    min_confidence_for_finish: float = 0.6
+    min_monotone_steps: int = 3
+    min_local_progress_for_finish: float = 0.7
+    min_text_evidence: int = 2
+    min_text_score_for_finish: float = 0.75
+    intermediate_threshold: float = 0.2
+    finish_threshold: float = 0.7
+    min_local_steps_for_finish: int = 5  # Degraded mode gate
+
+@dataclass
+class HybridProgressEvidence:
+    """A050: Combined evidence from four channels."""
+    # Local channel
+    local_progress: Optional[float]        # e.g. normalized_ged(sg_t, sg_0)
+    local_distance: Optional[float]        # normalized_ged(sg_t, sg_target) if target known, else None
+    local_monotone_steps: int              # consecutive non-decreasing local_progress
+    scene_wl_hash: str
+    scene_node_count: int
+
+    # Graph-text channel (MCP recall keyed on WL hash)
+    graph_text_score: Optional[float]      # match score
+    graph_text_evidence_count: int
+    graph_text_top_lesson_ids: List[str]
+
+    # Graph-vector channel (WL-histogram cosine)
+    graph_vector_score: Optional[float]
+    graph_vector_top_hash: Optional[str]
+    graph_vector_top_trajectory_id: Optional[str]
+
+    # Graph-prior channel (Cypher structural priors)
+    graph_prior_score: Optional[float] = None     # expected_progress from sibling tool
+    graph_prior_evidence_count: int = 0
+
+    # Fusion
+    combined_similarity: Optional[float] = None
+    combined_confidence: float = 0.0             # [0, 1]
+    channel_agreement_range: float = 0.0         # max - min across non-None channels
+    finish_mode_allowed: bool = False
+    phase: str = "discover"                     # "discover" | "intermediate" | "finish"
+    reason: str = ""                            # human-readable fusion rationale
+
+class HybridPatternMatcher:
+    """A050: Combined evidence pattern matcher (Local GED + WL Hashing + WL Vector)."""
+
+    def __init__(self, brain_client, config: Optional[HybridPatternConfig] = None):
+        from agents.arc3.scene_graph import SceneGraph
+        self.brain = brain_client
+        self.config = config or HybridPatternConfig()
+        self.scene_graph_0: Optional[SceneGraph] = None
+        self.scene_graph_target: Optional[SceneGraph] = None # Reserved for future
+        self.local_monotone_steps = 0
+        self.similarity_history: List[float] = []
+        self.phase: str = "discover"
+        self.last_wl_hash: Optional[str] = None
+        self.hash_stable_steps = 0
+        self._cached_text_score: Optional[float] = None
+        self._cached_vector_score: Optional[float] = None
+        self._cached_prior_score: Optional[float] = None
+        self._cached_text_evidence = 0
+        self._cached_prior_evidence = 0
+        self._cached_text_ids = []
+        self._cached_vector_hash = None
+        self.last_result: Optional[HybridProgressEvidence] = None
+
+    async def update(self, grid: List[List[int]], step: int, session_id: str, task_id: str, archetype: str, skip_memory: bool = False) -> HybridProgressEvidence:
+        """Called each step. Produces multi-channel hybrid evidence."""
+        from agents.arc3.scene_graph import (
+            build_scene_graph, wl_canonical_hash, wl_histogram_vector, normalized_ged
+        )
+        if not grid:
+            return self._empty_evidence()
+
+        # 1. Build current scene graph
+        sg_t = build_scene_graph(grid)
+        wl_hash_t = wl_canonical_hash(sg_t)
+        wl_vec_t = wl_histogram_vector(sg_t)
+        node_count = len(sg_t.nodes)
+
+        if step == 0:
+            self.scene_graph_0 = sg_t
+            self.last_wl_hash = wl_hash_t
+            return self._step0_evidence(wl_hash_t, node_count)
+
+        # 2. Local Channel
+        # A050: "progress" means structural movement away from step-0 state.
+        # Unchanged state should be ~0.0, not 1.0.
+        local_progress = normalized_ged(sg_t, self.scene_graph_0) if self.scene_graph_0 else 0.0
+        if self.similarity_history and local_progress >= self.similarity_history[-1]:
+            self.local_monotone_steps += 1
+        else:
+            self.local_monotone_steps = 0
+        self.similarity_history.append(local_progress)
+
+        # 3. Graph-Text and Graph-Vector Channels (with stale-cache guard)
+        if wl_hash_t == self.last_wl_hash:
+            self.hash_stable_steps += 1
+        else:
+            self.hash_stable_steps = 0
+            self.last_wl_hash = wl_hash_t
+
+        # A059: Allow caller to explicitly skip expensive memory re-queries
+        should_requery = not skip_memory and ((self.hash_stable_steps == 0) or (self.hash_stable_steps >= 3))
+
+        if should_requery and not getattr(self.brain, "memory_degraded", False):
+            # Graph-Text recall
+            try:
+                # Primary: keyed on WL hash
+                resp = await self.brain.recall_lessons(
+                    lesson_type="pattern_state",
+                    scene_wl_hash=wl_hash_t,
+                    archetype=archetype,
+                    limit=5
+                )
+                lessons = resp.get("lessons", [])
+                if not lessons:
+                    # Fallback: archetype only
+                    resp = await self.brain.recall_lessons(
+                        lesson_type="pattern_state",
+                        archetype=archetype,
+                        limit=5
+                    )
+                    lessons = resp.get("lessons", [])
+                    penalty = 0.5
+                else:
+                    penalty = 1.0
+
+                if lessons:
+                    valences = [float(l.get("valence", 0.0)) for l in lessons]
+                    self._cached_text_score = (sum(valences) / len(valences)) * penalty
+                    self._cached_text_evidence = len(lessons)
+                    self._cached_text_ids = [str(l.get("lesson_id", "unknown")) for l in lessons]
+                else:
+                    self._cached_text_score = 0.0
+                    self._cached_text_evidence = 0
+                    self._cached_text_ids = []
+            except Exception:
+                logger.debug("A050: recall_lessons failed in hybrid matcher", exc_info=True)
+
+            # Graph-Vector search
+            try:
+                vresp = await self.brain.analogical_search(
+                    vector=wl_vec_t,
+                    current_quest_id=task_id,
+                    limit=5,
+                    min_similarity=0.4
+                )
+                results = vresp.get("results", [])
+                if results:
+                    top = results[0]
+                    self._cached_vector_score = float(top.get("similarity", 0.0))
+                    self._cached_vector_hash = top.get("scene_wl_hash")
+                else:
+                    self._cached_vector_score = 0.0
+                    self._cached_vector_hash = None
+            except Exception:
+                logger.debug("A050: analogical_search failed in hybrid matcher", exc_info=True)
+
+            # Graph-Prior channel (structural priors from sibling tool)
+            try:
+                presp = await self.brain.recall_scene_graph_priors(
+                    scene_wl_hash=wl_hash_t,
+                    archetype=archetype,
+                    min_valence=0.5,
+                    limit=5
+                )
+                if presp.get("status") != "tool_unavailable":
+                    self._cached_prior_score = float(presp.get("expected_progress") or 0.0)
+                    self._cached_prior_evidence = int(presp.get("evidence_count") or 0)
+                else:
+                    self._cached_prior_score = None
+                    self._cached_prior_evidence = 0
+            except Exception:
+                logger.debug("A050: recall_scene_graph_priors failed in hybrid matcher", exc_info=True)
+                self._cached_prior_score = None
+
+        # 4. Fusion
+        combined, confidence, agreement_range = self._fuse(
+            local_progress, self._cached_text_score, self._cached_vector_score, self._cached_prior_score
+        )
+
+        # 5. Finish Gate
+        live_channels = [c for c in (local_progress, self._cached_text_score, self._cached_vector_score, self._cached_prior_score) if c is not None]
+        
+        finish_mode_allowed = (
+            step >= self.config.min_step_for_finish
+            and len(live_channels) >= 2
+            and confidence >= self.config.min_confidence_for_finish
+            and (
+                (self.local_monotone_steps >= self.config.min_monotone_steps 
+                 and local_progress >= self.config.min_local_progress_for_finish)
+                or (self._cached_text_evidence >= self.config.min_text_evidence 
+                    and (self._cached_text_score or 0) >= self.config.min_text_score_for_finish)
+                or (self._cached_prior_evidence >= 1 
+                    and (self._cached_prior_score or 0) >= 0.9)
+            )
+        )
+
+        # 6. Phase Assignment
+        if finish_mode_allowed:
+            self.phase = "finish"
+            reason = "multi-channel corroboration"
+        elif local_progress > self.config.intermediate_threshold:
+            self.phase = "intermediate"
+            reason = f"local progress {local_progress:.2f} > threshold"
+        else:
+            self.phase = "discover"
+            reason = "initial exploration"
+
+        result = HybridProgressEvidence(
+            local_progress=local_progress,
+            local_distance=None,
+            local_monotone_steps=self.local_monotone_steps,
+            scene_wl_hash=wl_hash_t,
+            scene_node_count=node_count,
+            graph_text_score=self._cached_text_score,
+            graph_text_evidence_count=self._cached_text_evidence,
+            graph_text_top_lesson_ids=self._cached_text_ids,
+            graph_vector_score=self._cached_vector_score,
+            graph_vector_top_hash=self._cached_vector_hash,
+            graph_vector_top_trajectory_id=None,
+            graph_prior_score=self._cached_prior_score,
+            graph_prior_evidence_count=self._cached_prior_evidence,
+            combined_similarity=combined,
+            combined_confidence=confidence,
+            channel_agreement_range=agreement_range,
+            finish_mode_allowed=finish_mode_allowed,
+            phase=self.phase,
+            reason=reason
+        )
+        self.last_result = result
+        return result
+
+    def _fuse(self, local, text, vector, prior) -> Tuple[Optional[float], float, float]:
+        channels = [c for c in (local, text, vector, prior) if c is not None]
+        if not channels:
+            return None, 0.0, 0.0
+            
+        agreement_range = max(channels) - min(channels)
+        if agreement_range > self.config.disagreement_threshold:
+            # High disagreement -> conservative
+            combined = min(channels)
+            confidence = 0.2
+        else:
+            # Low disagreement -> weighted mean
+            w_sum = 0.0
+            val_sum = 0.0
+            if local is not None:
+                w_sum += self.config.w_local
+                val_sum += local * self.config.w_local
+            if text is not None:
+                w_sum += self.config.w_text
+                val_sum += text * self.config.w_text
+            if vector is not None:
+                w_sum += self.config.w_vector
+                val_sum += vector * self.config.w_vector
+            if prior is not None:
+                w_sum += self.config.w_prior
+                val_sum += prior * self.config.w_prior
+            
+            combined = val_sum / w_sum if w_sum > 0 else min(channels)
+            confidence = (1.0 - agreement_range) * (len(channels) / 4.0)
+            
+        return combined, confidence, agreement_range
+
+    def _empty_evidence(self) -> HybridProgressEvidence:
+        result = HybridProgressEvidence(
+            local_progress=None, local_distance=None, local_monotone_steps=0,
+            scene_wl_hash="", scene_node_count=0,
+            graph_text_score=None, graph_text_evidence_count=0, graph_text_top_lesson_ids=[],
+            graph_vector_score=None, graph_vector_top_hash=None, graph_vector_top_trajectory_id=None,
+            graph_prior_score=None, graph_prior_evidence_count=0,
+            combined_similarity=None, combined_confidence=0.0, channel_agreement_range=0.0,
+            finish_mode_allowed=False, phase="discover", reason="empty_grid"
+        )
+        self.last_result = result
+        return result
+
+    def _step0_evidence(self, wl_hash, nodes) -> HybridProgressEvidence:
+        result = HybridProgressEvidence(
+            local_progress=0.0, local_distance=None, local_monotone_steps=0,
+            scene_wl_hash=wl_hash, scene_node_count=nodes,
+            graph_text_score=None, graph_text_evidence_count=0, graph_text_top_lesson_ids=[],
+            graph_vector_score=None, graph_vector_top_hash=None, graph_vector_top_trajectory_id=None,
+            graph_prior_score=None, graph_prior_evidence_count=0,
+            combined_similarity=0.0, combined_confidence=0.0, channel_agreement_range=0.0,
+            finish_mode_allowed=False, phase="discover", reason="step0_bootstrap"
+        )
+        self.last_result = result
+        return result
+
+
 class PatternMatchTracker:
-    """B167: Tracks whether the goal region is converging toward the reference pattern."""
+    """Compatibility tracker retained for legacy B167 tests and fixtures.
+
+    Runtime solving uses HybridPatternMatcher. This class preserves a tiny
+    synchronous interface expected by older unit tests.
+    """
 
     def __init__(self):
-        self._engine = GridDiffEngine()
-        self.reference_region: Optional[PatternRegion] = None
-        self.goal_region: Optional[PatternRegion] = None
-        self.similarity_history: List[float] = []
-        self.phase: str = "discover"  # "discover" → "intermediate" → "finish"
+        self._diff = GridDiffEngine()
 
-    def update(self, grid: List[List[int]], step: int) -> dict:
-        """Called each step. Returns phase and similarity info."""
+    def update(self, grid: List[List[int]], step: int) -> Dict[str, Any]:
         if not grid:
-            return {"phase": self.phase, "similarity": 0.0}
-
-        # 1. If reference/goal not yet identified, try to find them
-        if self.reference_region is None or self.goal_region is None:
-            regions = self._engine.extract_pattern_regions(grid)
-            pair = self._engine.find_reference_goal_pair(regions, len(grid), len(grid[0]))
-            if pair:
-                self.reference_region, self.goal_region = pair
-                logger.info(
-                    "[B167] Found reference/goal pair: ref=%s, goal=%s",
-                    self.reference_region.location_hint,
-                    self.goal_region.location_hint,
-                )
-
-        # 2. If both known, compare current goal state to reference
-        if self.reference_region and self.goal_region:
-            # Re-extract goal region pattern from current grid (it may have changed)
-            bb = self.goal_region.bounding_box
-            current_goal_pattern = self._engine.crop_region(grid, bb)
-            
-            # Use current goal pattern to build a temporary PatternRegion for comparison
-            current_region = PatternRegion(
-                bounding_box=bb,
-                pattern=current_goal_pattern,
-                center=self.goal_region.center,
-                color_palette=self.goal_region.color_palette,
-                size=self.goal_region.size,
-                location_hint=self.goal_region.location_hint
-            )
-            
-            comparison = self._engine.compare_regions(current_region, self.reference_region)
-            self.similarity_history.append(comparison.similarity)
-
-            # Phase logic
-            if comparison.similarity >= 0.9:
-                self.phase = "finish"  # Goal matches reference — go touch it
-            elif len(self.similarity_history) > 1 and comparison.similarity > self.similarity_history[0]:
-                self.phase = "intermediate"  # Making progress
-            else:
-                if self.phase == "finish":
-                    self.phase = "intermediate"
-                elif self.phase == "discover":
-                    self.phase = "intermediate"
-
             return {
-                "phase": self.phase,
-                "similarity": comparison.similarity,
-                "similarity_trend": self._trend(),
-                "reference_location": self.reference_region.location_hint,
-                "goal_location": self.goal_region.location_hint,
-                "exact_match": comparison.exact_match,
-                "description": comparison.description,
+                "phase": "discover",
+                "similarity": 0.0,
+                "reference_location": None,
+                "goal_location": None,
+                "reason": "empty_grid",
             }
 
-        return {"phase": "discover", "similarity": 0.0}
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        regions = self._diff.extract_pattern_regions(grid)
+        pair = self._diff.find_reference_goal_pair(regions, rows, cols)
+        if not pair:
+            return {
+                "phase": "discover",
+                "similarity": 0.0,
+                "reference_location": None,
+                "goal_location": None,
+                "reason": "no_reference_goal_pair",
+            }
 
-    def _trend(self) -> str:
-        if len(self.similarity_history) < 2:
-            return "stable"
-        if self.similarity_history[-1] > self.similarity_history[-2]:
-            return "improving"
-        elif self.similarity_history[-1] < self.similarity_history[-2]:
-            return "regressing"
-        return "stable"
+        ref, goal = pair
+        comp = self._diff.compare_regions(ref, goal)
+        similarity = float(comp.similarity or 0.0)
+        phase = "finish" if step >= 1 and similarity >= 0.9 else "intermediate"
+        return {
+            "phase": phase,
+            "similarity": similarity,
+            "reference_location": ref.location_hint,
+            "goal_location": goal.location_hint,
+            "reason": comp.description,
+        }
 
 
 # ── Victory Hypothesizer ──────────────────────────────────────────────
@@ -1033,14 +1406,25 @@ class VictoryHypothesizer:
 
         # 1. Recall similar past plans if the caller did not already fetch them.
         if past_plans is None:
-            goal_query = f"{archetype.value} game win condition solve puzzle"
-            recall = await brain_client.recall_plans(
-                goal_query=goal_query,
-                session_id=session_id,
-                min_valence=0.2,
-                limit=3,
-            )
-            past_plans = recall.get("plans", [])
+            if getattr(brain_client, "memory_degraded", False) is True:
+                past_plans = []
+            else:
+                goal_query = " ".join(
+                    [
+                        "domain:arc",
+                        "kind:plan_recall",
+                        f"archetype:{archetype.value}",
+                        "objective:victory_condition",
+                        "stage:hypothesize",
+                    ]
+                )
+                recall = await brain_client.recall_plans(
+                    goal_query=goal_query,
+                    session_id=session_id,
+                    min_valence=0.2,
+                    limit=3,
+                )
+                past_plans = recall.get("plans", [])
 
         # Check if a past plan gives us a high-confidence victory condition directly
         for plan in past_plans:
@@ -1054,11 +1438,14 @@ class VictoryHypothesizer:
 
         # 2. Recall game-specific lessons if the caller did not already fetch them.
         if lessons is None:
-            lessons_result = await brain_client.recall_relevant_lessons(
-                query=f"ARC game {archetype.value} win condition",
-                limit=3,
-            )
-            lessons = lessons_result.get("lessons", [])
+            if getattr(brain_client, "memory_degraded", False) is True:
+                lessons = []
+            else:
+                lessons_result = await brain_client.recall_relevant_lessons(
+                    query=f"ARC game {archetype.value} win condition",
+                    limit=3,
+                )
+                lessons = lessons_result.get("lessons", [])
 
         # 3. LLM call
         object_roles_text = "\n".join(
@@ -1852,7 +2239,7 @@ class SolveEngine:
         # B169: KuzuDB role source of truth
         self._entity_graph: Optional["EntityGraphBuilder"] = None
         self._pending_role_writes: List[tuple[int, ObjectRole]] = []
-        self._current_level: int = 0
+        self._current_level: int = 1 # A058: track current level for terminal progress
         # B172: VictoryCondition persistence
         self._pending_vc_write: Optional[VictoryCondition] = None
         self._task_id: Optional[str] = None
@@ -1940,7 +2327,19 @@ class SolveEngine:
             self._emit_trace(event_type, operation, details or {}, result, elapsed_ms)
 
     def _recent_zero_reward_streak(self) -> int:
-        """Track global zero-reward momentum across chunk resets."""
+        """Track global zero-progress momentum across chunk resets.
+        
+        A066: uses meaningful progress history if available.
+        """
+        if hasattr(self, "_meaningful_history") and self._meaningful_history:
+            streak = 0
+            for meaningful in reversed(self._meaningful_history):
+                if not meaningful:
+                    streak += 1
+                else:
+                    break
+            return streak
+
         streak = 0
         for reward in reversed(self._reward_history):
             if reward <= 0.0:
@@ -2072,6 +2471,8 @@ class SolveEngine:
         if goal_candidates:
             goal_role = goal_candidates[0]
             target_color = int(goal_role.color_id)
+            if target_color == 0:
+                return None
             confidence = max(confidence, min(0.78, 0.35 + float(goal_role.confidence or 0.0) * 0.4))
             description = f"Reach goal-like object at color {target_color}"
             if float(goal_role.confidence or 0.0) >= 0.7:
@@ -2228,8 +2629,7 @@ class SolveEngine:
         
         db = self._entity_graph.db
         tid = self._task_id
-        import hashlib
-        
+
         for grh in to_write:
             hid = f"grh_{tid}_{hashlib.md5(grh.rule_description.encode()).hexdigest()[:8]}"
             now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -2428,6 +2828,29 @@ class SolveEngine:
             consecutive_zero_reward_steps=consecutive_zero_reward,
         )
 
+        # A058: Calculate terminal-grounded score for the active chunk
+        terminal_score = self._calculate_terminal_score(context)
+        self._active_chunk.terminal_score = terminal_score
+
+        # A058: Plateau lock expiration.
+        # If we are in plateau mode, but have failed to make terminal progress 
+        # for multiple steps, expire the lock even if pixels are changing.
+        if self._active_chunk.graduation_reason == "plateau_lock":
+            # Track terminal-progress streak within SolveEngine
+            if not hasattr(self, "_plateau_zero_terminal_progress_streak"):
+                self._plateau_zero_terminal_progress_streak = 0
+            
+            if terminal_score.total_score <= 0:
+                self._plateau_zero_terminal_progress_streak += 1
+            else:
+                self._plateau_zero_terminal_progress_streak = 0
+                
+            if self._plateau_zero_terminal_progress_streak >= 5:
+                logger.info("A058: Expiring plateau lock due to lack of terminal progress")
+                assessment["score"] = 0.0 # Force replan/unlock
+                assessment["graduation_capped_reason"] = "plateau_terminal_stall"
+                self._plateau_zero_terminal_progress_streak = 0
+
         original_score = self._active_chunk.graduation_score
         assessed_score = float(assessment.get("score", original_score))
         new_score = max(0.0, min(original_score, assessed_score))
@@ -2492,6 +2915,9 @@ class SolveEngine:
                     entry.status = "completed"
                     entry.steps_used = chunk.steps_executed
                     entry.outcome_summary = f"progress={chunk.progress_score:.2f}"
+                    if chunk.terminal_score:
+                        entry.terminal_value_score = chunk.terminal_score.total_score
+                        entry.terminal_value_components = chunk.terminal_score.to_dict()
                     found_entry = entry
                     break
 
@@ -2510,6 +2936,9 @@ class SolveEngine:
                     entry.status = "failed"
                     entry.steps_used = chunk.steps_executed
                     entry.outcome_summary = reason
+                    if chunk.terminal_score:
+                        entry.terminal_value_score = chunk.terminal_score.total_score
+                        entry.terminal_value_components = chunk.terminal_score.to_dict()
                     found_entry = entry
                     break
 
@@ -2533,8 +2962,64 @@ class SolveEngine:
 
         self._chunk_ledger = non_completed + completed
 
+    def _calculate_terminal_score(self, context: Dict[str, Any]) -> TerminalGroundedScore:
+        """A058: Compute terminal-grounded score from last transition effect."""
+        effect = context.get("last_transition_effect") or {}
+        
+        # 1. Terminal components
+        win_delta = 1.0 if str(effect.get("state_after")).upper() == "WIN" else 0.0
+        
+        # Pull levels_delta from effect or infer from engine state
+        levels_delta = float(effect.get("levels_completed_delta", 0.0) or 0.0)
+        if levels_delta == 0 and hasattr(self, "_current_level"):
+            new_level = int(effect.get("levels_completed", self._current_level))
+            if new_level > self._current_level:
+                levels_delta = float(new_level - self._current_level)
+
+        # 2. Proximity component (player-to-goal)
+        proximity_delta = float(effect.get("player_goal_distance_delta", 0.0) or 0.0)
+        
+        # 3. Scene progress (from A050 hybrid evidence)
+        scene_progress_delta = float(effect.get("scene_progress_delta", 0.0) or 0.0)
+        
+        # 4. Dense tie-breaker (capped and low weight)
+        pixels_changed = float(effect.get("pixels_changed", 0.0) or 0.0)
+        novelty_bonus = min(0.05, pixels_changed * 0.001) if pixels_changed > 0 else 0.0
+        
+        # 5. Penalties
+        no_op_penalty = -0.5 if pixels_changed == 0 else 0.0
+        loop_penalty = -1.0 if context.get("loop_detected") else 0.0
+        
+        # Total fusion (Weights tuned for P0 priority: prioritize winning and levels)
+        total = (
+            win_delta * 10.0 
+            + levels_delta * 5.0 
+            + max(0, proximity_delta) * 2.0 
+            + max(0, scene_progress_delta) * 2.0
+            + novelty_bonus
+            + no_op_penalty
+            + loop_penalty
+        )
+        
+        # Determine reason (A058)
+        reason = "terminal_progress" if total > 0.05 else "neutral_or_stalled"
+        if no_op_penalty < 0: reason = "no_op_stall"
+        if loop_penalty < 0: reason = "loop_detected"
+        
+        return TerminalGroundedScore(
+            total_score=total,
+            win_delta=win_delta,
+            levels_delta=levels_delta,
+            proximity_delta=proximity_delta,
+            scene_progress_delta=scene_progress_delta,
+            novelty_bonus=novelty_bonus,
+            no_op_penalty=no_op_penalty,
+            loop_penalty=loop_penalty,
+            reason=reason
+        )
+
     def _score_action_families(self, context: Dict[str, Any], available_actions: List[str]) -> Dict[str, float]:
-        """Score each action family using available evidence signals (B144)."""
+        """Score each action family using available evidence signals (B144/A058)."""
         scores = {aid: 0.0 for aid in available_actions}
         observed_effects = context.get("observed_action_effects", [])
         
@@ -2543,13 +3028,21 @@ class SolveEngine:
             aid = effect.get("action")
             if aid not in scores: continue
             
-            # 1. Reward signal (weighted heavily)
-            avg_reward = float(effect.get("avg_reward", 0.0) or 0.0)
-            scores[aid] += avg_reward * 2.0
+            # A058: Prefer terminal-grounded value model over raw reward/pixel churn.
+            # terminal_value_score should be a composite of levels_completed, win, proximity.
+            terminal_val = float(effect.get("terminal_value_score", 0.0) or 0.0)
+            scores[aid] += terminal_val * 3.0
             
-            # 2. Meaningful change (indicates interaction even if no reward)
+            # 1. Reward signal (weighted, but demoted relative to terminal_val)
+            # A066: Discount pixel-churn-only rewards by meaningful_progress_ratio
+            avg_reward = float(effect.get("avg_reward", 0.0) or 0.0)
+            meaningful_ratio = float(effect.get("meaningful_progress_ratio", 1.0) if effect.get("meaningful_progress_ratio") is not None else 1.0)
+            scores[aid] += avg_reward * meaningful_ratio * 1.0
+            
+            # 2. Meaningful change (demoted to low-priority tie-breaker)
+            # A066: Also discount by meaningful_ratio
             avg_change = float(effect.get("avg_meaningful_change", 0.0) or 0.0)
-            scores[aid] += avg_change * 0.5
+            scores[aid] += avg_change * meaningful_ratio * 0.1
             
             # 3. Repeat failure penalty (B144 core requirement)
             zero_streak = int(effect.get("zero_reward_streak", 0) or 0)
@@ -2558,6 +3051,18 @@ class SolveEngine:
             # B176: Accelerated penalty for very long streaks
             if zero_streak >= 10:
                 scores[aid] -= 1.0
+            
+            # A069: Penalize actions with demoted hypotheses
+            workspace = context.get("hypothesis_workspace")
+            if workspace:
+                action_hyp_id = f"action-{aid}"
+                # The workspace might be a dict or a HypothesisWorkspace object
+                hyps = getattr(workspace, "hypotheses", []) if not isinstance(workspace, dict) else workspace.get("hypotheses", [])
+                for h in hyps:
+                    h_id = getattr(h, "id", h.get("id") if isinstance(h, dict) else None)
+                    h_status = getattr(h, "status", h.get("status") if isinstance(h, dict) else None)
+                    if h_id == action_hyp_id and h_status == HypothesisStatus.DEMOTED:
+                        scores[aid] -= 2.0
                 
             # 4. Rank score from hypothesis manager (composite heuristic)
             rank_score = float(effect.get("rank_score", 0.0) or 0.0)
@@ -2615,6 +3120,9 @@ class SolveEngine:
         current_state_hash: str,
         level_pattern: Optional["LevelPattern"] = None, # B150
         solved_levels: Optional[List[Dict]] = None,     # B157
+        world_model_summary: Optional[str] = None,      # A073
+        mechanic_priors: Optional[List[Dict]] = None,  # A075
+        planner_selection: Optional[Any] = None,       # A077
     ) -> SolveContext:
         """Run one solve step. Returns SolveContext for orchestrator."""
         # B169: Sync roles from KuzuDB
@@ -2626,11 +3134,21 @@ class SolveEngine:
         if not self._game_rule_hypotheses:
             await self._sync_grh_from_db()
 
+        # A058: Sync engine level tracking for terminal delta calculations
+        self._current_level = int(observation.get("levels_completed", 0) or 0) + 1
+        if not hasattr(self, "_plateau_zero_terminal_progress_streak"):
+            self._plateau_zero_terminal_progress_streak = 0
+
         # Track reward history
-        reward = float((hypothesis_context.get("last_transition_effect") or {}).get(
-            "reward_signal", 0.0
-        ))
+        reward_data = hypothesis_context.get("last_transition_effect") or {}
+        reward = float(reward_data.get("reward_signal", 0.0))
         self._reward_history.append(reward)
+
+        # A066: Track meaningful progress history
+        meaningful = bool(reward_data.get("meaningful_progress", False))
+        if not hasattr(self, "_meaningful_history"):
+            self._meaningful_history = []
+        self._meaningful_history.append(meaningful)
 
         # 1. Archetype classification (algorithmic first)
         if not self._archetype_locked:
@@ -2685,6 +3203,33 @@ class SolveEngine:
             if archetype == self._archetype and confidence < self._archetype_confidence:
                 # Sustain best recent confidence if not a pivot
                 confidence = max(confidence, self._archetype_confidence - 0.02)
+
+            # Archetype stickiness: avoid rapid oscillation (e.g. race <-> space)
+            # unless the new candidate is materially stronger.
+            if (
+                archetype != self._archetype
+                and self._archetype != GameArchetype.UNKNOWN
+                and archetype != GameArchetype.UNKNOWN
+            ):
+                prior_conf = float(self._archetype_confidence or 0.0)
+                switch_margin = 0.20
+                if confidence < (prior_conf + switch_margin):
+                    try:
+                        self._trace(
+                            "archetype_stickiness_guard",
+                            "hold_archetype",
+                            {
+                                "prior": self._archetype.value,
+                                "candidate": archetype.value,
+                                "prior_conf": prior_conf,
+                                "candidate_conf": confidence,
+                                "required_conf": prior_conf + switch_margin,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    archetype = self._archetype
+                    confidence = max(prior_conf - 0.04, 0.25)
 
             self._archetype = archetype
             self._archetype_confidence = confidence
@@ -2779,7 +3324,7 @@ class SolveEngine:
         # archetype is stable but victory condition is still unknown after a few steps.
         try:
             has_unknown_vc = self._victory_condition is None or (getattr(self._victory_condition, 'condition_type', None) == VictoryType.UNKNOWN)
-            if has_unknown_vc and not self._bootstrapped_victory_done and float(self._archetype_confidence or 0.0) >= 0.45 and step >= 2:
+            if has_unknown_vc and not self._bootstrapped_victory_done and float(self._archetype_confidence or 0.0) >= 0.65 and step >= 4:
                 vc = self._build_bootstrap_victory_condition(
                     min_confidence=0.45 if zero_reward_streak >= 3 else 0.35
                 )
@@ -2791,7 +3336,17 @@ class SolveEngine:
                     except Exception:
                         pass
                     try:
-                        await self.brain.upsert_lesson(domain=str(self._archetype.value), text=vc.description, valence=0.2, confidence=float(vc.confidence), tags=["bootstrap","victory"])
+                        upsert_payload = await self.brain.upsert_lesson(
+                            domain=str(self._archetype.value),
+                            text=vc.description,
+                            valence=0.2,
+                            confidence=float(vc.confidence),
+                            tags=["bootstrap", "victory"],
+                        )
+                        if isinstance(upsert_payload, dict):
+                            lesson_id = upsert_payload.get("lesson_id") or upsert_payload.get("id")
+                            if lesson_id in (None, "", "None"):
+                                logger.warning("B214: bootstrap victory upsert returned without lesson_id")
                     except Exception:
                         logger.debug("B217: upsert_lesson failed for victory bootstrap", exc_info=True)
         except Exception:
@@ -2853,35 +3408,70 @@ class SolveEngine:
             self._trace("victory_inference_trigger", "victory_hypothesis", 
                         {"step": step, "trigger": trigger_reason, "archetype_conf": self._archetype_confidence})
             
-            goal_query = f"{self._archetype.value} game win condition solve puzzle"
+            obs_grid = observation.get("grid") if isinstance(observation, dict) else None
+            rows = len(obs_grid) if isinstance(obs_grid, list) else 0
+            cols = len(obs_grid[0]) if rows and isinstance(obs_grid[0], list) else 0
+            available_actions = observation.get("available_actions") if isinstance(observation, dict) else None
+            n_actions = len(available_actions) if isinstance(available_actions, list) else 0
+            goal_query = " ".join(
+                [
+                    "domain:arc",
+                    "kind:plan_recall",
+                    f"archetype:{self._archetype.value}",
+                    "objective:victory_condition",
+                    f"grid_rows:{rows}",
+                    f"grid_cols:{cols}",
+                    f"n_actions:{n_actions}",
+                    f"available_actions:{','.join(sorted(str(a) for a in available_actions))}" if isinstance(available_actions, list) and available_actions else "available_actions:none",
+                    "stage:replan",
+                ]
+            )
             try:
-                # B138: Trace recall_plans call
-                self._trace("solve_recall_plans_start", "recall_plans", {"step": step, "query": goal_query})
-                _t0 = time.perf_counter()
-                recall = await self.brain.recall_plans(
-                    goal_query=goal_query,
-                    session_id=self.session_id,
-                    min_valence=0.2,
-                    limit=3,
-                )
-                _elapsed = (time.perf_counter() - _t0) * 1000
-                past_plans = recall.get("plans", [])
-                self._trace("solve_recall_plans_end", "recall_plans", {"step": step}, {"count": len(past_plans)}, _elapsed)
+                if getattr(self.brain, "memory_degraded", False) is True:
+                    past_plans = []
+                    self._trace(
+                        "solve_recall_plans_skipped",
+                        "recall_plans",
+                        {"step": step, "query": goal_query},
+                        {"reason": str(getattr(self.brain, "memory_degraded_reason", "") or "memory_degraded")},
+                    )
+                else:
+                    # B138: Trace recall_plans call
+                    self._trace("solve_recall_plans_start", "recall_plans", {"step": step, "query": goal_query})
+                    _t0 = time.perf_counter()
+                    recall = await self.brain.recall_plans(
+                        goal_query=goal_query,
+                        session_id=self.session_id,
+                        min_valence=0.2,
+                        limit=3,
+                    )
+                    _elapsed = (time.perf_counter() - _t0) * 1000
+                    past_plans = recall.get("plans", [])
+                    self._trace("solve_recall_plans_end", "recall_plans", {"step": step}, {"count": len(past_plans)}, _elapsed)
             except Exception as exc:
                 logger.warning("recall_plans failed: %s", exc)
                 past_plans = []
 
             try:
-                # B138: Trace recall_relevant_lessons call
-                self._trace("solve_recall_lessons_start", "recall_lessons", {"step": step, "query": f"ARC game {self._archetype.value} win condition"})
-                _t0 = time.perf_counter()
-                lessons_result = await self.brain.recall_relevant_lessons(
-                    query=f"ARC game {self._archetype.value} win condition",
-                    limit=3,
-                )
-                _elapsed = (time.perf_counter() - _t0) * 1000
-                lessons = lessons_result.get("lessons", [])
-                self._trace("solve_recall_lessons_end", "recall_lessons", {"step": step}, {"count": len(lessons)}, _elapsed)
+                if getattr(self.brain, "memory_degraded", False) is True:
+                    lessons = []
+                    self._trace(
+                        "solve_recall_lessons_skipped",
+                        "recall_lessons",
+                        {"step": step},
+                        {"reason": str(getattr(self.brain, "memory_degraded_reason", "") or "memory_degraded")},
+                    )
+                else:
+                    # B138: Trace recall_relevant_lessons call
+                    self._trace("solve_recall_lessons_start", "recall_lessons", {"step": step, "query": f"ARC game {self._archetype.value} win condition"})
+                    _t0 = time.perf_counter()
+                    lessons_result = await self.brain.recall_relevant_lessons(
+                        query=f"ARC game {self._archetype.value} win condition",
+                        limit=3,
+                    )
+                    _elapsed = (time.perf_counter() - _t0) * 1000
+                    lessons = lessons_result.get("lessons", [])
+                    self._trace("solve_recall_lessons_end", "recall_lessons", {"step": step}, {"count": len(lessons)}, _elapsed)
             except Exception as exc:
                 logger.warning("recall_relevant_lessons failed: %s", exc)
                 lessons = []
@@ -2909,9 +3499,11 @@ class SolveEngine:
                 elif self._victory_condition.confidence >= 0.7 and new_vc.confidence < 0.5:
                     new_vc = self._victory_condition
 
-            bootstrap_vc = self._build_bootstrap_victory_condition(
-                min_confidence=0.5 if zero_reward_streak >= 3 else 0.4
-            )
+            bootstrap_vc = None
+            if float(self._archetype_confidence or 0.0) >= 0.65 and step >= 4:
+                bootstrap_vc = self._build_bootstrap_victory_condition(
+                    min_confidence=0.5 if zero_reward_streak >= 3 else 0.4
+                )
             if bootstrap_vc is not None and (
                 new_vc.condition_type == VictoryType.UNKNOWN
                 or new_vc.confidence + 0.05 < bootstrap_vc.confidence
@@ -3353,6 +3945,9 @@ class SolveEngine:
         # B174: Persist any queued chunk execution writes to KuzuDB
         await self._flush_chunk_writes()
 
+        # A058: Final terminal-grounded score for this step
+        terminal_score = self._calculate_terminal_score(hypothesis_context)
+
         return SolveContext(
             archetype=self._archetype,
             archetype_confidence=self._archetype_confidence,
@@ -3371,6 +3966,11 @@ class SolveEngine:
             plateau_escalation_required=self._plateau_escalation_required,
             ranked_action_families=ranked_families,
             action_family_scores=action_family_scores,
+            terminal_value_score=terminal_score.total_score,
+            terminal_value_components=terminal_score.to_dict(),
+            world_model_summary=world_model_summary,
+            mechanic_priors=mechanic_priors or [],
+            planner_selection=planner_selection,
         )
 
     def _plan_changed(

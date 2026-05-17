@@ -46,6 +46,23 @@ class FrameDelta:
     colors_removed: List[int] = field(default_factory=list)
 
 @dataclass
+class ObjectDelta:
+    """A063: Structured change in a single color/component."""
+    color: int
+    size_delta: int
+    centroid_delta: tuple[float, float]
+    expansion: bool
+    contraction: bool
+
+@dataclass
+class ObjectProgressSummary:
+    """A063: Aggregate object-centric progress evidence."""
+    score: float
+    components: Dict[str, float]
+    summary: str
+    deltas: List[ObjectDelta]
+
+@dataclass
 class LevelPattern:
     """Cross-level consensus: what's common across solved levels."""
     consistent_action_effects: Dict[str, str]  # action_id -> observed effect description
@@ -68,10 +85,11 @@ class PatternRegion:
 @dataclass
 class RegionComparison:
     """B167: Result of comparing two pattern regions."""
-    similarity: float  # 0.0 to 1.0
+    similarity: Optional[float]  # 0.0 to 1.0; None if undefined (e.g. no foreground)
     exact_match: bool
     cells_matching: int
     cells_total: int
+    color_shifted: bool = False  # A050: True if patterns match structurally with a color swap
     color_shift: Optional[Dict[int, int]] = None  # If patterns match with a color swap
     description: str = ""  # "exact match", "partial match (72%)", etc.
 
@@ -217,26 +235,29 @@ class GridDiffEngine:
                     else:
                         mapping[ca] = cb
 
-        # Use foreground-only similarity when there are foreground cells,
-        # fall back to all-cell similarity otherwise
-        if fg_total > 0:
-            similarity = fg_matching / fg_total
-            cells_total = fg_total
-            cells_matching = fg_matching
-        else:
-            similarity = all_matching / all_total if all_total > 0 else 0
-            cells_total = all_total
-            cells_matching = all_matching
+        # A050: Kill the "= 1.0" cliffs.
+        if fg_total == 0:
+            return RegionComparison(
+                similarity=None,
+                exact_match=False,
+                cells_matching=0,
+                cells_total=0,
+                description="no foreground"
+            )
+
+        similarity = fg_matching / fg_total
+        cells_total = fg_total
+        cells_matching = fg_matching
 
         exact = (all_matching == all_total)
-
+        color_shifted = False
         shift_result = None
+
         if not exact and allow_color_shift and not inconsistent_shift:
-            # Check if it matches after shift
-            # If we are here, mapping is consistent for ALL cells
+            # Consistent color mapping found (structural match)
             shift_result = mapping
-            similarity = 1.0 # 100% structural similarity with color shift
-            desc = "color-shifted match"
+            color_shifted = True
+            desc = f"color-shifted partial match ({similarity:.1%})"
         elif exact:
             desc = "exact match"
         else:
@@ -245,8 +266,11 @@ class GridDiffEngine:
         return RegionComparison(
             similarity=similarity,
             exact_match=exact,
-            cells_matching=cells_matching if not shift_result else cells_total,
+            # A050: Keep raw foreground match counts even for color-shifted matches.
+            # Downstream callers rely on these counters for honest progress deltas.
+            cells_matching=cells_matching,
             cells_total=cells_total,
+            color_shifted=color_shifted,
             color_shift=shift_result,
             description=desc
         )
@@ -294,6 +318,7 @@ class GridDiffEngine:
                     continue
 
                 structural = self.compare_regions(ra, rb, allow_color_shift=True).similarity
+                structural = float(structural or 0.0)
 
                 for reference, goal in ((ra, rb), (rb, ra)):
                     overlap = len(reference.color_palette & goal.color_palette)
@@ -440,6 +465,124 @@ class GridDiffEngine:
             new_colors_introduced=sorted(after_colors - before_colors),
             colors_removed=sorted(before_colors - after_colors),
         )
+
+    def calculate_coordinate_relevance(self, requested_coord: Tuple[int, int], changed_cells: List[CellChange]) -> Dict[str, Any]:
+        """A062: Compare requested coordinate against observed cell changes."""
+        if not changed_cells:
+            return {"min_dist": None, "mean_dist": None, "n_cells": 0, "changed_coords": []}
+            
+        distances = []
+        req_r, req_c = requested_coord
+        
+        for cell in changed_cells:
+            dist = ((cell.row - req_r)**2 + (cell.col - req_c)**2)**0.5
+            distances.append(dist)
+            
+        return {
+            "min_dist": min(distances),
+            "mean_dist": sum(distances) / len(distances),
+            "n_cells": len(changed_cells),
+            "changed_coords": [(c.row, c.col) for c in changed_cells]
+        }
+
+    def compute_object_progress(self, prev_grid: List[List[int]], next_grid: List[List[int]], roles: Dict[int, dict]) -> ObjectProgressSummary:
+        """A063: Compute object-centric progress components."""
+        prev_components = self.extract_connected_components(prev_grid, color=-1)
+        next_components = self.extract_connected_components(next_grid, color=-1)
+        
+        # Group by color
+        prev_by_color = collections.defaultdict(list)
+        for c in prev_components: prev_by_color[c.color].append(c)
+        
+        next_by_color = collections.defaultdict(list)
+        for c in next_components: next_by_color[c.color].append(c)
+        
+        deltas = []
+        components = {}
+        
+        def role_for(color_value: int) -> Any:
+            role_data = roles.get(color_value) or roles.get(str(color_value)) or {}
+            role = role_data.get("role") if isinstance(role_data, dict) else None
+            return role.value if hasattr(role, "value") else role
+
+        # Analyze each color with role awareness
+        for color in set(prev_by_color.keys()) | set(next_by_color.keys()):
+            p_list = prev_by_color[color]
+            n_list = next_by_color[color]
+            role = role_for(color)
+            total_size_delta = sum(c.size for c in n_list) - sum(c.size for c in p_list)
+
+            if not (len(p_list) == 1 and len(n_list) == 1):
+                if role == "player" and total_size_delta > 0:
+                    components["player_expansion"] = components.get("player_expansion", 0.0) + min(0.5, 0.05 * total_size_delta)
+                elif role == "path" and total_size_delta < 0:
+                    components["path_consumption"] = components.get("path_consumption", 0.0) + min(0.5, 0.05 * abs(total_size_delta))
+                elif role == "collectible" and total_size_delta < 0:
+                    components["collectible_pickup"] = components.get("collectible_pickup", 0.0) + min(0.5, 0.1 * abs(total_size_delta))
+            
+            # Simple 1-to-1 matching by single-component colors
+            if len(p_list) == 1 and len(n_list) == 1:
+                p = p_list[0]
+                n = n_list[0]
+                size_delta = n.size - p.size
+                
+                pr1, pc1, pr2, pc2 = p.bounding_box
+                nr1, nc1, nr2, nc2 = n.bounding_box
+                
+                p_cent = ((pr1 + pr2) / 2.0, (pc1 + pc2) / 2.0)
+                n_cent = ((nr1 + nr2) / 2.0, (nc1 + nc2) / 2.0)
+                dr = n_cent[0] - p_cent[0]
+                dc = n_cent[1] - p_cent[1]
+                
+                if role == "player":
+                    if size_delta > 0:
+                        components["player_expansion"] = components.get("player_expansion", 0.0) + 0.2
+                    if abs(dr) > 0.1 or abs(dc) > 0.1:
+                        components["player_movement"] = components.get("player_movement", 0.0) + 0.1
+                elif role == "path" and size_delta < 0:
+                    components["path_consumption"] = components.get("path_consumption", 0.0) + 0.3
+                elif role == "collectible" and size_delta < 0:
+                    components["collectible_pickup"] = components.get("collectible_pickup", 0.0) + 0.5
+                
+                deltas.append(ObjectDelta(
+                    color=color, size_delta=size_delta,
+                    centroid_delta=(dr, dc), expansion=size_delta > 0, contraction=size_delta < 0
+                ))
+
+        # Goal approach
+        def coerce_color_key(value: Any) -> Any:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return value
+
+        player_colors = [coerce_color_key(c) for c, r in roles.items() if (r.get("role") == "player" or (hasattr(r.get("role"), "value") and r.get("role").value == "player"))]
+        goal_colors = [coerce_color_key(c) for c, r in roles.items() if (r.get("role") == "goal" or (hasattr(r.get("role"), "value") and r.get("role").value == "goal"))]
+        
+        if player_colors and goal_colors:
+            def min_dist(grid_components, c_list1, c_list2):
+                min_d = float("inf")
+                for c1 in [comp for comp in grid_components if comp.color in c_list1]:
+                    for c2 in [comp for comp in grid_components if comp.color in c_list2]:
+                        r1, c1_r, r2, c1_c = c1.bounding_box
+                        r3, c3_r, r4, c3_c = c2.bounding_box
+                        cent1 = ((r1+r2)/2.0, (c1_r+c1_c)/2.0)
+                        cent2 = ((r3+r4)/2.0, (c3_r+c3_c)/2.0)
+                        d = ((cent1[0]-cent2[0])**2 + (cent1[1]-cent2[1])**2)**0.5
+                        if d < min_d: min_d = d
+                return min_d
+            
+            d_prev = min_dist(prev_components, player_colors, goal_colors)
+            d_next = min_dist(next_components, player_colors, goal_colors)
+            
+            if d_next < d_prev and d_prev != float("inf"):
+                components["goal_approach"] = round((d_prev - d_next) * 0.1, 3)
+                
+        score = sum(components.values())
+        summary_parts = [f"{k}:{v:.2f}" for k, v in components.items() if abs(v) > 0.01]
+        summary = ", ".join(summary_parts) if summary_parts else "no structural progress"
+        
+        return ObjectProgressSummary(score=round(score, 3), components=components, summary=summary, deltas=deltas)
 
     def _flood_fill(self, grid: List[List[int]], r: int, c: int, color: int, visited: Set[tuple[int, int]]) -> List[tuple[int, int]]:
         rows = len(grid)

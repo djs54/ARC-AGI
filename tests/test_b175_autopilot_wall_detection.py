@@ -25,7 +25,8 @@ def orchestrator():
     })
     return orch
 
-def test_wall_detection_and_rotation(orchestrator):
+@pytest.mark.asyncio
+async def test_wall_detection_and_rotation(orchestrator):
     # Setup: player at 5,5, target at 10,10. Row delta 5, col delta 5.
     # Autopilot prefers row axis (ACTION2).
     orchestrator.solve_engine._object_roles = {
@@ -35,7 +36,7 @@ def test_wall_detection_and_rotation(orchestrator):
     
     # 1. First autopilot step: moves player to 5,5 (tried ACTION2 but stayed at 5,5)
     # Simulate first step
-    action = orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert action["action_id"] == "ACTION2"
     
     # Record result: no movement
@@ -43,12 +44,13 @@ def test_wall_detection_and_rotation(orchestrator):
     orchestrator.record_step_result(reward=0.0, done=False, next_observation={"grid": [[0]*20 for _ in range(20)]})
     
     # 2. Second autopilot step: should detect row wall and rotate to col axis (ACTION4)
-    action2 = orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action2 = await orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert action2["action_id"] == "ACTION4"
     assert "row blocked" in action2["rationale"]
     assert "row" in orchestrator._blocked_axes
 
-def test_blocked_axis_persistence(orchestrator):
+@pytest.mark.asyncio
+async def test_blocked_axis_persistence(orchestrator):
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
         2: ObjectRole(color_id=2, role=RoleType.GOAL, confidence=0.9, estimated_position={"row": 10.0, "col": 10.0})
@@ -61,7 +63,7 @@ def test_blocked_axis_persistence(orchestrator):
     orchestrator._step_history.append({"decision_source": "llm", "step": 11})
     
     # Autopilot at step 12 should still see row blocked
-    action = orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert action["action_id"] == "ACTION4" # Rotated to col axis
     assert "row blocked" in action["rationale"]
 
@@ -73,7 +75,8 @@ def test_blocked_axis_clearing_on_reward(orchestrator):
     
     assert len(orchestrator._blocked_axes) == 0
 
-def test_disengage_when_both_blocked(orchestrator):
+@pytest.mark.asyncio
+async def test_disengage_when_both_blocked(orchestrator):
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
         2: ObjectRole(color_id=2, role=RoleType.GOAL, confidence=0.9, estimated_position={"row": 10.0, "col": 10.0})
@@ -83,10 +86,11 @@ def test_disengage_when_both_blocked(orchestrator):
     orchestrator._blocked_axes["row"] = step - 1
     orchestrator._blocked_axes["col"] = step - 1
     
-    action = orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert action is None # Disengaged because both axes blocked
 
-def test_oscillation_breakout_still_works(orchestrator):
+@pytest.mark.asyncio
+async def test_oscillation_breakout_still_works(orchestrator):
     # Regression test for B168 oscillation logic
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
@@ -103,6 +107,6 @@ def test_oscillation_breakout_still_works(orchestrator):
         })
     
     # Should detect oscillation and switch axis
-    action = orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*20 for _ in range(20)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4"])
     assert "oscillation detected" in action["rationale"]
     assert "switching axis" in action["rationale"]

@@ -174,3 +174,10 @@ COMPACT_INSTRUCTION_TEMPLATE = (
     "Think step by step. What changed after your last action, and what should you try next?\n"
     "Return JSON: {\"action\": N, \"why\": \"...\"}"
 )
+
+# A077: World Model Guided Planner Section
+PLANNER_CANDIDATES_SECTION = (
+    "\n\nPLANNER PROPOSALS (based on world model evidence):\n"
+    "{planner_candidates}\n"
+    "Consider these evidence-backed actions when choosing your next step."
+)

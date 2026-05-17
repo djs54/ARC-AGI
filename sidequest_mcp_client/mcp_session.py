@@ -1,8 +1,9 @@
 """Simple MCP-over-stdio session manager for ARC_AGI.
 
 This module implements a minimal, testable stdio-backed MCP client used by
-the ARC runtime to talk to a HippoCampy/Campy MCP stdio server. It intentionally
-keeps transport-level normalization and error handling in one place.
+the ARC runtime to talk to a HippoCampy/Campy MCP stdio server. It
+intentionally keeps transport-level normalization and error handling in one
+place.
 """
 
 from __future__ import annotations
@@ -67,8 +68,7 @@ class MCPStdIOSession:
         # Small sleep to allow short-lived commands to exit and be detected.
         time.sleep(0.05)
         if self.proc.poll() is not None:
-            stderr = self.proc.stderr.read() if self.proc.stderr is not None else ""
-            raise MCPStartupError(f"process exited during startup (code={self.proc.returncode}): {stderr!r}")
+            raise MCPStartupError(self._terminated_message("process exited during startup"))
 
         return self
 
@@ -161,7 +161,7 @@ class MCPStdIOSession:
                     line = fd.readline()
                     if not line:
                         if self.proc.poll() is not None:
-                            raise MCPStartupError("process terminated")
+                            raise MCPStartupError(self._terminated_message("process terminated"))
                         continue
                     try:
                         resp = json.loads(line.strip())
@@ -177,7 +177,7 @@ class MCPStdIOSession:
                 line = fd.readline()
                 if not line:
                     if self.proc.poll() is not None:
-                        raise MCPStartupError("process terminated")
+                        raise MCPStartupError(self._terminated_message("process terminated"))
                     continue
                 try:
                     resp = json.loads(line.strip())
@@ -200,6 +200,21 @@ class MCPStdIOSession:
         if isinstance(method, str) and method:
             return method
         return "unknown_operation"
+
+    def _terminated_message(self, reason: str) -> str:
+        code = None
+        stderr_tail = ""
+        if self.proc is not None:
+            code = self.proc.returncode
+            if self.proc.stderr is not None:
+                try:
+                    stderr_tail = (self.proc.stderr.read() or "").strip()
+                except Exception:
+                    stderr_tail = ""
+        cmd_text = " ".join(self.cmd or [])
+        if stderr_tail:
+            return f"{reason} (code={code}) cmd={cmd_text!r} stderr={stderr_tail!r}"
+        return f"{reason} (code={code}) cmd={cmd_text!r}"
 
     def close(self, timeout: float = 2.0) -> None:
         if not self.proc:

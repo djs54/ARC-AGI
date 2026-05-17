@@ -13,6 +13,31 @@ def _make_runner() -> DurableARCRunner:
     return DurableARCRunner(harness, NoOpBrainClient(), config={"llm": {"model": "test"}})
 
 
+def test_classify_failure_wall_clock_timeout():
+    result = classify_failure(error_message="Wall-clock budget exhausted (3601.2s > 3600.0s)", wall_clock_timeout=True)
+    assert result is FailureTaxonomy.WALL_CLOCK_TIMEOUT
+    assert result.value == "wall_clock_budget_exhausted"
+
+
+def test_classify_failure_wall_clock_timeout_haystack():
+    result = classify_failure(error_message="some generic Wall-Clock budget exhausted")
+    assert result is FailureTaxonomy.WALL_CLOCK_TIMEOUT
+    assert result.value == "wall_clock_budget_exhausted"
+
+
+def test_classify_failure_wall_clock_precedence():
+    """A056: Wall-clock should take precedence over generic 'timeout' string."""
+    result = classify_failure(error_message="Wall-clock budget exhausted. Note: LLM also timed out.")
+    assert result is FailureTaxonomy.WALL_CLOCK_TIMEOUT
+    assert result.value == "wall_clock_budget_exhausted"
+
+
+def test_classify_failure_tool_timeout_precedence():
+    """A056: MCP/Tool timeouts should be distinguished from LLM timeouts."""
+    result = classify_failure(error_message="mcptimeouterror: call to tools/call:notify_turn timed out")
+    assert result is FailureTaxonomy.TOOL_TIMEOUT
+
+
 def test_classify_failure_timeout():
     result = classify_failure(TimeoutError("LLM request timed out after 30s"))
     assert result is FailureTaxonomy.LLM_TIMEOUT

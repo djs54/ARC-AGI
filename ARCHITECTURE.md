@@ -16,6 +16,181 @@ Its job is to:
 
 It is not the memory engine.
 
+## ARC-AGI-3 Strategic Architecture
+
+Technical mission statement:
+
+> GPT-5.5-style reasoning should generate hypotheses, but the graph world model should decide what is believed, what is falsified, what transfers, and what experiment is worth paying for next.
+
+ARC-AGI-3 work is moving from raw episode memory toward a graph-backed
+world-model compiler. Local observations are not enough. Each action/effect
+observation must be compiled into a per-game model of causal power, object
+relevance, goal progress, falsified beliefs, and next experiments.
+
+This makes graph memory central architecture, not a recall side channel. The
+LLM can imagine hypotheses and propose experiments, but durable belief state
+belongs to the world model. Future reasoning should operate against the
+compiled world model rather than raw step history whenever possible.
+
+Graph fit:
+
+- The workload is relationship-heavy: actions cause effects, effects support
+  or contradict hypotheses, hypotheses explain mechanics, mechanics transfer
+  across games, and global strategy emerges from those relationships.
+- The preferred model is a labeled property graph. ARC runtime needs
+  traversal-first operational behavior, edge properties for confidence and
+  provenance, and compact relationship-scoped facts.
+- RDF/ontology is not the default for this layer. Interoperability and formal
+  inference are less important than bounded traversal, causal edge metadata,
+  contradiction tracking, and fast operational summaries.
+
+### Two-Level Graph Memory
+
+#### 1. Per-Game World Graph
+
+The per-game graph is rebuilt or updated during each live game. It represents
+the current game belief state, not a verbose replay log.
+
+Starter schema:
+
+```text
+(:Game {id})
+(:State {hash, step})
+(:Action {id, kind})
+(:Observation {step, frame_hash, reward, terminal_score})
+(:Effect {kind, magnitude})
+(:Object {signature, role})
+(:Hypothesis {claim, confidence, status})
+(:Mechanic {name, confidence})
+(:GoalModel {type, confidence})
+
+(:Game)-[:HAS_STATE]->(:State)
+(:State)-[:ACTION_TAKEN {step}]->(:Action)
+(:Action)-[:CAUSED {confidence}]->(:Effect)
+(:Effect)-[:OBSERVED_IN]->(:Observation)
+(:Effect)-[:SUPPORTS]->(:Hypothesis)
+(:Effect)-[:CONTRADICTS]->(:Hypothesis)
+(:Hypothesis)-[:EXPLAINS]->(:Mechanic)
+(:Mechanic)-[:PREDICTS]->(:Effect)
+(:Object)-[:MOVED|EXPANDED|BLOCKED|APPROACHED_GOAL]->(:Object)
+(:Game)-[:CURRENT_GOAL_MODEL]->(:GoalModel)
+```
+
+The per-game graph should answer:
+
+- What do we believe this game is?
+- Which actions have causal power?
+- Which objects matter?
+- What has been falsified?
+- What strategy should be tried next?
+
+It should not merely answer "what happened on step 17?"
+
+#### 2. Aggregate Mechanic Graph
+
+The aggregate graph is cross-game memory. It stores reusable mechanic
+knowledge: action patterns, effect patterns, preconditions, failure modes,
+recovery policies, and plan templates.
+
+Starter schema:
+
+```text
+(:Mechanic {name})
+(:ActionPattern {signature})
+(:EffectPattern {signature})
+(:GameArchetype {name})
+(:FailureMode {name})
+(:RecoveryPolicy {name})
+(:PlanTemplate {name})
+
+(:Mechanic)-[:HAS_ACTION_PATTERN]->(:ActionPattern)
+(:Mechanic)-[:CAUSES_EFFECT_PATTERN]->(:EffectPattern)
+(:Mechanic)-[:APPEARS_IN]->(:GameArchetype)
+(:FailureMode)-[:RECOVERED_BY]->(:RecoveryPolicy)
+(:Mechanic)-[:USES_PLAN]->(:PlanTemplate)
+(:Game)-[:MATCHED_MECHANIC {confidence}]->(:Mechanic)
+(:Game)-[:FAILED_BY {evidence}]->(:FailureMode)
+```
+
+Aggregate retrieval should return similar world-model structures, not similar
+raw logs. For example:
+
+```cypher
+MATCH (g:Game {id: $current})-[:HAS_MECHANIC_CANDIDATE]->(m:Mechanic)
+MATCH (m)-[:USES_PLAN]->(p:PlanTemplate)
+MATCH (m)-[:CAUSES_EFFECT_PATTERN]->(e:EffectPattern)
+RETURN m, p, e
+ORDER BY m.confidence DESC
+LIMIT 5
+```
+
+### World-Model Compiler Loop
+
+After each small batch of experiments, the agent should update the world model
+instead of starting another generic reasoning cycle.
+
+```text
+local observations
+-> action-effect table
+-> hypothesis update
+-> mechanic candidates
+-> goal model
+-> next experiment
+```
+
+For a single-action smoke where `ACTION6` changes pixels but produces no
+terminal or object progress, the compiler should produce a model like:
+
+- available action set: single-action
+- `ACTION6`: deterministic/churn-producing
+- terminal progress: flat or regressing
+- object progress: absent
+- coordinate relevance: none
+- macro eligibility: false productive macro, true cheap-classification probe
+- failure risk: `single_action_terminal_stall`
+
+The next policy should be:
+
+- stop the full LLM/MCP loop
+- run bounded cheap probes
+- classify the mechanic
+- if no terminal evidence appears, terminate early or escalate to
+  `hidden_precondition_or_world_model_missing`
+
+The agent should not continue paying for full reasoning while pressing the
+same non-terminal-relevant action.
+
+### Decision Ownership
+
+| Layer | Responsibility |
+|---|---|
+| LLM reasoning | Generate hypotheses, propose bounded experiments, explain surprising evidence |
+| World-model compiler | Convert telemetry into causal claims, relevance facts, and contradictions |
+| Per-game graph | Decide current beliefs, falsifications, goal model, and action relevance |
+| Aggregate mechanic graph | Transfer reusable mechanics, failure modes, and recovery policies across games |
+| Reasoning controller | Decide whether reasoning is worth paying for now |
+| Planner | Choose the next experiment from graph-backed evidence |
+
+### Non-Goals
+
+- Do not call memory more often just because the model is graph-backed.
+- Do not store more raw text when a causal summary is enough.
+- Do not put blocking memory reads in execute or macro phases.
+- Do not let aggregate mechanic memory override current-game evidence.
+- Do not import HippoCampy/Campy internals into ARC runtime; all persistent memory
+  integration still goes through the MCP seam.
+
+### Implementation Track
+
+The active backlog sequence for this architecture is:
+
+- A073: Per-game world model graph
+- A074: World-model compiler from step telemetry
+- A075: Aggregate mechanic memory
+- A076: Evidence-gated reasoning controller
+- A077: World-model-guided planner
+- A078: World-model evaluation harness and live stream
+
 ## Relationship To HippoCampy / Campy
 
 The architectural split is:
@@ -144,7 +319,7 @@ ARC_AGI Repo
   ├── ARC solver/orchestrator
   ├── ARC benchmark harness
   ├── evaluation + compliance tooling
-  └── SideQuests integration layer
+  └── Campy integration layer
           └── uses HippoCampy/Campy memory services
 ```
 
@@ -155,8 +330,8 @@ ARC environment / task source
   -> ARC harness
   -> ARC orchestrator
   -> ARC strategy / solve engine
-  -> SideQuests-backed brain client
-  -> SideQuests local memory graph
+  -> Campy-backed brain client
+  -> Campy local memory graph
   -> retrieval / plans / lessons / outcome learning
 ```
 
@@ -200,9 +375,9 @@ ARC-specific cognition and orchestration.
 ARC-specific execution, evaluation, and packaging.
 
 - `harness.py`
-  baseline versus SideQuests-augmented evaluation path
+  baseline versus Campy-augmented evaluation path
 - `adapter.py`
-  bridge between ARC episodes and SideQuests-style brain calls
+  bridge between ARC episodes and Campy-style brain calls
 - `schema.py`
   ARC observation/action data contracts
 - `state_serializer.py`
@@ -232,7 +407,7 @@ The ARC agent uses a durable, inspectable phase-state machine:
 6. `EVALUATE`
 7. `REPLAN`
 
-This loop is ARC-owned. Memory persistence is SideQuests-owned.
+This loop is ARC-owned. Memory persistence is Campy-owned.
 
 `REPLAN` is a first-class recovery/escalation phase rather than an implicit
 fallback. The runtime can now route back into better modeling or strategy
@@ -316,8 +491,8 @@ remains, the solver raises `plateau_escalation_required` which the
 orchestrator translates to `COVERAGE_SATURATED_ABORT` when the
 action-coverage signal also agrees.
 
-## How ARC Uses SideQuests Memory
-The ARC stack treats SideQuests as a memory substrate, not as solver logic.
+## How ARC Uses Campy Memory
+The ARC stack treats Campy as a memory substrate, not as solver logic.
 
 ### Core Memory Operations Used
 
@@ -347,7 +522,7 @@ The ARC stack treats SideQuests as a memory substrate, not as solver logic.
 ### Runtime Notes
 
 - production startup uses MCP readiness checks instead of directly bootstrapping
-  SideQuests graph/schema internals
+  Campy graph/schema internals
 - `run_single_puzzle.py` now performs fail-fast preflight for:
   - LLM initialization
   - observability initialization
@@ -431,22 +606,21 @@ The repo split is clean at both the folder level and the interface level (A002-A
 - packaging metadata is separate
 - production runtime integration is MCP over stdio; direct `mcp_engine.*` / `campy.*` / `sidequests.*` imports are forbidden in production paths by `BacklogRules.md` rule 4 and enforced by `tests/test_import_boundary.py`
 
-### Known Remaining Test-Side Drift (A029)
+### Validation Baseline
 
-Full-suite `pytest -q` is not yet green on `master`. The A-series baseline (`make test-a`) is green; the broader suite has 22 known problems tracked under A029 — 2 collection errors and 20 assertion drifts that surfaced once A023/A024 landed. A029 triages these into per-category follow-up cards and forbids closing the gap via direct `mcp_engine.*` imports. Until A029 completes, use `make test-a` as the regression signal.
+The A-series baseline (`make test-a`) remains the required regression signal for A-card work. The broader `pytest -q` suite was restored through the A029 follow-up sequence (A030-A037); A037 records the full suite at 723/723 passing while preserving the MCP seam import boundary.
 
 ## Recommended Next Steps
 
-1. Complete A029 so `pytest -q` becomes a reliable green baseline again.
-2. Keep ARC docs and benchmarks evolving in this sibling repo only.
-3. Keep `sidequests-brain` architecture focused on memory-system responsibilities only.
+1. Keep ARC docs and benchmarks evolving in this sibling repo only.
+2. Keep `hippocampy` / Campy architecture focused on memory-system responsibilities only.
 
 ## Non-Goals
 
 `ARC_AGI` should not become:
 
-- a second copy of SideQuests
+- a second copy of Campy
 - the canonical home of memory schema design
-- the place where SideQuests product direction is decided
+- the place where Campy product direction is decided
 
 Its role is solver experimentation and benchmark execution.

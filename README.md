@@ -54,7 +54,7 @@ pip install -e .
 make test-a
 ```
 
-`make test-a` runs the A-series observability, plan-registration, exploration-probing, and trace-durability test files — the subset that is guaranteed green on `master`. The broader `pytest -q` run has known failures and collection issues tracked under A029; do not treat a red full-suite run as a regression signal until A029 completes.
+`make test-a` runs the A-series observability, plan-registration, exploration-probing, and trace-durability test files and remains the required green-baseline signal for active A-card work. The broader `pytest -q` baseline was restored through the A029 follow-up sequence and is recorded on A037 as 723/723 passing.
 
 If `hippocampy` is published where you want to consume it from, you can install that package instead of using the parent path.
 
@@ -78,13 +78,17 @@ What is already done:
 - ARC code is copied into its own repo-shaped folder
 - ARC tests are copied into their own test tree
 - packaging metadata for a standalone ARC project is added
-- Production SideQuests integration is concentrated behind MCP-facing modules in `sidequest_mcp_client/`, with any direct-import compatibility helpers isolated to `sidequest_mcp_client/test_compat/`
+- Production HippoCampy integration is concentrated behind MCP-facing modules in `sidequest_mcp_client/`, with any direct-import compatibility helpers isolated to `sidequest_mcp_client/test_compat/`
 
 What still remains if you want a fully independent git repo:
 
 - initialize a separate git repo inside `ARC_AGI/`
-- complete the A029 full-suite triage so `pytest -q` becomes a reliable signal (A024-A028 already settled the A-series baseline)
 - move ARC-only docs and result artifacts over time
+
+Current validation baseline:
+
+- `make test-a` is the required green-baseline signal for A-card work
+- `pytest -q` was restored to a full-suite green baseline through A029/A030-A037 (`723/723` passing as recorded on A037)
 
 The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 moved all production paths behind the MCP stdio seam, and `BacklogRules.md` rule 4 forbids re-introducing direct imports. See [ARCHITECTURE.md](ARCHITECTURE.md) for the seam contract.
 

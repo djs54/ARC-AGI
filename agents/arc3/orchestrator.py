@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import datetime
 import json
 import logging
@@ -21,7 +22,24 @@ from sidequest_mcp_client.observability import (
 from benchmarks.arc3.schema import ARC3Action, ARC3Observation
 from benchmarks.arc3.state_serializer import StateSerializerForARC
 from agents.arc3.hypothesis import HypothesisManager
-from agents.arc3.solver import SolveEngine, GameRuleHypothesis, PatternMatchTracker, ObjectRole, RoleType
+from agents.arc3.world_model import COORDINATE_REQUIRED_ACTIONS, WorldModelGraph, build_action_identity
+from agents.arc3.world_model_compiler import WorldModelCompiler
+from agents.arc3.reasoning_controller import ReasoningController, ReasoningMode
+from agents.arc3.world_model_planner import WorldModelPlanner
+from agents.arc3.click_candidates import ClickCandidateGenerator
+from agents.arc3.click_telemetry import ClickTelemetryStore, extract_click_telemetry_from_step
+from agents.arc3.solver import (
+    SolveEngine, 
+    GameArchetype,
+    GameRuleHypothesis, 
+    HybridPatternMatcher, 
+    ObjectRole, 
+    RoleType,
+    VictoryCondition,
+    VictoryType,
+    HybridPatternConfig,
+    HybridProgressEvidence
+)
 from agents.arc3.cost_tracker import CostTracker
 from agents.arc3.circuit_breaker import CircuitBreakerLLMClient
 from agents.arc3.supervisor import PuzzleSupervisor, SupervisorDecision, SupervisorVerdict
@@ -43,8 +61,36 @@ from agents.arc3.prompts import (
     ARC_EXECUTION_INSTRUCTION_TEMPLATE,
     ARC_ACTION_INSTRUCTION_TEMPLATE,
 )
+# A101-A105: New modules for goal hypotheses, mechanic graphs, graph transformations, cycle search, and level transfer
+from agents.arc3.goal_hypothesis import GoalHypothesisInducer, GoalHypothesis
+from agents.arc3.mechanic_graph import MechanicGraphExtractor, MechanicGraphSnapshot
+from agents.arc3.graph_transform import GraphTransformationLearner, GraphTransformation
+from agents.arc3.level_transfer import LevelTransferCompiler, LevelTransferMatcher, LevelSolutionTemplate
 
 logger = logging.getLogger(__name__)
+
+
+class _AwaitableAction(dict):
+    """Compatibility shim: dict-like for sync callers, awaitable for legacy async callers."""
+
+    def __await__(self):
+        async def _return_self():
+            return self
+
+        return _return_self().__await__()
+
+
+class _AwaitableNoAction:
+    """Falsey awaitable sentinel that resolves to None."""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __await__(self):
+        async def _return_none():
+            return None
+
+        return _return_none().__await__()
 
 
 @dataclass
@@ -67,14 +113,13 @@ class PromptPacket:
         """Render the packet into a final prompt string."""
         ordered_keys = [
             "SYSTEM", "TRAINING_EXAMPLES", "SOLVED_LEVELS", "PRIOR_INSIGHTS",
-            "GRID_ANALYSIS", "REPL_RESULTS", 
+            "GRID_ANALYSIS", "REPL_RESULTS",
             "STATE", "ENTITY_CONTEXT", "MEMORY", "SOLVE_CONTEXT", "NAVIGATION", "PLAN",
             "ACTION_FACTS", "EXPLORATION_SUMMARY", "PATH_HYPOTHESES", "HYPOTHESIS",
-            "PATTERN_HYPOTHESIS", "GRID", "TEST_INPUT",
+            "PATTERN_HYPOTHESIS", "REASONING_WORKSPACE", "GRID", "TEST_INPUT",
             "OBSERVED_EFFECTS", "REFLEX", "HISTORY", "OBSERVATION",
             "INSTRUCTION", "ACTION_INVOCATION"
         ]
-        
         # Mapping of block type to its standard header
         headers = {
             "ENTITY_CONTEXT": "ENTITY CONTEXT",
@@ -127,6 +172,21 @@ class ARCOrchestrator:
     ACTION_FATIGUE_THRESHOLD = 3  # B149
     MAX_FORCED_EXPLORATION_STEPS = 3  # B154
 
+    @staticmethod
+    def _solve_context_get(solve_context: Any, key: str, default: Any = None) -> Any:
+        """Robustly read solve-context fields from dicts or object-like contexts."""
+        if solve_context is None:
+            return default
+        if isinstance(solve_context, dict):
+            return solve_context.get(key, default)
+        try:
+            get = getattr(solve_context, "get", None)
+            if callable(get):
+                return get(key, default)
+        except Exception:
+            pass
+        return getattr(solve_context, key, default)
+
     def __init__(
         self,
         brain_client: BrainClientProtocol,
@@ -137,6 +197,7 @@ class ARCOrchestrator:
         cost_tracker: Optional[CostTracker] = None,
         phase_controller: object | None = None,
         execution_trace: Optional[List[dict]] = None,
+        task_id: Optional[str] = None,
     ):
         self.brain = brain_client
         llm_cfg = config.get("llm", {}) if isinstance(config, dict) else {}
@@ -156,6 +217,37 @@ class ARCOrchestrator:
         else:
             self.llm = llm_client
         self.session_id = session_id
+        
+        # A050: prioritize explicit task_id, fallback to config, then unknown.
+        self.task_id = task_id or config.get("task_id", "unknown")
+        
+        # A073: Per-game World Model Graph
+        self.world_model = WorldModelGraph(
+            task_id=self.task_id,
+            session_id=session_id
+        )
+        # A074: World Model Compiler
+        self.world_model_compiler = WorldModelCompiler()
+        # A076: Reasoning Controller
+        self.reasoning_controller = ReasoningController(config)
+        # A077: World Model Planner
+        self.world_model_planner = WorldModelPlanner(config)
+        self.click_candidate_generator = ClickCandidateGenerator(self.world_model)
+        self.click_telemetry_store = ClickTelemetryStore()
+        self._last_planner_selection = None
+        self._mechanic_prior_recall_status: str = "not_called"
+        self._mechanic_prior_count: int = 0
+        self._mechanic_prior_error_code: str | None = None
+        
+        # A101-A105: New components for goal hypotheses, mechanic graphs, transformations, cycles, and level transfer
+        self.goal_hypothesis_inducer = GoalHypothesisInducer(config)
+        self.mechanic_graph_extractor = MechanicGraphExtractor(config)
+        self.graph_transformation_learner = GraphTransformationLearner(config)
+        self.level_transfer_compiler = LevelTransferCompiler(config)
+        self.level_transfer_matcher = LevelTransferMatcher(config)
+        self._last_mechanic_graph_snapshot: Optional[MechanicGraphSnapshot] = None
+        self._active_level_template: Optional[Dict[str, Any]] = None
+        
         self.serializer = serializer
         self.config = config
         self._execution_trace = execution_trace if execution_trace is not None else []
@@ -183,8 +275,6 @@ class ARCOrchestrator:
             loaded_procedures=(config.get("loaded_procedures") if isinstance(config, dict) else None),
         )
         self._solve_context: dict | None = None
-        # B131: Comprehensive execution trace for CloudWatch-style logging
-        self._execution_trace: List[dict] = []
         # B199: Allow external guidance to scale exploration budget
         try:
             self._exploration_budget_multiplier = float((config.get("exploration_budget_multiplier") if isinstance(config, dict) else 1.0) or 1.0)
@@ -204,6 +294,8 @@ class ARCOrchestrator:
         self._retrieval_payloads: List[dict] = []
         self._first_prompt_detail_level = "unknown"
         self._asked_for_decision_from_effects = False
+        self._compiled_delta = None # A074/A076
+        self._last_reasoning_decision = None # A079
         # B90: Retrieval triggering
         self._retrieval_triggered = False
         self._last_retrieval_step = -1
@@ -212,11 +304,23 @@ class ARCOrchestrator:
         # A023: count of times the untested-probe guard fired in this run,
         # for test assertions and operator visibility.
         self._untested_probes_forced_in_run: int = 0
+        # A040: coordinate blacklist for ACTION6 no_effect outcomes
+        self._action6_no_effect_coords: set[tuple[int, int]] = set()
         # A025: guard against duplicate coverage-snapshot emission within a single step.
         # None means "no snapshot emitted yet this puzzle"; otherwise holds the last
         # step number that emitted a snapshot.
         self._last_coverage_snapshot_step: Optional[int] = None
         self._blocked_actions: set[str] = set()
+        # Replan perturbation controls: short-lived blacklist + one-step forced probe.
+        self._replan_temporal_blocked_until: Dict[str, int] = {}
+        self._replan_temporal_blocked_actions: set[str] = set()
+        self._replan_forced_action: Dict[str, Any] | None = None
+        self._replan_probe_cursor: int = 0
+        self._replan_perturbation_count: int = 0
+        self._replan_goal_rotation_count: int = 0
+        self._replan_goal_colors_tried: set[int] = set()
+        self._replan_recent_goal_colors: List[int] = []
+        self._replan_goal_rotation_cooldown: int = 2
         self._action_fatigue: dict[str, int] = {}  # B149: action_id -> consecutive zero-reward count
         self._forced_exploration_count = 0  # B154
         self._total_forced_exploration = 0  # B154
@@ -258,13 +362,22 @@ class ARCOrchestrator:
         self._bootstrap_grid_summary: dict | None = None
         # B164: Compact prompt mode for smaller local models
         self._compact_mode: bool = self._is_compact_model()
-        # B167: Pattern match tracking and intermediate targets
-        self._pattern_tracker = PatternMatchTracker()
+        # A095: Prompt compression tracking
+        self._reasoning_cycle_count: int = 0
+        self._prompt_compression_active: bool = False
+        self._last_world_model_node_count: int = 0
+        self._estimated_tokens_before_compression: int = 0
+        self._estimated_tokens_after_compression: int = 0
+        # B167/A050: Hybrid Pattern matching and multi-channel evidence
+        from agents.arc3.solver import HybridPatternMatcher
+        self._pattern_tracker = HybridPatternMatcher(brain_client, config=config.get("hybrid_pattern"))
         self._visited_intermediates: set[tuple[int, int]] = set()
         # B169: KuzuDB role source of truth
         self._entity_graph: Optional["EntityGraphBuilder"] = None
         # B175: Autopilot wall detection and rerouting
         self._blocked_axes: Dict[str, int] = {}  # {"row": step_blocked, "col": step_blocked}
+        self._autopilot_wall_hits: int = 0
+        self._autopilot_disengage_step: int = -100
         self._last_autopilot_player_pos: Optional[tuple[float, float]] = None
         # B178: Action semantics discovery
         self._action_direction_map: Optional[Dict[str, tuple[float, float]]] = None
@@ -272,10 +385,27 @@ class ARCOrchestrator:
         self._supervisor = PuzzleSupervisor(llm_client=llm_client)
         self._supervisor_nudge: Optional[str] = None
         self._should_abandon: bool = False
+        # A061: Macro executor for single-action deterministic progress
+        self._macro_active: bool = False
+        self._macro_id: Optional[str] = None
+        self._macro_action_id: Optional[str] = None
+        self._macro_start_step: int = 0
+        self._macro_step_count: int = 0
+        # A062: Detect when action coordinates are irrelevant
+        self._action_coord_relevance: Dict[str, Dict[str, Any]] = {}  # action_id -> status
         # B198: proactive warnings pushed from SideQuests notify_turn
         self._proactive_warnings: List[dict] = []
         # Optional PhaseController (owned by DurableARCRunner; read-only here)
         self._phase_controller = phase_controller
+        # A085: Multi-action no-progress churn tracking
+        self._per_action_evidence: Dict[str, Dict[str, Any]] = {}
+        self._prediction_falsification_counts: Dict[str, int] = {}
+        self._prediction_quarantine_until: Dict[str, int] = {}
+
+    @property
+    def _current_step(self) -> int:
+        """A038: Compatibility property for DurableARCRunner step-count extraction."""
+        return len(self._step_history)
 
     @property
     def _game_rule_hypothesis(self) -> Any | None:
@@ -404,26 +534,70 @@ class ARCOrchestrator:
 
         return min(unvisited, key=dist)
 
-    def _try_autopilot(self, observation: dict, available_actions: List[str]) -> Optional[ARC3Action]:
-        """B166: Deterministic navigation when player/goal positions are known.
+    async def _try_autopilot_async_enriched(self, observation: dict, available_actions: List[str]) -> Optional[ARC3Action]:
+        """A071: Async-enriched autopilot path for callers that can await memory/matcher work."""
+        # 1. Enrichment pass (A050/A059 integration)
+        grid = observation.get("grid") or []
+        step = len(self._step_history)
+        archetype_obj = (self._solve_context or {}).get("archetype")
+        archetype = str(getattr(archetype_obj, "value", archetype_obj or "unknown"))
+        
+        should_skip_memory = False
+        if step > 0 and getattr(self._pattern_tracker, "phase", None) in ("finish", "intermediate"):
+             last_step = self._step_history[-1] if self._step_history else {}
+             pixels_changed = int(last_step.get("frame_delta", {}).get("n_cells_changed", 0) or 0)
+             if pixels_changed == 0 and (step % 5 != 0):
+                 should_skip_memory = True
+
+        evidence_result = self._pattern_tracker.update(
+            grid, step, self.session_id, self.task_id, archetype,
+            skip_memory=should_skip_memory
+        )
+        if hasattr(evidence_result, "__await__"):
+            updated_evidence = await evidence_result
+            if updated_evidence is not None:
+                try:
+                    self._pattern_tracker.last_result = updated_evidence
+                except Exception:
+                    pass
+        elif evidence_result is not None:
+            try:
+                self._pattern_tracker.last_result = evidence_result
+            except Exception:
+                pass
+            
+        # 2. Call sync path now that tracker is updated
+        return self._try_autopilot(observation, available_actions, mode="async_enriched")
+
+    def _try_autopilot(self, observation: dict, available_actions: List[str], mode: str = "sync") -> Optional[ARC3Action]:
+        """B166/A071: Deterministic navigation logic (Synchronous).
         B167: Extended with phase-awareness and intermediate targets.
         """
         sc = self._solve_context or {}
-        roles = sc.get("object_roles") or {}
+        roles = {}
+        if sc:
+            roles = getattr(sc, "object_roles", {}) if not isinstance(sc, dict) else sc.get("object_roles", {})
         if not roles:
             roles = self._entity_map
 
         grid = observation.get("grid") or []
         step = len(self._step_history)
 
+        # A045: 5-step cooldown after manual disengage to prevent immediate re-lock
+        if step - self._autopilot_disengage_step < 5:
+            return _AwaitableNoAction()
 
-        # B167: Update pattern tracker
-        pattern_state = self._pattern_tracker.update(grid, step)
+
+        # A071: Use already-updated tracker evidence (sync pass)
+        evidence = self._coerce_hybrid_progress_evidence(getattr(self._pattern_tracker, "last_result", None))
+
+        # A050/A071: Diagnostic trace payload for hybrid fusion
         self._emit_trace_event("operation", "pattern_match_progress", {
             "step": step,
-            "phase": pattern_state["phase"],
-            "similarity": pattern_state["similarity"],
-            "trend": pattern_state.get("similarity_trend", "unknown"),
+            "phase": evidence.phase,
+            "confidence": evidence.combined_confidence,
+            "autopilot_mode": mode,
+            "enrichment_status": "complete" if mode == "async_enriched" else "skipped"
         })
 
         player_info = None
@@ -439,16 +613,16 @@ class ARCOrchestrator:
                     goal_info = {"color": color_id, "row": pos["row"], "col": pos["col"], "conf": role_data["confidence"]}
 
         if not player_info:
-            return None
+            return _AwaitableNoAction()
 
         # Target selection based on phase
         target = None
         rationale_prefix = "autopilot"
 
-        if pattern_state["phase"] == "finish" and goal_info:
+        if evidence.phase == "finish" and goal_info:
             target = goal_info
-            rationale_prefix = "autopilot[finish]: goal matches reference"
-        elif pattern_state["phase"] == "intermediate":
+            rationale_prefix = "autopilot[finish]: multi-channel evidence confirms goal match"
+        elif evidence.phase == "intermediate":
             # Find nearest intermediate object
             intermediates = [
                 r for r in roles.values()
@@ -471,7 +645,7 @@ class ARCOrchestrator:
             if goal_info:
                 target = goal_info
             else:
-                return None
+                return _AwaitableNoAction()
 
         # B168: Disengage if autopilot is not making progress (zero pixel changes).
         # B175: Primary check is centroid delta, but keep this as robust fallback.
@@ -482,7 +656,8 @@ class ARCOrchestrator:
         )
         if recent_zero_px >= 2:
             self._emit_trace_event("operation", "autopilot_disengage", {"reason": "wall_collision", "consecutive_zero_px": recent_zero_px})
-            return None
+            self._autopilot_disengage_step = step
+            return _AwaitableNoAction()
 
         # B175: Improved wall detection using player centroid delta.
         # Check if player actually moved since last autopilot step.
@@ -507,11 +682,22 @@ class ARCOrchestrator:
                     # Player didn't move on the target axis — wall detected
                     blocked_axis = "row" if was_row_move else "col"
                     self._blocked_axes[blocked_axis] = step
+                    self._autopilot_wall_hits += 1
                     self._emit_trace_event("operation", "autopilot_wall_detected", {
                         "axis": blocked_axis,
                         "player_delta": {"row": row_delta, "col": col_delta},
                         "step": step,
+                        "wall_hits": self._autopilot_wall_hits,
                     })
+                    
+                    if self._autopilot_wall_hits >= 3:
+                        self._emit_trace_event("operation", "autopilot_disengage", {"reason": "wall_hit_streak", "wall_hits": self._autopilot_wall_hits})
+                        self._autopilot_wall_hits = 0
+                        self._autopilot_disengage_step = step
+                        return _AwaitableNoAction()
+                else:
+                    # Successful movement on target axis - clear hit counter
+                    self._autopilot_wall_hits = 0
 
         dr = target["row"] - player_info["row"]
         dc = target["col"] - player_info["col"]
@@ -541,10 +727,10 @@ class ARCOrchestrator:
                 rationale = f"{rationale_prefix}, {reason}"
 
                 # Mark as visited if it's an intermediate
-                if pattern_state["phase"] == "intermediate":
+                if evidence.phase == "intermediate":
                     self._visited_intermediates.add((round(target["row"]), round(target["col"])))
             else:
-                return None
+                return _AwaitableNoAction()
         elif oscillating:
             # B168: Oscillating but not close enough to interact — try the other axis
             # to break out of the bounce pattern
@@ -566,7 +752,7 @@ class ARCOrchestrator:
                 elif row_blocked:
                     # Row axis blocked and (no column delta to try OR column also blocked)
                     self._emit_trace_event("operation", "autopilot_disengage", {"reason": "row_axis_blocked_no_alt"})
-                    return None
+                    return _AwaitableNoAction()
                 else:
                     action_id = self._pick_action_for_direction(dr, 0, available_actions)
                     rationale = f"{rationale_prefix}: target is {abs(dr):.1f} rows {'above' if dr < 0 else 'below'}, using discovered mapping"
@@ -578,13 +764,20 @@ class ARCOrchestrator:
                 elif col_blocked:
                     # Col axis blocked and (no row delta to try OR row also blocked)
                     self._emit_trace_event("operation", "autopilot_disengage", {"reason": "col_axis_blocked_no_alt"})
-                    return None
+                    return _AwaitableNoAction()
                 else:
                     action_id = self._pick_action_for_direction(0, dc, available_actions)
                     rationale = f"{rationale_prefix}: target is {abs(dc):.1f} cols {'left' if dc < 0 else 'right'}, using discovered mapping"
 
         if action_id not in available_actions:
-            return None
+            return _AwaitableNoAction()
+        if self._is_action_quarantined(action_id, step):
+            self._emit_trace_event("operation", "autopilot_disengage", {
+                "reason": "action_quarantined",
+                "action": action_id,
+                "step": step,
+            })
+            return _AwaitableNoAction()
 
         # B177: Make tier 2 blocks checked by autopilot
         if action_id in self._blocked_actions:
@@ -607,7 +800,7 @@ class ARCOrchestrator:
                 rationale = f"{rationale_prefix}: primary blocked, using alternative"
             else:
                 self._emit_trace_event("operation", "autopilot_disengage", {"reason": "action_blocked", "action": action_id})
-                return None
+                return _AwaitableNoAction()
 
         # B213: Prevent autopilot spatial lock under sustained no-progress.
         try:
@@ -615,7 +808,7 @@ class ARCOrchestrator:
             last_target = getattr(self, "_last_autopilot_target", None)
             if self._consecutive_no_progress_steps >= 2 and last_target == candidate_target:
                 self._emit_trace_event("operation", "autopilot_confidence_drop", {"target": candidate_target}, {"reason": "no_progress_spatial_lock"})
-                return None
+                return _AwaitableNoAction()
             self._last_autopilot_target = candidate_target
         except Exception:
             pass
@@ -626,17 +819,68 @@ class ARCOrchestrator:
         self._emit_trace_event("operation", "autopilot_engage", {
             "player": {"row": player_info["row"], "col": player_info["col"]},
             "target": {"row": target["row"], "col": target["col"]},
-            "phase": pattern_state["phase"],
+            "phase": evidence.phase,
             "chosen_action": action_id,
         })
 
-        return {
+        return _AwaitableAction({
             "action_id": action_id,
             "rationale": rationale,
             "decision_source": "autopilot",
             "autopilot_player_row": player_info["row"],
             "autopilot_player_col": player_info["col"],
-        }
+        })
+
+    def _coerce_hybrid_progress_evidence(self, evidence: Any) -> HybridProgressEvidence:
+        """Accept legacy test doubles while production uses HybridProgressEvidence."""
+        if isinstance(evidence, HybridProgressEvidence):
+            return evidence
+        if isinstance(evidence, dict):
+            similarity = evidence.get("combined_similarity", evidence.get("similarity"))
+            confidence = evidence.get("combined_confidence", evidence.get("confidence", similarity or 0.0))
+            phase = str(evidence.get("phase") or "discover")
+            return HybridProgressEvidence(
+                local_progress=evidence.get("local_progress"),
+                local_distance=evidence.get("local_distance"),
+                local_monotone_steps=int(evidence.get("local_monotone_steps", 0) or 0),
+                scene_wl_hash=str(evidence.get("scene_wl_hash") or ""),
+                scene_node_count=int(evidence.get("scene_node_count", 0) or 0),
+                graph_text_score=evidence.get("graph_text_score"),
+                graph_text_evidence_count=int(evidence.get("graph_text_evidence_count", 0) or 0),
+                graph_text_top_lesson_ids=list(evidence.get("graph_text_top_lesson_ids", []) or []),
+                graph_vector_score=evidence.get("graph_vector_score"),
+                graph_vector_top_hash=evidence.get("graph_vector_top_hash"),
+                graph_vector_top_trajectory_id=evidence.get("graph_vector_top_trajectory_id"),
+                graph_prior_score=evidence.get("graph_prior_score"),
+                graph_prior_evidence_count=int(evidence.get("graph_prior_evidence_count", 0) or 0),
+                combined_similarity=float(similarity or 0.0),
+                combined_confidence=float(confidence or 0.0),
+                channel_agreement_range=float(evidence.get("channel_agreement_range", 0.0) or 0.0),
+                finish_mode_allowed=bool(evidence.get("finish_mode_allowed", phase == "finish")),
+                phase=phase,
+                reason=str(evidence.get("reason") or evidence.get("similarity_trend") or "legacy matcher evidence"),
+            )
+        return HybridProgressEvidence(
+            local_progress=None,
+            local_distance=None,
+            local_monotone_steps=0,
+            scene_wl_hash="",
+            scene_node_count=0,
+            graph_text_score=None,
+            graph_text_evidence_count=0,
+            graph_text_top_lesson_ids=[],
+            graph_vector_score=None,
+            graph_vector_top_hash=None,
+            graph_vector_top_trajectory_id=None,
+            graph_prior_score=None,
+            graph_prior_evidence_count=0,
+            combined_similarity=0.0,
+            combined_confidence=0.0,
+            channel_agreement_range=0.0,
+            finish_mode_allowed=False,
+            phase="discover",
+            reason="missing matcher evidence",
+        )
 
     def _build_puzzle_model(self) -> dict:
         """B167: Build a structured puzzle model from what the agent learned this level."""
@@ -660,13 +904,17 @@ class ARCOrchestrator:
         }
 
         if self._pattern_tracker:
-            if self._pattern_tracker.reference_region:
-                model["grid_structure"]["reference_location"] = self._pattern_tracker.reference_region.location_hint
-            if self._pattern_tracker.goal_region:
-                model["grid_structure"]["goal_location"] = self._pattern_tracker.goal_region.location_hint
-            if self._pattern_tracker.similarity_history:
-                model["pattern_similarity_at_start"] = self._pattern_tracker.similarity_history[0]
-                model["pattern_similarity_at_end"] = self._pattern_tracker.similarity_history[-1]
+            ref_region = getattr(self._pattern_tracker, "reference_region", None)
+            goal_region = getattr(self._pattern_tracker, "goal_region", None)
+            if ref_region is not None:
+                model["grid_structure"]["reference_location"] = ref_region.location_hint
+            if goal_region is not None:
+                model["grid_structure"]["goal_location"] = goal_region.location_hint
+
+            similarity_history = getattr(self._pattern_tracker, "similarity_history", None) or []
+            if similarity_history:
+                model["pattern_similarity_at_start"] = similarity_history[0]
+                model["pattern_similarity_at_end"] = similarity_history[-1]
 
         intermediates = [r for r in self.solve_engine._object_roles.values() if r.role == RoleType.INTERMEDIATE]
         model["grid_structure"]["intermediate_count"] = len(intermediates)
@@ -717,6 +965,7 @@ class ARCOrchestrator:
                 role="assistant",
                 content=f"[PUZZLE MODEL] {description}",
                 session_id=self.session_id,
+                async_dispatch=True,
             )
 
             self._emit_trace_event("operation", "puzzle_model_saved", {
@@ -919,19 +1168,634 @@ class ARCOrchestrator:
         # Default → existing navigation
         return "navigation"
 
-    def record_guard_escalation(self, step: int, reason: str, status: str):
+    async def record_guard_escalation(self, step: int, reason: str, status: str):
         """B130: Record a guard escalation event."""
         self._guard_escalations.append({
             "step": step,
             "reason": reason,
             "guard_state": status
         })
+        try:
+            await self.brain.notify_turn(
+                role="assistant",
+                content=f"[GUARD {status.upper()}] step={step}: {reason}",
+                session_id=self.session_id,
+                async_dispatch=True
+            )
+        except Exception:
+            pass
 
     def _mark_active_chunk_failed(self, reason: str):
         """B141: Mark active chunk as failed and clear it."""
         if self.solve_engine._active_chunk:
             self.solve_engine._mark_chunk_failed(self.solve_engine._active_chunk, reason)
             self.solve_engine._active_chunk = None
+        self._autopilot_wall_hits = 0
+
+    def _select_replan_probe_coordinate(self, observation: ARC3Observation) -> tuple[int, int]:
+        """Pick an ACTION6 coordinate using frontier + quadrant rotation."""
+        candidates = self._candidate_action6_coordinates(observation)
+        if not candidates:
+            return (0, 0)
+
+        grid = observation.get("grid") or []
+        rows = len(grid) or 1
+        cols = len(grid[0]) if rows and grid and isinstance(grid[0], list) else 1
+        cx = max(0, min(63, cols // 2))
+        cy = max(0, min(63, rows // 2))
+
+        used_coords = [
+            (
+                self._coerce_action6_coordinate(step.get("x")),
+                self._coerce_action6_coordinate(step.get("y")),
+            )
+            for step in self._step_history
+            if self._normalize_action_id(step.get("action_id")) == "ACTION6"
+        ]
+        used_coords = [(x, y) for x, y in used_coords if x is not None and y is not None]
+
+        # Prefer probing outside the most recent changed region when available.
+        recent_change_center: tuple[int, int] | None = None
+        try:
+            last_eff = (self._hypothesis_context or {}).get("last_transition_effect") or {}
+            changed = last_eff.get("changed_region") or {}
+            rr = changed.get("row_range")
+            cc = changed.get("col_range")
+            if isinstance(rr, (list, tuple)) and isinstance(cc, (list, tuple)) and len(rr) == 2 and len(cc) == 2:
+                recent_change_center = (
+                    int((cc[0] + cc[1]) // 2),
+                    int((rr[0] + rr[1]) // 2),
+                )
+        except Exception:
+            recent_change_center = None
+
+        quadrant = int(self._replan_probe_cursor or 0) % 4
+        self._replan_probe_cursor = quadrant + 1
+
+        # If we know the goal target color, bias probes toward those cells/frontier.
+        target_color_id = self._resolve_replan_target_color()
+
+        target_cells: List[tuple[int, int]] = []
+        if target_color_id is not None and grid:
+            for y, row in enumerate(grid):
+                for x, cell in enumerate(row):
+                    try:
+                        if int(cell) == target_color_id:
+                            target_cells.append((x, y))
+                    except Exception:
+                        continue
+
+        goal_anchor: tuple[int, int] | None = None
+        try:
+            anchors: List[tuple[int, int]] = []
+            if self._goal_position:
+                gr, gc = self._goal_position
+                anchors.append(
+                    (
+                        max(0, min(63, int(round(gc)))),
+                        max(0, min(63, int(round(gr)))),
+                    )
+                )
+            roles = (self._solve_context or {}).get("object_roles") or {}
+            best_goal_conf = -1.0
+            best_goal_anchor: tuple[int, int] | None = None
+            for role_data in roles.values():
+                if not isinstance(role_data, dict):
+                    continue
+                if str(role_data.get("role") or "").lower() not in {"goal", "exit"}:
+                    continue
+                pos = role_data.get("estimated_position")
+                if not isinstance(pos, dict):
+                    continue
+                conf = float(role_data.get("confidence") or 0.0)
+                cand = (
+                    max(0, min(63, int(round(float(pos.get("col", 0)))))),
+                    max(0, min(63, int(round(float(pos.get("row", 0)))))),
+                )
+                if conf > best_goal_conf:
+                    best_goal_conf = conf
+                    best_goal_anchor = cand
+            if best_goal_anchor is not None:
+                anchors.append(best_goal_anchor)
+            if anchors:
+                goal_anchor = anchors[0]
+        except Exception:
+            goal_anchor = None
+
+        def _in_quadrant(coord: tuple[int, int], q: int) -> bool:
+            x, y = coord
+            if q == 0:
+                return x < cx and y < cy
+            if q == 1:
+                return x >= cx and y < cy
+            if q == 2:
+                return x < cx and y >= cy
+            return x >= cx and y >= cy
+
+        ordered: List[tuple[str, tuple[int, int]]] = []
+        for tier, coord in candidates:
+            if _in_quadrant(coord, quadrant):
+                ordered.append((tier, coord))
+        for tier, coord in candidates:
+            if not _in_quadrant(coord, quadrant):
+                ordered.append((tier, coord))
+
+        # Replan ACTION6 probes must be explicitly goal-conditioned when we have
+        # concrete goal evidence. Restricting selection to a target frontier
+        # prevents uniform whole-grid sweeps.
+        if target_cells:
+            target_frontier: List[tuple[int, int]] = []
+            seen_frontier: set[tuple[int, int]] = set()
+            for tx, ty in target_cells:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nx, ny = tx + dx, ty + dy
+                        if not (0 <= nx < cols and 0 <= ny < rows):
+                            continue
+                        coord = (nx, ny)
+                        if coord not in seen_frontier:
+                            seen_frontier.add(coord)
+                            target_frontier.append(coord)
+            frontier_set = set(target_frontier)
+            goal_ordered = [
+                (tier, coord) for tier, coord in ordered
+                if coord in frontier_set
+            ]
+            if goal_ordered:
+                ordered = goal_ordered
+
+        has_goal_signal = bool(target_cells or goal_anchor is not None)
+        tier_bonus = {
+            "target_color_frontier": 950,
+            "goal_vector": 900,
+            "distance_reduce": 550,
+            "non_background": 250,
+            "quadrant_exploration": 150,
+            "fallback": 0,
+        }
+
+        best_coord = ordered[0][1]
+        best_score = -10_000
+        for tier, coord in ordered:
+            if (used_coords and coord in used_coords) or coord in self._action6_no_effect_coords:
+                continue
+            min_dist_used = min(
+                (self._manhattan_dist(coord, prev) for prev in used_coords),
+                default=8,
+            )
+            frontier_bonus = int(tier_bonus.get(str(tier), 0))
+            if recent_change_center is not None:
+                # Mild preference to keep stepping away from recent no-op region.
+                frontier_bonus += min(64, self._manhattan_dist(coord, recent_change_center))
+            if target_cells:
+                # Strongly prefer probes near target-color cells/frontier.
+                min_dist_target = min(self._manhattan_dist(coord, t) for t in target_cells)
+                frontier_bonus += max(0, 128 - (min_dist_target * 8))
+            if goal_anchor is not None:
+                dist_goal = self._manhattan_dist(coord, goal_anchor)
+                frontier_bonus += max(0, 128 - (dist_goal * 6))
+            # Keep diversity pressure, but weaker than goal pressure.
+            frontier_bonus += min_dist_used * (1 if has_goal_signal else 3)
+            if frontier_bonus > best_score:
+                best_score = frontier_bonus
+                best_coord = coord
+
+        return best_coord
+
+    def _resolve_replan_target_color(self) -> int | None:
+        target_color_id = None
+        try:
+            vc_obj = getattr(self.solve_engine, "_victory_condition", None)
+            if vc_obj is not None and getattr(vc_obj, "target_color_id", None) is not None:
+                target_color_id = int(getattr(vc_obj, "target_color_id"))
+        except Exception:
+            target_color_id = None
+
+        if target_color_id not in (None, 0):
+            return target_color_id
+
+        try:
+            vc = (self._solve_context or {}).get("victory_condition") or {}
+            if isinstance(vc, dict):
+                tc = vc.get("target_color_id")
+                if tc is None:
+                    # Back-compat fallback: parse "color N" from description.
+                    m = re.search(r"\bcolor\s+(\d+)\b", str(vc.get("description") or ""), flags=re.IGNORECASE)
+                    if m:
+                        tc = int(m.group(1))
+                if tc is not None:
+                    target_color_id = int(tc)
+        except Exception:
+            target_color_id = None
+        if target_color_id == 0:
+            return None
+        return target_color_id
+
+    def _pick_rotated_goal_color(self, observation: ARC3Observation, current_target: int | None) -> int | None:
+        grid = observation.get("grid") or []
+        if not grid:
+            return None
+
+        counts: dict[int, int] = {}
+        for row in grid:
+            for cell in row:
+                try:
+                    val = int(cell)
+                except Exception:
+                    continue
+                counts[val] = counts.get(val, 0) + 1
+
+        if not counts:
+            return None
+
+        background = max(counts.items(), key=lambda item: item[1])[0]
+        candidate_colors = [cid for cid in sorted(counts, key=counts.get, reverse=True) if cid != background]
+        if not candidate_colors:
+            candidate_colors = list(sorted(counts, key=counts.get, reverse=True))
+
+        recent_cooldown = {
+            int(cid)
+            for cid in (self._replan_recent_goal_colors or [])[-int(self._replan_goal_rotation_cooldown or 0):]
+        }
+
+        for cid in candidate_colors:
+            if cid == current_target:
+                continue
+            if cid in recent_cooldown:
+                continue
+            if cid not in self._replan_goal_colors_tried:
+                return cid
+        return next((cid for cid in candidate_colors if cid != current_target and cid not in recent_cooldown), None)
+
+    def _update_victory_snapshot(self) -> None:
+        vc_obj = getattr(self.solve_engine, "_victory_condition", None)
+        if vc_obj is None:
+            return
+        sc = self._solve_context or {}
+        vc_snap = sc.get("victory_condition")
+        if not isinstance(vc_snap, dict):
+            return
+        try:
+            vc_snap["target_color_id"] = getattr(vc_obj, "target_color_id", None)
+            vc_snap["confidence"] = getattr(vc_obj, "confidence", vc_snap.get("confidence"))
+            if getattr(vc_obj, "description", None):
+                vc_snap["description"] = vc_obj.description
+        except Exception:
+            return
+
+    def _apply_graph_goal_override(self) -> None:
+        """Let graph-backed goal hypotheses outrank weak bootstrap reach-goal guesses."""
+        sc = self._solve_context or {}
+        active_goals = []
+        try:
+            active_goals = self.world_model.get_active_goal_hypotheses(limit=3)
+        except Exception:
+            active_goals = []
+        if not active_goals:
+            return
+
+        goal = active_goals[0]
+        goal_type = str(goal.get("goal_type") or "unknown")
+        goal_conf = float(goal.get("confidence", 0.0) or 0.0)
+        if goal_conf < 0.6:
+            return
+
+        vc = sc.get("victory_condition") or {}
+        vc_type = vc.get("type") if isinstance(vc, dict) else None
+        vc_conf = float(vc.get("confidence", 0.0) or 0.0) if isinstance(vc, dict) else 0.0
+        target_color = vc.get("target_color_id") if isinstance(vc, dict) else None
+        weak_or_invalid_reach = vc_type == "reach_goal" and (vc_conf <= 0.65 or target_color in (0, "0", None))
+        graph_non_reach_goal = goal_type in {
+            "endpoint_connection",
+            "color_correspondence",
+            "collect_or_activate",
+            "level_advance",
+        }
+        if not weak_or_invalid_reach and not graph_non_reach_goal:
+            return
+
+        description = f"Graph goal hypothesis: {goal_type} ({goal.get('claim') or 'no claim'})"
+        if graph_non_reach_goal and str(sc.get("archetype") or "") == "race":
+            sc["archetype"] = "space"
+            sc["archetype_confidence"] = min(float(sc.get("archetype_confidence", 0.0) or 0.0), 0.4)
+        sc["victory_condition"] = {
+            "type": "unknown",
+            "description": description,
+            "target_color_id": None,
+            "confidence": goal_conf,
+            "source": "world_model_goal",
+            "graph_goal_type": goal_type,
+            "graph_goal_id": goal.get("id"),
+        }
+        if graph_non_reach_goal:
+            sc["strategy_summary"] = (
+                f"ARCHETYPE: {sc.get('archetype', 'unknown')} "
+                f"(confidence={float(sc.get('archetype_confidence', 0.0) or 0.0):.2f}) | "
+                f"GOAL: unknown - {description} | "
+                f"GRAPH GOAL ACTIVE: {goal_type} (confidence={goal_conf:.2f})"
+            )
+        chunk = sc.get("active_chunk")
+        if isinstance(chunk, dict):
+            chunk_source = str(chunk.get("source") or "")
+            chunk_text = " ".join(str(chunk.get(k) or "") for k in ("name", "description", "rationale"))
+        else:
+            chunk_source = ""
+            chunk_text = ""
+        if graph_non_reach_goal and (
+            chunk_source in {"directional", "plateau_exploitation"}
+            or "reach_goal" in chunk_text
+            or "goal-like object" in chunk_text.lower()
+        ):
+            sc["active_chunk"] = None
+        self._solve_context = sc
+
+        try:
+            self.solve_engine._victory_condition = VictoryCondition(
+                condition_type=VictoryType.UNKNOWN,
+                description=description,
+                target_color_id=None,
+                confidence=goal_conf,
+                source="world_model_goal",
+            )
+            if graph_non_reach_goal and getattr(self.solve_engine, "_archetype", None) == GameArchetype.RACE:
+                self.solve_engine._archetype = GameArchetype.SPACE
+                if hasattr(self.solve_engine, "_archetype_confidence"):
+                    self.solve_engine._archetype_confidence = min(
+                        float(getattr(self.solve_engine, "_archetype_confidence", 0.0) or 0.0),
+                        0.4,
+                    )
+            if getattr(self.solve_engine, "_active_chunk", None) is not None:
+                engine_chunk = self.solve_engine._active_chunk
+                engine_source = str(getattr(engine_chunk, "source", "") or "")
+                engine_text = " ".join(
+                    str(getattr(engine_chunk, attr, "") or "")
+                    for attr in ("name", "description", "rationale")
+                )
+                if graph_non_reach_goal and (
+                    engine_source in {"directional", "plateau_exploitation"}
+                    or "reach_goal" in engine_text
+                    or "goal-like object" in engine_text.lower()
+                ):
+                    self.solve_engine._active_chunk = None
+        except Exception:
+            pass
+
+        try:
+            self._emit_trace_event(
+                "operation",
+                "graph_goal_override",
+                {"goal_type": goal_type, "goal_id": goal.get("id")},
+                {"previous_victory": vc, "new_victory": sc["victory_condition"]},
+            )
+        except Exception:
+            pass
+
+    def _maybe_rotate_replan_goal(self, observation: ARC3Observation, *, no_progress_steps: int) -> None:
+        vc = getattr(self.solve_engine, "_victory_condition", None)
+        if vc is None:
+            return
+        if int(no_progress_steps or 0) < 2:
+            return
+        if int(self._replan_perturbation_count or 0) < 3:
+            return
+
+        recent = self._step_history[-3:]
+        recent_zero_reward = bool(recent) and all(float(s.get("reward") or 0.0) == 0.0 for s in recent)
+        if not recent_zero_reward and int(no_progress_steps or 0) < 3:
+            return
+
+        current_target = self._resolve_replan_target_color()
+        if current_target is not None:
+            self._replan_goal_colors_tried.add(int(current_target))
+            self._replan_recent_goal_colors.append(int(current_target))
+            self._replan_recent_goal_colors = self._replan_recent_goal_colors[-8:]
+
+        new_target = self._pick_rotated_goal_color(observation, current_target)
+        if new_target is None:
+            return
+
+        try:
+            vc.target_color_id = int(new_target)
+            desc = str(getattr(vc, "description", "") or "")
+            if re.search(r"\bcolor\s+\d+\b", desc, flags=re.IGNORECASE):
+                vc.description = re.sub(r"\bcolor\s+\d+\b", f"color {new_target}", desc, flags=re.IGNORECASE)
+            elif desc:
+                vc.description = f"{desc} (target color {new_target})"
+            else:
+                vc.description = f"reach_goal color {new_target}"
+            vc.confidence = max(0.35, min(float(getattr(vc, "confidence", 0.6) or 0.6), 0.75))
+            self._replan_goal_colors_tried.add(int(new_target))
+            self._replan_recent_goal_colors.append(int(new_target))
+            self._replan_recent_goal_colors = self._replan_recent_goal_colors[-8:]
+            self._replan_goal_rotation_count += 1
+            self._update_victory_snapshot()
+            self._emit_trace_event(
+                "operation",
+                "replan_goal_rotation",
+                {
+                    "from_target_color": current_target,
+                    "to_target_color": new_target,
+                    "no_progress_steps": no_progress_steps,
+                    "replan_perturbation_count": self._replan_perturbation_count,
+                },
+                {
+                    "reason": "zero_reward_replan_saturation",
+                    "new_confidence": float(getattr(vc, "confidence", 0.0) or 0.0),
+                },
+            )
+        except Exception:
+            logger.debug("Replan goal rotation failed", exc_info=True)
+
+    def apply_replan_perturbation(
+        self,
+        observation: ARC3Observation,
+        *,
+        route_reason: str,
+        no_progress_steps: int,
+    ) -> None:
+        """Mutate local decision state so replan exits a stale basin."""
+        step = len(self._step_history) + 1
+        available_actions = observation.get("available_actions") or []
+        hyp_ctx = self._hypothesis_context or {}
+        solve_ctx = self._solve_context or {}
+        self._replan_perturbation_count += 1
+        self._maybe_rotate_replan_goal(observation, no_progress_steps=no_progress_steps)
+
+        ttl_steps = max(2, min(6, int(no_progress_steps or 0) + 1))
+        until_step = step + ttl_steps
+        block_candidates: set[str] = set()
+        locked_family = solve_ctx.get("plateau_locked_family")
+        if locked_family:
+            block_candidates.add(str(locked_family))
+        for prev in self._step_history[-2:]:
+            aid = self._normalize_action_id(prev.get("action_id"))
+            if aid:
+                block_candidates.add(aid)
+        for effect in (hyp_ctx.get("observed_action_effects") or []):
+            aid = self._normalize_action_id(effect.get("action"))
+            if not aid:
+                continue
+            if str(effect.get("value_status") or "").lower() in {"low_value", "ineffective"}:
+                block_candidates.add(aid)
+
+        # Dense-reward guard: do not blacklist actions that are still producing
+        # meaningful shaped progress. This prevents legacy plateau heuristics
+        # from suppressing the only action driving reward.
+        progress_floor = 0.01
+        protected_actions = {
+            aid
+            for aid in list(block_candidates)
+            if self._recent_action_progress(aid, lookback=12) >= progress_floor
+        }
+        if protected_actions:
+            block_candidates.difference_update(protected_actions)
+
+        for aid in block_candidates:
+            self._replan_temporal_blocked_until[aid] = until_step
+            self._replan_temporal_blocked_actions.add(aid)
+            self._blocked_actions.add(aid)
+
+        forced_action: Dict[str, Any] | None = None
+        if "ACTION6" in available_actions:
+            x, y = self._select_replan_probe_coordinate(observation)
+            forced_action = {
+                "action_id": "ACTION6",
+                "x": x,
+                "y": y,
+                "expires_step": step + 1,
+                "reason": "replan_forced_action6_probe",
+            }
+        else:
+            coverage = hyp_ctx.get("action_coverage") or {}
+            untested = [
+                a for a in (coverage.get("untested_actions") or [])
+                if a in available_actions and a not in block_candidates
+            ]
+            fallback = [a for a in available_actions if a not in block_candidates]
+            chosen = (untested[0] if untested else (fallback[0] if fallback else None))
+            if chosen:
+                forced_action = {
+                    "action_id": chosen,
+                    "expires_step": step + 1,
+                    "reason": "replan_forced_untested_probe",
+                }
+        self._replan_forced_action = forced_action
+
+        try:
+            arch_conf_before = float(getattr(self.solve_engine, "_archetype_confidence", 0.0) or 0.0)
+            if hasattr(self.solve_engine, "_archetype_confidence"):
+                self.solve_engine._archetype_confidence = max(
+                    0.0, float(self.solve_engine._archetype_confidence or 0.0) - 0.12
+                )
+            if hasattr(self.solve_engine, "_archetype_locked"):
+                self.solve_engine._archetype_locked = False
+            if hasattr(self.solve_engine, "_plateau_locked_family"):
+                self.solve_engine._plateau_locked_family = None
+            vc = getattr(self.solve_engine, "_victory_condition", None)
+            if vc is not None and hasattr(vc, "confidence"):
+                vc.confidence = max(0.0, float(vc.confidence or 0.0) - 0.10)
+            if arch_conf_before >= 0.90 and int(no_progress_steps or 0) >= 3:
+                self.solve_engine._victory_condition = None
+            self._exploitation_switch_budget = 0
+        except Exception:
+            logger.debug("Replan perturbation state mutation failed", exc_info=True)
+
+        self._emit_trace_event(
+            "operation",
+            "replan_state_perturbation",
+            {
+                "step": step,
+                "route_reason": route_reason,
+                "no_progress_steps": no_progress_steps,
+            },
+            {
+                "blocked_actions": sorted(block_candidates),
+                "protected_actions": sorted(protected_actions) if protected_actions else [],
+                "progress_floor": progress_floor,
+                "blocked_until_step": until_step,
+                "forced_action": forced_action,
+            },
+        )
+
+    def _prune_replan_temporal_blocks(self, step: int) -> None:
+        if not hasattr(self, "_replan_temporal_blocked_until"):
+            self._replan_temporal_blocked_until = {}
+        if not hasattr(self, "_replan_temporal_blocked_actions"):
+            self._replan_temporal_blocked_actions = set()
+        if not hasattr(self, "_blocked_actions"):
+            self._blocked_actions = set()
+        expired = [
+            action_id
+            for action_id, until_step in self._replan_temporal_blocked_until.items()
+            if step > int(until_step or 0)
+        ]
+        for action_id in expired:
+            self._replan_temporal_blocked_until.pop(action_id, None)
+            if action_id in self._replan_temporal_blocked_actions:
+                self._replan_temporal_blocked_actions.discard(action_id)
+                self._blocked_actions.discard(action_id)
+
+    def _consume_replan_forced_action(self, step: int, available_actions: List[str]) -> Dict[str, Any] | None:
+        forced = getattr(self, "_replan_forced_action", None)
+        if not forced:
+            return None
+        if step > int(forced.get("expires_step") or 0):
+            self._replan_forced_action = None
+            return None
+        action_id = self._normalize_action_id(forced.get("action_id"))
+        if action_id not in available_actions:
+            return None
+        self._replan_forced_action = None
+        return forced
+
+    def _is_temporarily_blocked(self, action_id: str | None, step: int) -> bool:
+        if not action_id:
+            return False
+        self._prune_replan_temporal_blocks(step)
+        key = str(action_id)
+        until = self._replan_temporal_blocked_until.get(key)
+        if until is None or step > int(until or 0):
+            return False
+        # Progress-aware release: if the action is producing meaningful shaped
+        # reward recently, lift the temporary post-replan block immediately.
+        if self._recent_action_progress(action_id, lookback=12) >= 0.01:
+            self._replan_temporal_blocked_until.pop(key, None)
+            self._replan_temporal_blocked_actions.discard(key)
+            self._blocked_actions.discard(key)
+            try:
+                self._emit_trace_event(
+                    "operation",
+                    "replan_block_released_on_progress",
+                    {"action": key, "step": step},
+                    {"reason": "recent_progress_reward"},
+                )
+            except Exception:
+                pass
+            return False
+        return True
+
+    def _recent_action_progress(self, action_id: str | None, lookback: int = 12) -> float:
+        """Return recent mean progress reward for an action.
+
+        Prefers explicit `progress_reward` when present, otherwise falls back to
+        shaped `reward` from step history.
+        """
+        if not action_id:
+            return 0.0
+        samples: List[float] = []
+        for step in reversed(self._step_history[-max(1, int(lookback)):]):
+            if self._normalize_action_id(step.get("action_id")) != action_id:
+                continue
+            pr = step.get("progress_reward")
+            if pr is None:
+                pr = step.get("reward")
+            try:
+                samples.append(float(pr or 0.0))
+            except (TypeError, ValueError):
+                continue
+        if not samples:
+            return 0.0
+        return float(sum(samples) / len(samples))
 
     def _emit_trace_event(self, event_type: str, operation: str, details: dict | None = None, result: dict | None = None, elapsed_ms: float | None = None):
         """B131: Emit a timestamped execution trace event (CloudWatch-style)."""
@@ -1378,6 +2242,8 @@ class ARCOrchestrator:
 
         if should_retrieve:
             query = self._memory_query(observation)
+            lesson_query = f"{query} lesson_type:action_effect"
+            analogy_query = self._analogical_query(observation)
             
             # current_truth gating/dedup
             if not self._retrieval_needed_for_prompt("current_truth"):
@@ -1404,17 +2270,17 @@ class ARCOrchestrator:
             if not self._retrieval_needed_for_prompt("recall_relevant_lessons"):
                 self._emit_trace_event("operation", "retrieval_gated", {"kind": "recall_relevant_lessons", "step": step}, {})
                 lessons = {"lessons": []}
-            elif self._retrieval_dedup_check("recall_relevant_lessons", query, step):
-                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "recall_relevant_lessons", "step": step, "query": query}, {})
+            elif self._retrieval_dedup_check("recall_relevant_lessons", lesson_query, step):
+                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "recall_relevant_lessons", "step": step, "query": lesson_query}, {})
                 lessons = self._memory_context.get("lessons_raw", {"lessons": []}) if self._memory_context else {"lessons": []}
             else:
                 lessons_start = time.time()
-                lessons = await self.brain.recall_relevant_lessons(query=query, limit=4)
+                lessons = await self.brain.recall_relevant_lessons(query=lesson_query, limit=4)
                 lessons_elapsed = (time.time() - lessons_start) * 1000
                 self._emit_trace_event(
                     "operation",
                     "recall_relevant_lessons",
-                    {"step": step, "query": query},
+                    {"step": step, "query": lesson_query},
                     {"results": len(lessons.get("lessons", []))},
                     lessons_elapsed,
                 )
@@ -1423,13 +2289,13 @@ class ARCOrchestrator:
             if not self._retrieval_needed_for_prompt("analogical_search"):
                 self._emit_trace_event("operation", "retrieval_gated", {"kind": "analogical_search", "step": step}, {})
                 analogies = {"results": []}
-            elif self._retrieval_dedup_check("analogical_search", query, step):
-                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "analogical_search", "step": step, "query": query}, {})
+            elif self._retrieval_dedup_check("analogical_search", analogy_query, step):
+                self._emit_trace_event("operation", "retrieval_dedup", {"kind": "analogical_search", "step": step, "query": analogy_query}, {})
                 analogies = self._memory_context.get("analogies_raw", {"results": []}) if self._memory_context else {"results": []}
             else:
                 analog_start = time.time()
                 analogies = await self.brain.analogical_search(
-                    query=query,
+                    query=analogy_query,
                     current_quest_id=observation.get("dataset_id", ""),
                     limit=3,
                     min_similarity=0.35,
@@ -1438,7 +2304,7 @@ class ARCOrchestrator:
                 self._emit_trace_event(
                     "operation",
                     "analogical_search",
-                    {"step": step, "query": query},
+                    {"step": step, "query": analogy_query},
                     {"results": len(analogies.get("results", []))},
                     analog_elapsed,
                 )
@@ -1480,6 +2346,8 @@ class ARCOrchestrator:
                 "query": query,
                 "_retrieval_payload_size": retrieval_payload["total_size"],
                 "_triggered": True,
+                "memory_degraded": (getattr(self.brain, "memory_degraded", False) is True),
+                "memory_degraded_reason": str(getattr(self.brain, "memory_degraded_reason", "") or ""),
             }
         else:
             memory_context = {
@@ -1489,6 +2357,8 @@ class ARCOrchestrator:
                 "query": "",
                 "_retrieval_payload_size": 0,
                 "_triggered": False,
+                "memory_degraded": (getattr(self.brain, "memory_degraded", False) is True),
+                "memory_degraded_reason": str(getattr(self.brain, "memory_degraded_reason", "") or ""),
             }
 
         self._memory_context = memory_context
@@ -1526,19 +2396,58 @@ class ARCOrchestrator:
 
         grid = observation.get("grid") or []
         delta_count = 0
-        try:
-            if self._last_grid and grid:
-                # Count differing cells conservatively
-                for r in range(min(len(self._last_grid), len(grid))):
-                    prev_row = self._last_grid[r]
-                    cur_row = grid[r]
-                    for c in range(min(len(prev_row), len(cur_row))):
-                        if prev_row[c] != cur_row[c]:
-                            delta_count += 1
-        except Exception:
-            delta_count = 0
+        apparent_effect = "unknown"
+        direction = None
+        new_colors = []
+        removed_colors = []
 
-        delta = {"n_cells_changed": delta_count}
+        # A041: Reconcile n_cells_changed with FrameDelta.
+        # Prefer the delta already computed by record_step_result and stored in history.
+        found_delta = False
+        try:
+            if self._step_history:
+                last_step = self._step_history[-1]
+                if last_step.get("frame_delta"):
+                    fd = last_step["frame_delta"]
+                    delta_count = int(fd.get("n_cells_changed") or 0)
+                    apparent_effect = fd.get("apparent_effect", "unknown")
+                    direction = fd.get("direction")
+                    new_colors = fd.get("new_colors", [])
+                    removed_colors = fd.get("removed_colors", [])
+                    found_delta = True
+            
+            if not found_delta and getattr(self, "_frame_deltas", None):
+                last_delta = self._frame_deltas[-1]
+                if last_delta:
+                    delta_count = int(getattr(last_delta, "n_cells_changed", 0) or 0)
+                    apparent_effect = getattr(last_delta, "apparent_effect", "unknown")
+                    direction = getattr(last_delta, "direction")
+                    new_colors = getattr(last_delta, "new_colors_introduced", [])
+                    removed_colors = getattr(last_delta, "colors_removed", [])
+                    found_delta = True
+        except Exception:
+            logger.debug("A041: Failed to retrieve FrameDelta, falling back to manual count", exc_info=True)
+
+        if not found_delta:
+            try:
+                if self._last_grid and grid:
+                    # Count differing cells conservatively
+                    for r in range(min(len(self._last_grid), len(grid))):
+                        prev_row = self._last_grid[r]
+                        cur_row = grid[r]
+                        for c in range(min(len(prev_row), len(cur_row))):
+                            if prev_row[c] != cur_row[c]:
+                                delta_count += 1
+            except Exception:
+                delta_count = 0
+
+        delta = {
+            "n_cells_changed": delta_count,
+            "apparent_effect": apparent_effect,
+            "direction": direction,
+            "new_colors": new_colors,
+            "removed_colors": removed_colors,
+        }
         available_actions = observation.get("available_actions") or []
         active_colors = []
         try:
@@ -1621,6 +2530,16 @@ class ARCOrchestrator:
             pq_parts.append(f"Chunk={chunk_desc}")
         pq = " ".join(pq_parts)
 
+        # A050: Thread scene graph info into every step response for better diagnostic visibility
+        try:
+            from agents.arc3.scene_graph import build_scene_graph, wl_canonical_hash
+            sg = build_scene_graph(grid)
+            scene_wl_hash = wl_canonical_hash(sg)
+            scene_node_count = len(sg.nodes)
+        except Exception:
+            scene_wl_hash = "unknown"
+            scene_node_count = 0
+
         perception = {
             "step": step,
             "state": observation.get("state"),
@@ -1631,6 +2550,8 @@ class ARCOrchestrator:
             "active_colors": active_colors,
             "action_id": action_id,
             "phase_question": pq,
+            "scene_wl_hash": scene_wl_hash,
+            "scene_node_count": scene_node_count,
         }
 
         # Persist for later inspection
@@ -1647,6 +2568,8 @@ class ARCOrchestrator:
             content_parts.append(f"State={observation.get('state')}")
             content_parts.append(f"Reward={reward}")
             content_parts.append(f"Done={done}")
+            content_parts.append(f"Nodes={scene_node_count}")
+            content_parts.append(f"Hash={scene_wl_hash[:12]}")
             content_parts.append(f"Archetype={archetype_label}")
             content_parts.append(f"Victory={victory_label}")
             if chunk_desc:
@@ -1657,33 +2580,20 @@ class ARCOrchestrator:
             content_parts.append(f"Expectation={expectation}")
             content_parts.append(f"Available={available_actions}")
             content = ", ".join(str(p) for p in content_parts)
-            await self.brain.notify_turn(role="assistant", content=content, session_id=self.session_id)
+            await self.brain.notify_turn(role="assistant", content=content, session_id=self.session_id, async_dispatch=True)
         except Exception:
             logger.debug("B205: notify_turn for step response failed", exc_info=True)
 
         # B211: Write structured action_effect record for graph inference (B212)
         try:
-            # Build a delta summary from available frame delta information
+            # A041: delta is already reconciled with FrameDelta at the start of this method
             delta_summary = {
                 "n_cells_changed": int(delta.get("n_cells_changed", 0) or 0),
                 "apparent_effect": delta.get("apparent_effect"),
                 "direction": delta.get("direction"),
-                "new_colors": [],
-                "removed_colors": [],
+                "new_colors": delta.get("new_colors", []),
+                "removed_colors": delta.get("removed_colors", []),
             }
-            if getattr(self, "_frame_deltas", None):
-                try:
-                    last_delta = self._frame_deltas[-1]
-                    if last_delta:
-                        delta_summary.update({
-                            "n_cells_changed": int(getattr(last_delta, "n_cells_changed", delta_summary["n_cells_changed"]) or 0),
-                            "apparent_effect": getattr(last_delta, "apparent_effect", delta_summary.get("apparent_effect")),
-                            "direction": getattr(last_delta, "direction", delta_summary.get("direction")),
-                            "new_colors": getattr(last_delta, "new_colors_introduced", getattr(last_delta, "new_colors", [])) or [],
-                            "removed_colors": getattr(last_delta, "colors_removed", getattr(last_delta, "removed_colors", [])) or [],
-                        })
-                except Exception:
-                    pass
             await self._write_action_effect_record(
                 observation=observation,
                 action_id=action_id,
@@ -1747,31 +2657,51 @@ class ARCOrchestrator:
 
             # Pull entity type from solve context if available
             solve_ctx = getattr(self, "_solve_context", {}) or {}
-            roles = solve_ctx.get("object_roles") or solve_ctx.get("roles") or {}
+            roles = getattr(self.solve_engine, "_object_roles", {})
             entity_type = "unknown"
             spatial_role = "unknown"
+            
             try:
+                # 1. Primary: If we have a player position, find which identified object is the player
                 player_pos = getattr(self, "_player_position", None)
                 if player_pos and isinstance(roles, dict):
-                    for role_key, role_data in roles.items():
-                        if isinstance(role_data, dict):
-                            est_pos = role_data.get("estimated_position") or role_data.get("position")
-                            if est_pos and tuple(est_pos) == tuple(player_pos):
-                                entity_type = str(role_data.get("entity_type") or role_key or "unknown")
-                                spatial_role = str(role_data.get("role") or "unknown")
-                                break
+                    for role_data in roles.values():
+                        if isinstance(role_data, ObjectRole) and role_data.role == RoleType.PLAYER:
+                            est_pos = role_data.estimated_position
+                            if est_pos and isinstance(est_pos, dict):
+                                ep = (est_pos.get("row"), est_pos.get("col"))
+                                # Use small epsilon for float comparison if needed, but centroids are usually stable
+                                if ep == player_pos:
+                                    entity_type = str(getattr(role_data, "entity_type", None) or RoleType.PLAYER.value)
+                                    spatial_role = RoleType.PLAYER.value
+                                    break
+                                    
+                # 2. Secondary: If still unknown, look for the action target (e.g. intermediate)
                 if entity_type == "unknown" and isinstance(roles, dict):
-                    for role_key, role_data in roles.items():
-                        if isinstance(role_data, dict):
-                            role_str = str(role_data.get("role") or "").lower()
-                            if role_str in ("trigger", "intermediate", "collectible"):
-                                entity_type = str(role_data.get("entity_type") or role_key or "unknown")
-                                spatial_role = role_str
+                    for role_data in roles.values():
+                        if isinstance(role_data, ObjectRole):
+                            r_val = str(role_data.role.value).lower() if hasattr(role_data.role, "value") else str(role_data.role).lower()
+                            if r_val in ("trigger", "intermediate", "collectible", "goal"):
+                                entity_type = str(getattr(role_data, "entity_type", None) or r_val)
+                                spatial_role = r_val
                                 break
             except Exception:
-                pass
+                logger.debug("A052: entity identification lookup failed", exc_info=True)
 
             archetype = str(solve_ctx.get("archetype") or "unknown")
+
+            # A050: Include scene structural metadata for structural-prior lookups
+            scene_wl_hash = "unknown"
+            scene_graph_vector = {}
+            try:
+                from agents.arc3.scene_graph import build_scene_graph, wl_canonical_hash, wl_histogram_vector
+                grid = observation.get("grid") or []
+                if grid:
+                    sg = build_scene_graph(grid)
+                    scene_wl_hash = wl_canonical_hash(sg)
+                    scene_graph_vector = wl_histogram_vector(sg)
+            except Exception:
+                pass
 
             lesson_data = {
                 "lesson_type": "action_effect",
@@ -1788,19 +2718,44 @@ class ARCOrchestrator:
                 "task_id": str(observation.get("task_id") or ""),
                 "dataset_id": str(observation.get("dataset_id") or ""),
                 "step": step,
+                "scene_wl_hash": scene_wl_hash,
+                "scene_graph_vector": scene_graph_vector,
+                # A058: Include terminal-grounded score components
+                "terminal_value_score": float(getattr(self._solve_context, "terminal_value_score", 0.0) if self._solve_context else 0.0),
+                "terminal_value_components": dict(getattr(self._solve_context, "terminal_value_components", {}) if self._solve_context else {}),
             }
 
             # Prepare textual content and tags for the lesson upsert call.
             content = (
                 f"[ACTION_EFFECT] step={step} action={action_id} effect={effect_class} "
-                f"n_changed={n_changed} entity={entity_type} archetype={archetype}"
+                f"n_changed={n_changed} entity={entity_type} archetype={archetype} "
+                f"terminal_score={lesson_data['terminal_value_score']:.2f}"
             )
-            tags = ["action_effect", effect_class, entity_type, archetype]
+            tags = [
+                "action_effect", effect_class, entity_type, archetype, 
+                f"hash={scene_wl_hash[:12]}",
+                f"terminal_val={'positive' if lesson_data['terminal_value_score'] > 0 else 'neutral'}"
+            ]
 
             try:
                 # Use BrainClientProtocol's upsert_lesson contract (domain, text, valence, ...)
                 valence = float(reward) if reward is not None else 0.0
-                await self.brain.upsert_lesson(domain="action_effect", text=json.dumps(lesson_data), valence=valence, confidence=0.9, tags=tags)
+                upsert_payload = await self.brain.upsert_lesson(
+                    domain="action_effect",
+                    text=json.dumps(lesson_data),
+                    valence=valence,
+                    confidence=0.9,
+                    tags=tags,
+                )
+                upsert_ok, upsert_reason = self._validate_lesson_upsert_result(upsert_payload)
+                if not upsert_ok:
+                    logger.warning("B214: ActionEffect upsert did not persist lesson_id (reason=%s)", upsert_reason)
+                    self._emit_trace_event(
+                        "operation",
+                        "action_effect_write_invalid",
+                        {"step": step, "action": action_id},
+                        {"reason": upsert_reason, "payload": upsert_payload},
+                    )
                 self._emit_trace_event(
                     "operation",
                     "action_effect_written",
@@ -1809,6 +2764,12 @@ class ARCOrchestrator:
                 )
             except Exception as exc:
                 logger.warning("B211: failed to write ActionEffect record: %s", exc)
+                self._emit_trace_event(
+                    "operation",
+                    "action_effect_write_failed",
+                    {"step": step, "action": action_id},
+                    {"error": str(exc)},
+                )
         except Exception:
             logger.debug("B211: _write_action_effect_record outer failure", exc_info=True)
 
@@ -1843,6 +2804,14 @@ class ARCOrchestrator:
         )
         available = observation.get("available_actions") or [f"ACTION{i}" for i in range(1, 8)]
         observe_start = time.time()
+        
+        # A066: pass through meaningful progress metadata
+        transition_meta = dict(transition_meta or {})
+        if self._step_history:
+            last_step = self._step_history[-1]
+            if "reward_components" in last_step:
+                transition_meta["reward_components"] = last_step["reward_components"]
+        
         context = await self.hypothesis_mgr.observe(
             grid=observation["grid"],
             action_taken=action_taken,
@@ -1962,6 +2931,9 @@ class ARCOrchestrator:
         step: int,
     ) -> dict:
         """Classify archetype, assign object roles, hypothesize victory condition, chunk plan."""
+        # A068: Ensure phase sync is set before any solve-phase memory reads
+        self.sync_brain_phase("model")
+        
         self._emit_trace_event(
             "phase_start",
             "solve",
@@ -1997,6 +2969,256 @@ class ARCOrchestrator:
             if isinstance(w, dict)
         ]
 
+        # Keep current legal actions available before memory recall so signatures are not step-stale.
+        current_available_actions = list(observation.get("available_actions") or [])
+        if current_available_actions:
+            self._available_actions = current_available_actions
+        if "ACTION6" in current_available_actions:
+            try:
+                if not self.world_model.get_click_candidates(limit=1):
+                    self._update_mechanic_world_model(
+                        step_num=step,
+                        action_id="OBSERVE",
+                        observation=observation,
+                        record={},
+                    )
+            except Exception:
+                logger.debug("A107: initial click candidate priming failed", exc_info=True)
+        all_actions_churn_evidence = self.world_model.get_all_actions_churn_evidence(
+            available_actions=current_available_actions,
+            lookback=18,
+            min_tests_per_action=2,
+        )
+        route_transition_evidence = self.world_model.get_route_transition_evidence(
+            available_actions=current_available_actions,
+            lookback=18,
+            limit=8,
+        )
+        active_graph_goal_type = None
+        active_graph_goal_confidence = 0.0
+        active_graph_goal_id = None
+        try:
+            active_graph_goals = self.world_model.get_active_goal_hypotheses(limit=1)
+        except Exception:
+            active_graph_goals = []
+        if active_graph_goals:
+            active_graph_goal = active_graph_goals[0]
+            active_graph_goal_type = active_graph_goal.get("goal_type")
+            active_graph_goal_id = active_graph_goal.get("id")
+            try:
+                active_graph_goal_confidence = float(active_graph_goal.get("confidence", 0.0) or 0.0)
+            except Exception:
+                active_graph_goal_confidence = 0.0
+
+        # A076: Reasoning Gating
+        budget_state = {
+            "prompt_tokens_avg": sum(self._prompt_tokens_per_step) / len(self._prompt_tokens_per_step) if self._prompt_tokens_per_step else 0,
+            "budget_exhausted": getattr(self.cost_tracker, "budget_exhausted", False) if self.cost_tracker else False,
+            "world_model_contradiction_count": int(getattr(self.world_model, "contradiction_count", 0) or 0),
+            "world_model_demotion_count": int(getattr(self.world_model, "demotion_count", 0) or 0),
+            "all_actions_churn_evidence": all_actions_churn_evidence,
+            "route_transition_evidence": route_transition_evidence,
+            "active_goal_type": active_graph_goal_type,
+            "active_goal_confidence": active_graph_goal_confidence,
+            "active_goal_hypothesis_id": active_graph_goal_id,
+            "prediction_falsification_counts": dict(getattr(self, "_prediction_falsification_counts", {}) or {}),
+            "quarantined_actions": [
+                aid for aid, until in (getattr(self, "_prediction_quarantine_until", {}) or {}).items()
+                if int(until or 0) > int(step)
+            ],
+            "quarantined_action_identities": sorted({
+                *[
+                    str(row.get("action_identity"))
+                    for row in getattr(self, "_step_history", [])
+                    if isinstance(row, dict) and row.get("action_identity")
+                ],
+                *[
+                    str(aid)
+                    for aid, meta in (getattr(self.world_model, "_action_identity_quarantine", {}) or {}).items()
+                    if int((meta or {}).get("quarantined_until_step", 0) or 0) > int(step)
+                ],
+            }),
+        }
+
+        # A075/A084/A087: Retrieve mechanic priors once per solve step with current action context.
+        mechanic_priors = await self.retrieve_mechanic_priors()
+
+        # A085: Collect per-action evidence for multi-action churn detection.
+        per_action_evidence = self._collect_per_action_evidence(current_available_actions)
+        self._per_action_evidence = per_action_evidence
+        
+        reasoning_decision = self.reasoning_controller.decide(
+            world_summary=self.world_model.to_prompt_summary(max_chars=500),
+            compiled_delta=self._compiled_delta,
+            budget_state=budget_state,
+            phase="solve",
+            active_hypotheses=self.world_model.get_active_hypotheses(),
+            available_actions=current_available_actions,
+            mechanic_priors=mechanic_priors,  # A079
+            per_action_evidence=per_action_evidence  # A085
+        )
+        
+        self._emit_trace_event("operation", "reasoning_gating", {
+            "mode": reasoning_decision.mode.value,
+            "trigger": reasoning_decision.trigger,
+            "skipped": reasoning_decision.mode != ReasoningMode.LLM_REASON,
+            "stall_policy": reasoning_decision.stall_policy,
+            "stall_evidence_count": reasoning_decision.stall_evidence_count,
+            "stall_threshold": reasoning_decision.stall_threshold,
+            "multi_action_churn_detected": reasoning_decision.multi_action_churn_detected,  # A085
+            "actions_tested_count": reasoning_decision.actions_tested_count,  # A085
+            "productive_action_count": reasoning_decision.productive_action_count,  # A085
+            "world_model_decision": reasoning_decision.world_model_decision,
+            "early_stop_suppressed_reason": reasoning_decision.early_stop_suppressed_reason,
+            "active_goal_type": active_graph_goal_type,
+            "active_goal_confidence": active_graph_goal_confidence,
+            "active_goal_hypothesis_id": active_graph_goal_id,
+            "all_actions_churn_evidence": all_actions_churn_evidence,
+            "route_transition_evidence": route_transition_evidence,
+            "prediction_falsification_counts": budget_state.get("prediction_falsification_counts", {}),
+            "quarantined_actions": budget_state.get("quarantined_actions", []),
+            "quarantined_action_identities": budget_state.get("quarantined_action_identities", [])[-8:],
+            "metrics": self.reasoning_controller.get_metrics()  # A080
+        })
+        self._last_reasoning_decision = reasoning_decision  # A079
+        
+        # A095: Emit prompt compression telemetry
+        if self._prompt_compression_active:
+            self._emit_trace_event("operation", "prompt_compression_active", {
+                "reasoning_cycle_count": self._reasoning_cycle_count,
+                "prompt_compression_active": self._prompt_compression_active,
+                "world_model_node_count": len(self.world_model.nodes),
+                "world_model_edge_count": len(self.world_model.edges),
+            })
+        
+        if reasoning_decision.mode == ReasoningMode.EARLY_STOP:
+             self._force_replan = True
+             if reasoning_decision.world_model_decision:
+                 self._world_model_decision = reasoning_decision.world_model_decision
+             if reasoning_decision.trigger == "all_actions_churn_strategy_exhausted":
+                 self._should_abandon = True
+                 self._world_model_failure_class = "strategy_exhausted"
+                 self._world_model_failure_reason = "all_actions_churn_no_progress"
+                 try:
+                     self.world_model.upsert_hypothesis(
+                         "failure-all-actions-churn",
+                         "failure_mode",
+                         "All legal actions repeatedly caused churn without object or terminal progress.",
+                         0.9,
+                         "active",
+                     )
+                 except Exception:
+                     pass
+             elif reasoning_decision.trigger == "route_regression_exhausted":
+                 self._should_abandon = True
+                 self._world_model_failure_class = "strategy_exhausted"
+                 self._world_model_failure_reason = "route_regression_exhausted"
+                 try:
+                     self.world_model.upsert_hypothesis(
+                         "failure-route-regression",
+                         "failure_mode",
+                         "Recent graph route transitions repeatedly increased terminal distance.",
+                         0.9,
+                         "active",
+                     )
+                 except Exception:
+                     pass
+             return hypothesis_context
+             
+        if reasoning_decision.mode in (ReasoningMode.CHEAP_PROBE, ReasoningMode.MULTI_ACTION_CHURN_PROBE):  # A085
+             # Refresh the planner selection even when skipping LLM reasoning.
+             # This lets newly recalled mechanic priors and graph evidence guide
+             # deterministic cheap probes instead of reusing stale candidates.
+             plan_selection = self.world_model_planner.select_next_candidate(
+                 world_model=self.world_model,
+                 mechanic_priors=mechanic_priors,
+                 available_actions=list(observation.get("available_actions") or []),
+                 budget_state=budget_state
+             )
+             self._last_planner_selection = plan_selection
+             selected_prediction = None
+             if plan_selection.selected.predicted_observation:
+                 pred = plan_selection.selected.predicted_observation
+                 selected_prediction = {
+                     "effect_class": pred.get("effect_class") if isinstance(pred, dict) else None,
+                     "meaningful_progress": pred.get("meaningful_progress") if isinstance(pred, dict) else False,
+                     "confidence": pred.get("confidence") if isinstance(pred, dict) else 0.0,
+                     "evidence_path": pred.get("evidence_path") if isinstance(pred, dict) else [],
+                     "support_count": pred.get("support_count") if isinstance(pred, dict) else None,
+                     "churn_count": pred.get("churn_count") if isinstance(pred, dict) else None,
+                     "recent_success_rate": pred.get("recent_success_rate") if isinstance(pred, dict) else None,
+                     "consecutive_misses_after_progress": pred.get("consecutive_misses_after_progress") if isinstance(pred, dict) else None,
+                 }
+             self._emit_trace_event("operation", "planner_selection", {
+                 "mode": plan_selection.selected.mode.value,
+                 "action_id": plan_selection.selected.action_id,
+                 "rationale": plan_selection.rationale,
+                 "candidate_count": plan_selection.candidate_count,
+                 "selected_has_prediction": plan_selection.selected_has_prediction,
+                 "selected_prediction": selected_prediction,
+                 "selected_has_falsification": plan_selection.selected_has_falsification,
+                 "mechanic_priors_used": plan_selection.mechanic_priors_used,
+                 "mechanic_prior_id": getattr(plan_selection.selected, "mechanic_prior_id", None),
+                 "mechanic_prior_source": getattr(plan_selection.selected, "mechanic_prior_source", "none"),
+                 "mechanic_prior_compatibility_score": getattr(plan_selection.selected, "prior_compatibility_score", 0.0),
+                 "click_candidate_id": getattr(plan_selection.selected, "click_candidate_id", None),
+                 "click_candidate_role": getattr(plan_selection.selected, "click_candidate_role", None),
+                 "action_identity": getattr(plan_selection.selected, "action_identity", None),
+                 "route_actions": getattr(plan_selection.selected, "route_actions", []),
+                 "route_confidence": getattr(plan_selection.selected, "route_confidence", 0.0),
+                 "llm_skipped": True,
+                 "reasoning_trigger": reasoning_decision.trigger,
+             })
+             return hypothesis_context
+        
+        # A077: World Model Guided Planning
+        plan_selection = self.world_model_planner.select_next_candidate(
+            world_model=self.world_model,
+            mechanic_priors=mechanic_priors,
+            available_actions=list(observation.get("available_actions") or []),
+            budget_state=budget_state
+        )
+        self._last_planner_selection = plan_selection
+        
+        # A089: Capture structured prediction info
+        selected_prediction = None
+        if plan_selection.selected.predicted_observation:
+            pred = plan_selection.selected.predicted_observation
+            selected_prediction = {
+                "effect_class": pred.get("effect_class") if isinstance(pred, dict) else None,
+                "meaningful_progress": pred.get("meaningful_progress") if isinstance(pred, dict) else False,
+                "confidence": pred.get("confidence") if isinstance(pred, dict) else 0.0,
+                "evidence_path": pred.get("evidence_path") if isinstance(pred, dict) else [],
+                "support_count": pred.get("support_count") if isinstance(pred, dict) else None,
+                "churn_count": pred.get("churn_count") if isinstance(pred, dict) else None,
+                "recent_success_rate": pred.get("recent_success_rate") if isinstance(pred, dict) else None,
+                "consecutive_misses_after_progress": pred.get("consecutive_misses_after_progress") if isinstance(pred, dict) else None,
+            }
+        
+        # A090: Populate selected prior info if prior was used
+        if plan_selection.selected.mechanic_prior_id and plan_selection.mechanic_priors_used > 0:
+            plan_selection.selected_prior_id = plan_selection.selected.mechanic_prior_id
+            plan_selection.selected_prior_compatibility = plan_selection.selected.prior_compatibility_score
+        
+        self._emit_trace_event("operation", "planner_selection", {
+            "mode": plan_selection.selected.mode.value,
+            "action_id": plan_selection.selected.action_id,
+            "rationale": plan_selection.rationale,
+            "candidate_count": plan_selection.candidate_count,
+            "selected_has_prediction": plan_selection.selected_has_prediction,
+            "selected_prediction": selected_prediction,  # A089
+            "selected_has_falsification": plan_selection.selected_has_falsification,
+            "mechanic_priors_used": plan_selection.mechanic_priors_used,
+            "mechanic_prior_id": getattr(plan_selection.selected, "mechanic_prior_id", None),
+            "mechanic_prior_source": getattr(plan_selection.selected, "mechanic_prior_source", "none"),
+            "mechanic_prior_compatibility_score": getattr(plan_selection.selected, "prior_compatibility_score", 0.0),  # A090
+            "click_candidate_id": getattr(plan_selection.selected, "click_candidate_id", None),
+            "click_candidate_role": getattr(plan_selection.selected, "click_candidate_role", None),
+            "action_identity": getattr(plan_selection.selected, "action_identity", None),
+            "route_actions": getattr(plan_selection.selected, "route_actions", []),
+            "route_confidence": getattr(plan_selection.selected, "route_confidence", 0.0),
+        })
+
         solve_ctx = await self.solve_engine.solve(
             observation=observation,
             hypothesis_context=hypothesis_context,
@@ -2005,7 +3227,21 @@ class ARCOrchestrator:
             current_state_hash=current_hash,
             level_pattern=self._level_pattern,  # B150
             solved_levels=self._solved_levels,  # B157
+            # A095: Use compressed delta for subsequent cycles
+            world_model_summary=(
+                self.world_model.compact_world_model_delta(max_chars=1000, last_node_count=self._last_world_model_node_count)
+                if self._reasoning_cycle_count > 0
+                else self.world_model.to_prompt_summary(max_chars=1000)
+            ),  # A073 + A095
+            mechanic_priors=mechanic_priors,  # A075
+            planner_selection=plan_selection, # A077
         )
+        # A095: Increment cycle count and update compression tracking
+        self._reasoning_cycle_count += 1
+        if self._reasoning_cycle_count > 0:
+            self._prompt_compression_active = True
+            current_node_count = len(self.world_model.nodes)
+            self._last_world_model_node_count = current_node_count
         solve_elapsed = (time.time() - solve_start) * 1000
 
         # B142: Use the live reevaluation computed inside SolveEngine so we do not
@@ -2058,6 +3294,7 @@ class ARCOrchestrator:
                 {
                     "type": solve_ctx.victory_condition.condition_type.value,
                     "description": solve_ctx.victory_condition.description,
+                    "target_color_id": solve_ctx.victory_condition.target_color_id,
                     "confidence": solve_ctx.victory_condition.confidence,
                 }
                 if solve_ctx.victory_condition else None
@@ -2104,13 +3341,23 @@ class ARCOrchestrator:
                 (solve_ctx.active_chunk.estimated_actions[0] if (solve_ctx.active_chunk and solve_ctx.active_chunk.estimated_actions) else None)
             ),
             "plateau_mode": solve_ctx.plateau_mode,
+            "plateau_locked_family": getattr(solve_ctx, "plateau_locked_family", None),
             "plateau_reason": solve_ctx.plateau_reason,
             "ranked_action_families": solve_ctx.ranked_action_families,
             "action_family_scores": solve_ctx.action_family_scores,
+            "planner_selection": solve_ctx.planner_selection,
         }
+        self._apply_graph_goal_override()
         
         # B161: Update goal position from latest solve context
         self._update_goal_position()
+
+        # A065: Update hypothesis workspace
+        try:
+            # Pass the raw solve_ctx object before dict conversion
+            self._update_hypothesis_workspace(step, solve_ctx=solve_ctx)
+        except Exception as exc:
+            logger.warning("A065: hypothesis workspace update failed: %s", exc)
 
         archetype = self._solve_context["archetype"]
         conf = self._solve_context["archetype_confidence"]
@@ -2145,12 +3392,13 @@ class ARCOrchestrator:
         self._emit_trace_event("phase_start", "plan", {"goal": f"Solve ARC task {observation['dataset_id']}:{observation['task_id']}"})
         
         goal = f"Solve ARC task {observation['dataset_id']}:{observation['task_id']}"
+        goal_query = self._plan_recall_query(observation)
         recall_start = time.time()
         recall = await self.brain.recall_plans(
-            goal_query=goal, session_id=self.session_id, min_valence=0.0, limit=3
+            goal_query=goal_query, session_id=self.session_id, min_valence=0.0, limit=3
         )
         recall_elapsed = (time.time() - recall_start) * 1000
-        self._emit_trace_event("operation", "recall_plans", {"goal_query": goal}, {"found": len(recall.get("plans", []))}, recall_elapsed)
+        self._emit_trace_event("operation", "recall_plans", {"goal_query": goal_query}, {"found": len(recall.get("plans", []))}, recall_elapsed)
         
         draft_start = time.time()
         self._plan_steps = self._draft_plan_steps(
@@ -2175,7 +3423,7 @@ class ARCOrchestrator:
         reasoning_summary = " | ".join(reasoning_parts) if reasoning_parts else "Fallback exploration strategy"
         reasoning_narrative = f"[PLAN REASONING] Goal: {goal}. Strategy: {reasoning_summary}. Steps: {len(self._plan_steps)}"
         reason_start = time.time()
-        await self.brain.notify_turn(role="assistant", content=reasoning_narrative, session_id=self.session_id)
+        await self.brain.notify_turn(role="assistant", content=reasoning_narrative, session_id=self.session_id, async_dispatch=True)
         reason_elapsed = (time.time() - reason_start) * 1000
         self._emit_trace_event("operation", "notify_turn[plan_reasoning]", {"content": reasoning_narrative}, {}, reason_elapsed)
         
@@ -2424,17 +3672,11 @@ class ARCOrchestrator:
         )
 
         if _should_check_loop:
-            loop_check_start = time.time()
-            await self.brain.current_truth(
-                query="Am I looping?", session_id=self.session_id, scope="branch", limit=3
-            )
-            loop_check_elapsed = (time.time() - loop_check_start) * 1000
             self._emit_trace_event(
                 "operation",
-                "current_truth[loop_check]",
+                "loop_check[local_only]",
                 {"step": step_num},
-                {},
-                loop_check_elapsed,
+                {"reason": "execute_phase_no_memory_recall"},
             )
 
             # B183: Meta-Supervisor evaluation (replaces B141 escalation ladder)
@@ -2501,6 +3743,23 @@ class ARCOrchestrator:
 
         available_actions = observation.get("available_actions") or [f"ACTION{i}" for i in range(1, 8)]
 
+        # A079: reasoning gating results for telemetry
+        gating_info = {}
+        if getattr(self, "_last_reasoning_decision", None):
+            d = self._last_reasoning_decision
+            gating_info = {
+                "mode": d.mode.value,
+                "trigger": d.trigger,
+                "stall_policy": d.stall_policy,
+                "stall_evidence_count": d.stall_evidence_count,
+                "stall_threshold": d.stall_threshold,
+                "multi_action_churn_detected": d.multi_action_churn_detected,
+                "actions_tested_count": d.actions_tested_count,
+                "productive_action_count": d.productive_action_count,
+                "world_model_decision": d.world_model_decision,
+                "early_stop_suppressed_reason": d.early_stop_suppressed_reason,
+            }
+
         # A013: Prompt-skip no-op short-circuit logic
         hyp_ctx = self._hypothesis_context or {}
         roles = (self._solve_context or {}).get("object_roles", {})
@@ -2549,11 +3808,186 @@ class ARCOrchestrator:
                 "x": action.get("x"),
                 "y": action.get("y"),
                 "rationale": f"[REUSED] {action.get('rationale')}",
-                "thinking_trace": action.get("thinking_trace", []),
+                "Thinking": "short-circuit (A013)",
+                "reasoning_gating": gating_info
             })
             return action
 
         self._last_observation_fingerprint = current_fingerprint
+
+        # A079: Handle CHEAP_PROBE mode from Reasoning Controller
+        if self._last_reasoning_decision and self._last_reasoning_decision.mode in (
+            ReasoningMode.CHEAP_PROBE,
+            ReasoningMode.MULTI_ACTION_CHURN_PROBE,
+        ):
+            action = self._select_deterministic_cheap_probe_action(observation, step_num)
+            if action is not None and action.get("action_id") in available_actions:
+                selection = (
+                    self._solve_context_get(self._solve_context, "planner_selection")
+                    if self._solve_context is not None
+                    else None
+                ) or getattr(self, "_last_planner_selection", None)
+                selected = getattr(selection, "selected", None)
+                self._emit_trace_event("operation", "cheap_probe_applied", {
+                    "step": step_num,
+                    "action_id": action["action_id"],
+                    "x": action.get("x"),
+                    "y": action.get("y"),
+                    "action_identity": action.get("action_identity"),
+                    "trigger": self._last_reasoning_decision.trigger,
+                    "decision_source": "cheap_probe",
+                    "planner_candidate_count": action.get("planner_candidate_count", 0),
+                    "click_candidate_id": action.get("click_candidate_id"),
+                    "click_candidate_role": action.get("click_candidate_role"),
+                    "planner_selected_prior_id": action.get("planner_selected_prior_id"),
+                    "planner_selected_prior_source": action.get("planner_selected_prior_source", "none"),
+                    "evidence_path": action.get("evidence_path", ""),
+                    "cheap_probe_reason": action.get("cheap_probe_reason"),
+                    "bypassed_llm": True,
+                })
+
+                self._step_history.append({
+                    "step": len(self._step_history) + 1,
+                    "state_before": observation.get("state"),
+                    "board_before": self._snapshot_for_trace(observation),
+                    "solve_context": dict(self._solve_context) if self._solve_context else None,
+                    "available_actions": list(available_actions),
+                    "prompt": "(skipped: cheap probe)",
+                    "decision_flow": {
+                        "proposed_by": "reasoning_controller",
+                        "executed_by": "reasoning_controller",
+                        "candidate_action": action.get("action_id"),
+                        "executed_action": action.get("action_id"),
+                        "decision_source": "cheap_probe",
+                    },
+                    "action_id": action.get("action_id"),
+                    "x": action.get("x"),
+                    "y": action.get("y"),
+                    "action_identity": action.get("action_identity"),
+                    "coordinate_required": action.get("coordinate_required"),
+                    "missing_coordinate_click": action.get("missing_coordinate_click"),
+                    "click_candidate_id": action.get("click_candidate_id"),
+                    "selected_click_candidate_id": action.get("selected_click_candidate_id"),
+                    "click_candidate_role": action.get("click_candidate_role"),
+                    "selected_click_candidate_role": action.get("selected_click_candidate_role"),
+                    "click_candidate_rank": action.get("click_candidate_rank"),
+                    "selected_click_candidate_rank": action.get("selected_click_candidate_rank"),
+                    "rationale": action.get("rationale"),
+                    "thinking_trace": action.get("thinking_trace"),
+                    "reasoning_gating": gating_info,
+                    "planner_candidate_count": action.get("planner_candidate_count", 0),
+                    "planner_selected_prior_id": action.get("planner_selected_prior_id"),
+                    "planner_selected_prior_source": action.get("planner_selected_prior_source", "none"),
+                    "evidence_path": action.get("evidence_path", ""),
+                    "cheap_probe_reason": action.get("cheap_probe_reason"),
+                    "bypassed_llm": True,
+                })
+                return action
+
+        selected_plan = getattr(getattr(self, "_last_planner_selection", None), "selected", None)
+        if (
+            selected_plan is not None
+            and getattr(selected_plan, "action_id", None) in available_actions
+            and getattr(selected_plan, "click_candidate_id", None)
+            and getattr(getattr(selected_plan, "mode", None), "value", None) == "click_probe"
+        ):
+            args = getattr(selected_plan, "args", {}) or {}
+            raw_x = args.get("x")
+            raw_y = args.get("y")
+            if raw_x is None or raw_y is None:
+                self._emit_trace_event("operation", "graph_click_planner_skipped", {
+                    "step": step_num,
+                    "action_id": getattr(selected_plan, "action_id", None),
+                    "click_candidate_id": getattr(selected_plan, "click_candidate_id", None),
+                    "reason": "missing_click_coordinates",
+                })
+            else:
+                try:
+                    x = int(raw_x)
+                    y = int(raw_y)
+                except (TypeError, ValueError):
+                    self._emit_trace_event("operation", "graph_click_planner_skipped", {
+                        "step": step_num,
+                        "action_id": getattr(selected_plan, "action_id", None),
+                        "click_candidate_id": getattr(selected_plan, "click_candidate_id", None),
+                        "reason": "invalid_click_coordinates",
+                    })
+                    x = y = None
+                else:
+                    x = int(x)
+                    y = int(y)
+            if raw_x is not None and raw_y is not None and x is not None and y is not None:
+                raw_identity = getattr(selected_plan, "action_identity", None)
+                computed_identity = build_action_identity(selected_plan.action_id, x, y)
+                action_identity = raw_identity if raw_identity and "@" in str(raw_identity) else computed_identity
+            else:
+                action_identity = None
+            if action_identity:
+                action = {
+                    "action_id": selected_plan.action_id,
+                    "x": x,
+                    "y": y,
+                    "action_identity": action_identity,
+                    "coordinate_required": selected_plan.action_id in COORDINATE_REQUIRED_ACTIONS,
+                    "missing_coordinate_click": False,
+                    "click_candidate_id": getattr(selected_plan, "click_candidate_id", None),
+                    "selected_click_candidate_id": getattr(selected_plan, "click_candidate_id", None),
+                    "click_candidate_role": getattr(selected_plan, "click_candidate_role", None),
+                    "selected_click_candidate_role": getattr(selected_plan, "click_candidate_role", None),
+                    "click_candidate_rank": 0,
+                    "selected_click_candidate_rank": 0,
+                    "rationale": f"graph planner click probe: {action_identity}",
+                    "decision_source": "graph_click_planner",
+                    "evidence_path": getattr(selected_plan, "evidence_path", ""),
+                    "thinking_trace": ["World-model planner selected an evidence-backed click coordinate."],
+                }
+                self._emit_trace_event("operation", "graph_click_planner_applied", {
+                    "step": step_num,
+                    "action_id": action.get("action_id"),
+                    "x": x,
+                    "y": y,
+                    "action_identity": action_identity,
+                    "click_candidate_id": action.get("click_candidate_id"),
+                    "click_candidate_role": action.get("click_candidate_role"),
+                    "evidence_path": action.get("evidence_path"),
+                })
+                self._step_history.append({
+                    "step": len(self._step_history) + 1,
+                    "state_before": observation.get("state"),
+                    "board_before": self._snapshot_for_trace(observation),
+                    "solve_context": dict(self._solve_context) if self._solve_context else None,
+                    "available_actions": list(available_actions),
+                    "prompt": "(skipped: graph click planner)",
+                    "decision_flow": {
+                        "proposed_by": "world_model_planner",
+                        "executed_by": "world_model_planner",
+                        "candidate_action": action.get("action_id"),
+                        "executed_action": action.get("action_id"),
+                        "decision_source": "graph_click_planner",
+                    },
+                    "action_id": action.get("action_id"),
+                    "x": x,
+                    "y": y,
+                    "action_identity": action_identity,
+                    "coordinate_required": action.get("coordinate_required"),
+                    "missing_coordinate_click": False,
+                    "click_candidate_id": action.get("click_candidate_id"),
+                    "selected_click_candidate_id": action.get("selected_click_candidate_id"),
+                    "click_candidate_role": action.get("click_candidate_role"),
+                    "selected_click_candidate_role": action.get("selected_click_candidate_role"),
+                    "click_candidate_rank": action.get("click_candidate_rank"),
+                    "selected_click_candidate_rank": action.get("selected_click_candidate_rank"),
+                    "rationale": action.get("rationale"),
+                    "thinking_trace": action.get("thinking_trace"),
+                    "reasoning_gating": gating_info,
+                    "planner_candidate_count": getattr(getattr(self, "_last_planner_selection", None), "candidate_count", 0),
+                    "evidence_path": action.get("evidence_path", ""),
+                    "bypassed_llm": True,
+                    "reward": None,
+                    "done": False,
+                    "prompt_tokens": 0,
+                })
+                return action
 
         # B117: Use PromptPacket model
         packet = self.build_action_packet(
@@ -2580,7 +4014,8 @@ class ARCOrchestrator:
             self._asked_for_decision_from_effects = "effect" in prompt.lower()
 
         # B166: Deterministic autopilot — bypass LLM when player/goal positions are known
-        autopilot_action = self._try_autopilot(observation, available_actions)
+        # A071: Use async-enriched path for better graph/memory integration
+        autopilot_action = await self._try_autopilot_async_enriched(observation, available_actions)
         if autopilot_action:
             action = autopilot_action
             sandbox_elapsed = 0.0
@@ -2645,7 +4080,7 @@ class ARCOrchestrator:
         final_source = action.get("decision_source", llm_source)
 
         if guard_result["status"] in ("blocked", "warned"):
-            self.record_guard_escalation(step_num, guard_result["reason"], guard_result["status"])
+            await self.record_guard_escalation(step_num, guard_result["reason"], guard_result["status"])
             if guard_result.get("suggested_action"):
                 old_id = action["action_id"]
                 new_id = guard_result["suggested_action"]
@@ -2761,6 +4196,43 @@ class ARCOrchestrator:
         if action_id not in available_actions:
             self._invalid_action_count += 1
 
+        # A058: Ensure every policy override has an explicit reason
+        # A060: Audit all rewrite paths
+        if action.get("decision_source") in ("policy_override", "autopilot", "guard_override", "replan_forced_probe", "policy_untested_probe", "fatigue_override", "plateau_override"):
+            if not action.get("override_reason"):
+                action["override_reason"] = "missing_explicit_override_reason"
+
+        # A060: Extract memory provenance if available
+        # We look for indications in rationale or metadata that memory influenced this.
+        memory_prior_source = "none"
+        if "recalled" in str(action.get("rationale")).lower() or "similar" in str(action.get("rationale")).lower():
+            memory_prior_source = "text"
+        if action.get("decision_source") == "autopilot" and "confirmed" in str(action.get("rationale")).lower():
+            memory_prior_source = "graph" # A050 hybrid matcher influence
+
+        action_x = action.get("x")
+        action_y = action.get("y")
+        coordinate_required = action.get("action_id") in COORDINATE_REQUIRED_ACTIONS
+        selected_plan = getattr(getattr(self, "_last_planner_selection", None), "selected", None)
+        if coordinate_required and (action_x is None or action_y is None):
+            selected_args = getattr(selected_plan, "args", {}) or {}
+            if getattr(selected_plan, "action_id", None) == action.get("action_id"):
+                action_x = selected_args.get("x", action_x)
+                action_y = selected_args.get("y", action_y)
+        action_identity = action.get("action_identity") or build_action_identity(action.get("action_id"), action_x, action_y)
+        selected_click_id = None
+        selected_click_role = None
+        if coordinate_required:
+            selected_click_id = action.get("click_candidate_id") or getattr(selected_plan, "click_candidate_id", None)
+            selected_click_role = action.get("click_candidate_role") or getattr(selected_plan, "click_candidate_role", None)
+        if action_x is not None:
+            action["x"] = action_x
+        if action_y is not None:
+            action["y"] = action_y
+        action["action_identity"] = action_identity
+        action["coordinate_required"] = coordinate_required
+        action["missing_coordinate_click"] = bool(coordinate_required and (action_x is None or action_y is None))
+            
         self._step_history.append({
             "step": len(self._step_history) + 1,
             "state_before": observation.get("state"),
@@ -2777,6 +4249,7 @@ class ARCOrchestrator:
                 "expected_action": action.get("expected_action"),
                 "selected_action": action.get("selected_action"),
                 "override_reason": action.get("override_reason"),
+                "memory_prior_source": memory_prior_source,
                 "adherence_ok": action.get("adherence_ok"),
                 "guard_status": guard_result["status"],
                 "guard_reason": guard_result["reason"] if guard_result["status"] != "approved" else None
@@ -2787,15 +4260,28 @@ class ARCOrchestrator:
             "expected_action": action.get("expected_action"),
             "selected_action": action.get("selected_action"),
             "override_reason": action.get("override_reason"),
+            "memory_prior_source": memory_prior_source,
             "adherence_ok": action.get("adherence_ok"),
-            "x": action.get("x"),
-            "y": action.get("y"),
+            "x": action_x,
+            "y": action_y,
+            "action_identity": action_identity,
+            "coordinate_required": coordinate_required,
+            "missing_coordinate_click": bool(coordinate_required and (action_x is None or action_y is None)),
+            "click_candidate_id": selected_click_id,
+            "selected_click_candidate_id": selected_click_id,
+            "click_candidate_role": selected_click_role,
+            "selected_click_candidate_role": selected_click_role,
+            "click_candidate_rank": action.get("click_candidate_rank", 0 if selected_click_id else -1),
+            "selected_click_candidate_rank": action.get("click_candidate_rank", 0 if selected_click_id else -1),
             "rationale": action.get("rationale"),
             "thinking_trace": action.get("thinking_trace", []),
+            "reasoning_gating": gating_info,
             "guard_status": action.get("guard_status", "unknown"),
             "verifier_status": action.get("verifier_status", "unknown"),
             "autopilot_player_row": action.get("autopilot_player_row"),
             "autopilot_player_col": action.get("autopilot_player_col"),
+            "terminal_value_score": float(getattr(self._solve_context, "terminal_value_score", 0.0) if self._solve_context else 0.0),
+            "terminal_value_components": dict(getattr(self._solve_context, "terminal_value_components", {}) if self._solve_context else {}),
             "reward": None,
             "done": False,
             "prompt_tokens": prompt_tokens,
@@ -2922,6 +4408,8 @@ class ARCOrchestrator:
                 # Check for sandbox thought tool (B114)
 
                 if "sandbox_thought" in parsed:
+                    # Ensure payload is present and non-empty
+                    self._validate_tool_payload(parsed, "sandbox_thought")
                     test_action = parsed["sandbox_thought"]
                     result = self.solve_engine.peek_action_consequences(test_action, self._hypothesis_context or {})
                     self._emit_trace_event(
@@ -2948,6 +4436,8 @@ class ARCOrchestrator:
 
                 # Check for REPL test tool (B123)
                 if "repl_test" in parsed:
+                    # Ensure code payload is present and non-empty to avoid TypeErrors
+                    self._validate_tool_payload(parsed, "repl_test")
                     code = parsed["repl_test"]
                     # Add simple grid variable for convenience
                     grid_code = f"g = {json.dumps(observation.get('grid', []))}\n" + code
@@ -3170,6 +4660,7 @@ class ARCOrchestrator:
                     role="assistant",
                     content=lesson_content,
                     session_id=self.session_id,
+                    async_dispatch=True,
                 )
                 self._emit_trace_event("operation", "store_game_strategy", {"status": "success"})
             except Exception as exc:
@@ -3203,6 +4694,7 @@ class ARCOrchestrator:
                 role="assistant",
                 content=analogy_text,
                 session_id=self.session_id,
+                async_dispatch=True,
             )
         except Exception as exc:
             logger.warning("B165: failed to persist run lessons: %s", exc)
@@ -3224,6 +4716,11 @@ class ARCOrchestrator:
         # Trigger 1: Initial puzzle bootstrapping
         if step == 0:
             return True
+
+        # Memory-degraded mode (daemon offline / queued writes): short-circuit
+        # per-step recalls entirely until health clears.
+        if getattr(self.brain, "memory_degraded", False) is True:
+            return False
 
         # B118: Pruning check - if retrieval tools are already marked as low-value/high-latency,
         # skip optional mid-run retrieval to save time.
@@ -3280,6 +4777,1117 @@ class ARCOrchestrator:
         if score >= 0.65 and pixels_changed >= 12:
             return True
         return False
+
+    def check_macro_eligibility(self, observation: ARC3Observation) -> tuple[bool, str | None]:
+        """A067: Check if the current state is eligible for macro execution (multi-action aware)."""
+        self._macro_eligibility_reason = None
+        macro_cfg = self.config.get("macro_executor", {})
+        if not macro_cfg.get("enabled", True):
+            return False, None
+
+        available_actions = observation.get("available_actions", [])
+        if not available_actions:
+            return False, None
+
+        min_steps = int(macro_cfg.get("min_confirming_steps", 2))
+        if len(self._step_history) < min_steps:
+            return False, None
+
+        # A067: Generalize beyond len(available_actions) == 1
+        # We look for a "dominant" action in recent history.
+        recent_steps = self._step_history[-min_steps:]
+        action_id = recent_steps[-1].get("action_id")
+
+        if not action_id or action_id not in available_actions:
+            return False, None
+        if self._is_action_quarantined(action_id, len(self._step_history)):
+            self._macro_eligibility_reason = "action_quarantined"
+            return False, None
+
+        # Evidence collection
+        for step_entry in recent_steps:
+            if step_entry.get("action_id") != action_id:
+                return False, None
+
+            # A066: Must have meaningful progress (not just pixel churn)
+            meaningful = step_entry.get("reward_components", {}).get("meaningful_progress", False)
+            if not meaningful:
+                # Fallback: if we have NO reward_components (legacy), use n_cells_changed > 0
+                if "reward_components" not in step_entry:
+                    delta = step_entry.get("frame_delta", {})
+                    if int(delta.get("n_cells_changed", 0) or 0) == 0:
+                        return False, None
+                else:
+                    return False, None
+
+            # Must not be a loop or terminal state
+            if step_entry.get("state_after") in ("WIN", "GAME_OVER"):
+                return False, None
+
+        # A067: Guard against active hypothesis contradiction
+        hyp_ctx = self._hypothesis_context or {}
+        refuted_ids = [h.get("id") if isinstance(h, dict) else str(h) for h in hyp_ctx.get("refuted_hypotheses", [])]
+        if f"action-{action_id}" in refuted_ids:
+            return False, None
+
+        # A067: Guard against recent guard blocks
+        if action_id in getattr(self, "_blocked_actions", set()):
+            return False, None
+
+        reason = "dominant_action_detected" if len(available_actions) > 1 else "single_action_deterministic_progress"
+        self._macro_eligibility_reason = reason
+        return True, action_id
+
+    def sync_brain_phase(self, phase: str):
+        """A064: Sync the current orchestrator phase to the brain client for firewalling."""
+        if hasattr(self.brain, "current_phase"):
+            self.brain.current_phase = phase
+        inner = getattr(self.brain, "inner", None)
+        if inner is not None and hasattr(inner, "current_phase"):
+            inner.current_phase = phase
+
+    def _update_hypothesis_workspace(self, step: int, next_obs: Optional[ARC3Observation] = None, solve_ctx: Optional[Any] = None) -> None:
+        """A065: Update the reasoned hypothesis workspace based on current solve context."""
+        ctx = solve_ctx or self._solve_context
+        if not ctx:
+            return
+            
+        from agents.arc3.solver import Hypothesis, HypothesisWorkspace, HypothesisStatus, VictoryType
+        
+        # Access workspace through ctx (might be dict or object)
+        workspace = getattr(ctx, "hypothesis_workspace", None) if not isinstance(ctx, dict) else ctx.get("hypothesis_workspace")
+        
+        if not workspace:
+            workspace = HypothesisWorkspace()
+            if not isinstance(ctx, dict):
+                setattr(ctx, "hypothesis_workspace", workspace)
+            else:
+                ctx["hypothesis_workspace"] = workspace
+            
+        # 1. Sync from existing solve components
+        # A073: Sync all hypotheses to world model graph
+        for h in workspace.hypotheses:
+            self.world_model.upsert_hypothesis(
+                h_id=h.id,
+                scope=h.scope,
+                claim=h.statement,
+                confidence=h.confidence,
+                status=h.status.value if hasattr(h.status, "value") else str(h.status)
+            )
+
+        # Archetype
+        arch = getattr(ctx, "archetype", None) if not isinstance(ctx, dict) else ctx.get("archetype")
+        arch_val = getattr(arch, "value", arch) if arch else "unknown"
+        arch_conf = getattr(ctx, "archetype_confidence", 0.0) if not isinstance(ctx, dict) else ctx.get("archetype_confidence", 0.0)
+        
+        if arch_val and arch_val != "unknown":
+            workspace.add_hypothesis(Hypothesis(
+                id=f"arch-{arch_val}",
+                scope="archetype",
+                statement=f"The game follows a {arch_val} archetype.",
+                confidence=arch_conf,
+                step_created=step
+            ))
+            
+        # Victory Condition
+        vc = getattr(ctx, "victory_condition", None) if not isinstance(ctx, dict) else ctx.get("victory_condition")
+        if vc:
+            vc_type = getattr(vc, "condition_type", None) if not isinstance(vc, dict) else vc.get("type")
+            vc_type_val = getattr(vc_type, "value", vc_type) if vc_type else "unknown"
+            vc_desc = getattr(vc, "description", "") if not isinstance(vc, dict) else vc.get("description", "")
+            vc_conf = getattr(vc, "confidence", 0.0) if not isinstance(vc, dict) else vc.get("confidence", 0.0)
+            
+            if vc_type_val != "unknown":
+                workspace.add_hypothesis(Hypothesis(
+                    id=f"vc-{vc_type_val}",
+                    scope="victory-condition",
+                    statement=f"Winning requires: {vc_desc}",
+                    confidence=vc_conf,
+                    step_created=step
+                ))
+
+        # 2. Add Coordinate-Causality hypotheses (A062 integration)
+        for aid, status in self._action_coord_relevance.items():
+            args_eff = status.get("args_effective")
+            if args_eff == "false":
+                for h in workspace.hypotheses:
+                    if h.scope == "coordinate-causality" and aid in h.statement and h.status == HypothesisStatus.ACTIVE:
+                        h.status = HypothesisStatus.DEMOTED
+                        h.evidence_against.append(f"Coordinate relevance is low: {status.get('relevance_reason')}")
+                        h.confidence = status.get("relevance_score", 0.1)
+                
+                workspace.add_hypothesis(Hypothesis(
+                    id=f"coord-irrel-{aid}",
+                    scope="coordinate-causality",
+                    statement=f"Coordinates are irrelevant for {aid}; the environment ignores x/y.",
+                    confidence=1.0 - status.get("relevance_score", 0.0),
+                    evidence_for=[status.get("relevance_reason", "")],
+                    status=HypothesisStatus.ACTIVE,
+                    step_created=step
+                ))
+
+        # 3. Add Object-Progress evidence (A063 integration)
+        if getattr(self, "_step_history", None) and self._step_history:
+            last_step = self._step_history[-1]
+            obj_prog = last_step.get("object_progress", {})
+            if obj_prog.get("score", 0.0) > 0:
+                for h in workspace.get_active():
+                    if h.scope in ("rule", "victory-condition") or (h.scope == "object-role" and "player" in h.statement):
+                        h.evidence_for.append(f"Step {step}: Object progress observed ({obj_prog.get('summary')})")
+                        h.confidence = min(0.95, h.confidence + 0.05)
+
+        # 3. Terminal stall falsification (A069)
+        from agents.arc3.solver import HypothesisStatus
+        if self._step_history:
+            last_step = self._step_history[-1]
+            action_id = last_step.get("action_id")
+            reward_comps = last_step.get("reward_components") or {}
+            meaningful = bool(reward_comps.get("meaningful_progress", False))
+            
+            if action_id and not meaningful:
+                # Count recent stalls for this action
+                stall_streak = 0
+                for s in reversed(self._step_history):
+                    if s.get("action_id") == action_id and not (s.get("reward_components") or {}).get("meaningful_progress", False):
+                        stall_streak += 1
+                    else:
+                        break
+                
+                if stall_streak >= 3:
+                    action_hyp_id = f"action-{action_id}"
+                    for h in workspace.hypotheses:
+                        if h.status != HypothesisStatus.ACTIVE:
+                            continue
+                            
+                        # If action hypothesis or victory hypothesis that relies on this action
+                        if h.id == action_hyp_id or (h.scope == "action-causality" and action_id in h.statement):
+                            h.confidence = round(h.confidence * 0.5, 2)
+                            h.evidence_against.append(f"terminal stall (streak={stall_streak})")
+                            if h.confidence < 0.25:
+                                h.status = HypothesisStatus.DEMOTED
+                                self._emit_trace_event("operation", "hypothesis_demoted", {
+                                    "id": h.id, 
+                                    "reason": "terminal_stall",
+                                    "streak": stall_streak,
+                                    "action": action_id
+                                })
+
+        # 4. Object progress non-monotonicity (A069)
+        if self._step_history and len(self._step_history) >= 2:
+            last_step = self._step_history[-1]
+            prev_step = self._step_history[-2]
+            
+            last_op = last_step.get("object_progress", {})
+            prev_op = prev_step.get("object_progress", {})
+            
+            last_op_score = float(last_op.get("score", 0.0) or 0.0)
+            prev_op_score = float(prev_op.get("score", 0.0) or 0.0)
+            
+            if last_op_score < prev_op_score:
+                for h in workspace.hypotheses:
+                    if h.status == HypothesisStatus.ACTIVE and h.scope == "victory-condition":
+                        h.confidence = round(h.confidence * 0.8, 2)
+                        h.evidence_against.append("non-monotonic object progress")
+
+        self._emit_workspace_trace(workspace, step)
+
+    def _emit_workspace_trace(self, workspace: object, step: int) -> None:
+        """Emit the current workspace state to the execution trace."""
+        # Use duck typing or cast to access attributes of local-imported HypothesisWorkspace
+        active = getattr(workspace, "get_active", lambda: [])()
+        demoted = getattr(workspace, "get_demoted", lambda: [])()
+        
+        summary = {
+            "step": step,
+            "active_count": len(active),
+            "demoted_count": len(demoted),
+            "top_hypotheses": [
+                {"id": h.id, "statement": h.statement, "confidence": round(h.confidence, 2)}
+                for h in sorted(active, key=lambda x: x.confidence, reverse=True)[:3]
+            ],
+            "recently_demoted": [
+                {"id": h.id, "statement": h.statement, "reason": h.evidence_against[-1] if h.evidence_against else "unknown"}
+                for h in demoted[-2:]
+            ]
+        }
+        
+        self._emit_trace_event("operation", "hypothesis_workspace_update", summary)
+
+    def _build_workspace_block(self) -> Optional[object]:
+        """A065: Build a compact reasoning workspace block for the prompt."""
+        if not self._solve_context:
+            return None
+            
+        workspace = getattr(self._solve_context, "hypothesis_workspace", None) if not isinstance(self._solve_context, dict) else self._solve_context.get("hypothesis_workspace")
+        if not workspace:
+            return None
+            
+        from agents.arc3.solver import HypothesisStatus
+        active = [h for h in workspace.hypotheses if h.status == HypothesisStatus.ACTIVE]
+        demoted = [h for h in workspace.hypotheses if h.status == HypothesisStatus.DEMOTED]
+        
+        if not active and not demoted:
+            return None
+            
+        lines = []
+        if active:
+            lines.append("Active Hypotheses:")
+            for h in sorted(active, key=lambda x: x.confidence, reverse=True)[:3]:
+                lines.append(f"- {h.statement} (confidence: {h.confidence:.2f})")
+                
+        if demoted:
+            lines.append("\nRecently Demoted Hypotheses:")
+            for h in demoted[-2:]:
+                reason = h.evidence_against[-1] if h.evidence_against else "contradicted by observation"
+                lines.append(f"- {h.statement} (Demoted because: {reason})")
+                
+        return ContentBlock(
+            type="REASONING_WORKSPACE",
+            content="\n".join(lines),
+            header="REASONING WORKSPACE",
+        )
+
+    def enter_macro_mode(self, action_id: str, reason: str = "single_action_deterministic_progress"):
+        """A061: Transition to macro execution mode."""
+        import uuid
+        self._macro_active = True
+        self.sync_brain_phase("macro")
+        self._macro_id = f"macro-{uuid.uuid4().hex[:8]}"
+        self._macro_action_id = action_id
+        self._macro_start_step = len(self._step_history)
+        self._macro_step_count = 0
+        self._emit_trace_event("operation", "macro_enter", {
+            "macro_id": self._macro_id,
+            "action_id": action_id,
+            "reason": reason,
+            "macro_eligibility_reason": reason,
+            "start_step": self._macro_start_step
+        })
+
+    def exit_macro_mode(self, stop_reason: str):
+        """A061: Transition out of macro execution mode."""
+        if not self._macro_active:
+            return
+            
+        self._emit_trace_event("operation", "macro_exit", {
+            "macro_id": self._macro_id,
+            "action_id": self._macro_action_id,
+            "step_count": self._macro_step_count,
+            "stop_reason": stop_reason
+        })
+        
+        # A061: Emit one deferred memory summary after macro exit
+        # This will be picked up by the memory worker / brain
+        try:
+            self._emit_trace_event("operation", "macro_episode_summary", {
+                "macro_episode_id": self._macro_id,
+                "action_id": self._macro_action_id,
+                "repeat_count": self._macro_step_count,
+                "stop_reason": stop_reason,
+                "start_step": self._macro_start_step,
+                "end_step": len(self._step_history)
+            })
+        except Exception:
+            pass
+
+        self._macro_active = False
+        self._macro_id = None
+        self._macro_action_id = None
+        self._macro_start_step = 0
+        self._macro_step_count = 0
+        self.sync_brain_phase("unknown") # Fallback
+
+    def _update_terminal_progress(self, observation: ARC3Observation, record: dict) -> None:
+        """A070: Maintain rolling window of terminal observations and compute monotonic score."""
+        if not hasattr(self, "_terminal_observations"):
+            self._terminal_observations = collections.deque(maxlen=5)
+            
+        # 1. Identify player and goal centroids
+        roles = {}
+        if self._solve_context:
+            roles = getattr(self._solve_context, "object_roles", {}) if not isinstance(self._solve_context, dict) else self._solve_context.get("object_roles", {})
+        
+        def coerce_role(r):
+            if isinstance(r, dict): return r.get("role")
+            return getattr(r, "role", None)
+
+        player_colors = [int(c) for c, r in roles.items() if (coerce_role(r) == "player" or (hasattr(coerce_role(r), "value") and coerce_role(r).value == "player"))]
+        goal_colors = [int(c) for c, r in roles.items() if (coerce_role(r) == "goal" or (hasattr(coerce_role(r), "value") and coerce_role(r).value == "goal"))]
+        
+        from agents.arc3.grid_analysis import GridDiffEngine
+        engine = GridDiffEngine()
+        grid = observation.get("grid")
+        components = engine.extract_connected_components(grid) if grid else []
+        
+        def get_centroid(colors):
+            matches = [c for c in components if c.color in colors]
+            if not matches: return None
+            # Use largest matching component for centroid
+            m = matches[0]
+            r1, c1, r2, c2 = m.bounding_box
+            return ((r1 + r2) / 2.0, (c1 + c2) / 2.0)
+            
+        p_centroid = get_centroid(player_colors)
+        g_centroid = get_centroid(goal_colors)
+        
+        dist = None
+        if p_centroid and g_centroid:
+            # Manhattan distance (A070 default)
+            dist = abs(p_centroid[0] - g_centroid[0]) + abs(p_centroid[1] - g_centroid[1])
+            
+        obs_data = {
+            "step": len(self._step_history),
+            "goal_distance": dist,
+            "reward": record.get("reward", 0.0),
+            "levels_completed": observation.get("levels_completed", 0)
+        }
+        self._terminal_observations.append(obs_data)
+        
+        # 2. Compute monotonicity and trend
+        trend = "flat"
+        monotonicity = 0.0
+        oscillation_penalty = 0.0
+        
+        if len(self._terminal_observations) >= 2:
+            distances = [o["goal_distance"] for o in self._terminal_observations if o["goal_distance"] is not None]
+            if len(distances) >= 2:
+                deltas = [distances[i-1] - distances[i] for i in range(1, len(distances))]
+                
+                improvements = sum(1 for d in deltas if d > 0.05)
+                regressions = sum(1 for d in deltas if d < -0.05)
+                
+                if improvements >= 2 and regressions == 0:
+                    trend = "improving"
+                    monotonicity = 1.0
+                elif regressions >= 2 and improvements == 0:
+                    trend = "regressing"
+                    monotonicity = -1.0
+                elif improvements > 0 and regressions > 0:
+                    trend = "oscillating"
+                    oscillation_penalty = 0.5
+                else:
+                    trend = "flat"
+                    
+        # 3. Update solve context terminal score
+        if self._solve_context:
+            from agents.arc3.solver import TerminalGroundedScore
+            ts = getattr(self._solve_context, "terminal_score", None)
+            if not ts:
+                ts = TerminalGroundedScore()
+                if not isinstance(self._solve_context, dict):
+                    setattr(self._solve_context, "terminal_score", ts)
+                else:
+                    self._solve_context["terminal_score"] = ts
+            
+            ts.goal_distance = dist
+            ts.trend = trend
+            ts.monotonicity = monotonicity
+            ts.oscillation_penalty = oscillation_penalty
+            
+            # Recompute total (simplified placeholder for full A058 logic)
+            ts.total_score = (record.get("reward", 0.0) * 5.0) + (monotonicity * 0.5) - oscillation_penalty
+            
+            if not isinstance(self._solve_context, dict):
+                setattr(self._solve_context, "terminal_value_score", ts.total_score)
+            else:
+                self._solve_context["terminal_value_score"] = ts.total_score
+                
+        # 4. Attach to record for trace
+        record["terminal_progress_trend"] = trend
+        record["terminal_goal_distance"] = dist
+
+    async def publish_mechanic_memory(self):
+        """A075: Publish the current world model's mechanic summary to aggregate memory."""
+        try:
+            summary = self.world_model.to_mechanic_summary()
+            if summary.get("confidence", 0.0) >= 0.5 or summary.get("failure_modes"):
+                await self.brain.publish_mechanic_summary(summary=summary)
+        except Exception:
+            logger.debug("A075: Failed to publish mechanic memory", exc_info=True)
+
+    async def retrieve_mechanic_priors(self) -> List[Dict[str, Any]]:
+        """A075: Retrieve relevant mechanics from aggregate memory."""
+        try:
+            # A087: Build comprehensive mechanic recall signature
+            signature = self._build_mechanic_recall_signature()
+            resp = await self.brain.recall_mechanic_priors(signature=signature)
+            if isinstance(resp, dict):
+                self._mechanic_prior_recall_status = str(
+                    resp.get("mechanic_prior_recall_status")
+                    or resp.get("status")
+                    or "ok"
+                )
+                self._mechanic_prior_count = int(
+                    resp.get("mechanic_prior_count", resp.get("prior_count", len(resp.get("results", []) or []))) or 0
+                )
+                self._mechanic_prior_error_code = resp.get("mechanic_prior_error_code") or resp.get("error_code")
+                return list(resp.get("results", []) or [])
+            self._mechanic_prior_recall_status = "ok"
+            self._mechanic_prior_count = 0
+            self._mechanic_prior_error_code = None
+            return []
+        except Exception:
+            self._mechanic_prior_recall_status = "error"
+            self._mechanic_prior_count = 0
+            self._mechanic_prior_error_code = "exception"
+            logger.debug("A075: Failed to retrieve mechanic priors", exc_info=True)
+            return []
+
+    def _build_mechanic_recall_signature(self) -> Dict[str, Any]:
+        """A087: Build comprehensive mechanic recall signature from game state."""
+        available_actions = list(self._available_actions) if self._available_actions else []
+        observed_actions = {
+            a.strip()
+            for a in str(self.world_model.get_action_set_signature() or "").split(",")
+            if a.strip()
+        }
+        legal_actions = {str(a) for a in available_actions if a}
+        action_set = ",".join(sorted(observed_actions | legal_actions))
+        
+        # Recent effect histogram
+        effect_table = self.world_model.get_action_effect_table(limit=20)
+        effect_histogram = {}
+        for entry in effect_table:
+            eff = entry.get("effect", "unknown")
+            effect_histogram[eff] = effect_histogram.get(eff, 0) + 1
+        
+        # Object/terminal trend
+        object_progress_count = sum(1 for e in effect_table if e.get("effect") == "object_progress")
+        terminal_progress_count = sum(1 for e in effect_table if e.get("effect") == "terminal_progress")
+        trend = "improving" if (object_progress_count + terminal_progress_count) > len(effect_table) / 2 else "flat" if not effect_table else "unknown"
+        
+        # Failure signals
+        failure_signals = []
+        if getattr(self._compiled_delta, "failure_signal", None):
+            failure_signals.append(self._compiled_delta.failure_signal)
+        
+        return {
+            "action_set": action_set,
+            "action_cardinality": len(available_actions),
+            "archetype": str(self._solve_context_get(self._solve_context, "archetype", "unknown")),
+            "effect_histogram": effect_histogram,
+            "coordinate_relevance_summary": "mixed",  # Placeholder for A062 coordinate analysis
+            "object_terminal_trend": trend,
+            "failure_signals": failure_signals,
+            "world_model_node_count": len(self.world_model.nodes),
+            "world_model_edge_count": len(self.world_model.edges)
+        }
+
+    def _collect_per_action_evidence(self, available_actions: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """A085: Collect evidence on per-action effects and progress for multi-action churn detection."""
+        evidence = {}
+        action_ids = list(available_actions or self._available_actions or [])
+        if not action_ids:
+            action_ids = sorted(
+                {
+                    str(step.get("action_id"))
+                    for step in self._step_history
+                    if step.get("action_id")
+                    and str(step.get("action_id")).startswith("ACTION")
+                }
+            )
+        
+        for action_id in action_ids:
+            tested_count = 0
+            recent_effects = []
+            last_progress_step = -1
+            frame_hashes = []
+            
+            # Scan step history for this action
+            for step_entry in self._step_history:
+                if step_entry.get("action_id") == action_id:
+                    tested_count += 1
+                    effect = self._step_effect_class_for_reasoning(step_entry)
+                    recent_effects.append(effect)
+                    if effect in ("object_progress", "terminal_progress", "meaningful_progress"):
+                        last_progress_step = step_entry.get("step", -1)
+                    frame_hash = (
+                        step_entry.get("frame_hash")
+                        or (step_entry.get("board_after") or {}).get("frame_hash")
+                        or (step_entry.get("board_before") or {}).get("frame_hash")
+                    )
+                    if frame_hash:
+                        frame_hashes.append(frame_hash)
+            
+            # Keep only recent effects (last 10)
+            recent_effects = recent_effects[-10:] if recent_effects else []
+            
+            evidence[action_id] = {
+                "tested_count": tested_count,
+                "recent_effects": recent_effects,
+                "last_progress_step": last_progress_step,
+                "frame_hashes": frame_hashes[-5:] if frame_hashes else []  # Keep last 5
+            }
+        
+        return evidence
+
+    @staticmethod
+    def _step_effect_class_for_reasoning(step_entry: Dict[str, Any]) -> str:
+        """Normalize step-history fields into the A085 reasoning effect classes."""
+        compiled = step_entry.get("compiled_world_delta")
+        if isinstance(compiled, dict):
+            effect = str(compiled.get("effect_class") or "unknown")
+            if effect != "unknown":
+                alignment = str(compiled.get("terminal_alignment") or "")
+                if effect in ("object_progress", "meaningful_progress") and alignment in {"local_only", "regressing", "oscillating"}:
+                    return "local_object_progress"
+                return effect
+
+        reward_components = step_entry.get("reward_components")
+        if isinstance(reward_components, dict):
+            progress_class = str(reward_components.get("progress_class") or "")
+            if progress_class in ("terminal", "level", "terminal_progress"):
+                return "terminal_progress"
+            if progress_class in ("object_monotonic", "object_progress", "score"):
+                return "object_progress"
+            if bool(reward_components.get("meaningful_progress", False)):
+                return "meaningful_progress"
+
+        object_progress = step_entry.get("object_progress")
+        if isinstance(object_progress, dict):
+            try:
+                if float(object_progress.get("score", 0.0) or 0.0) > 0:
+                    return "object_progress"
+            except (TypeError, ValueError):
+                pass
+
+        frame_delta = step_entry.get("frame_delta")
+        if isinstance(frame_delta, dict):
+            apparent = str(frame_delta.get("apparent_effect") or "")
+            if apparent == "no_effect":
+                return "no_op"
+            if apparent in ("directional_movement", "large_transformation", "local_change"):
+                return "pixel_churn"
+
+        return str(step_entry.get("action_effect_class") or "unknown")
+
+    def _is_action_quarantined(self, action_id: str, current_step: Optional[int] = None) -> bool:
+        """Check local and graph-backed quarantine state for exploit selectors."""
+        if not action_id:
+            return False
+        step = len(self._step_history) if current_step is None else int(current_step or 0)
+        until = int((getattr(self, "_prediction_quarantine_until", {}) or {}).get(action_id, 0) or 0)
+        if until and step < until:
+            return True
+        try:
+            return bool(self.world_model.is_action_quarantined(action_id, step))
+        except Exception:
+            return False
+
+    def _record_prediction_feedback(self, record: Dict[str, Any], obs_node_id: str) -> None:
+        """Turn selected-planner prediction misses into graph contradiction evidence."""
+        compiled = record.get("compiled_world_delta") or {}
+        actual = compiled.get("effect_class")
+        if not actual or actual == "unknown":
+            return
+        if actual in ("object_progress", "meaningful_progress") and compiled.get("terminal_alignment") in ("local_only", "regressing", "oscillating"):
+            actual = "local_object_progress"
+
+        selection = getattr(self, "_last_planner_selection", None) or (
+            self._solve_context_get(self._solve_context, "planner_selection")
+            if self._solve_context is not None
+            else None
+        )
+        selected = getattr(selection, "selected", None)
+        prediction = getattr(selected, "predicted_observation", None) if selected is not None else None
+        if not isinstance(prediction, dict) or not prediction:
+            return
+
+        predicted = prediction.get("effect_class")
+        if not predicted or predicted == actual:
+            return
+
+        action_id = str(record.get("action_id") or "")
+        selected_action_id = str(getattr(selected, "action_id", "") or "")
+        if selected_action_id and action_id and selected_action_id != action_id:
+            self._emit_trace_event("operation", "prediction_feedback_skipped", {
+                "step": record.get("step"),
+                "executed_action_id": action_id,
+                "selected_action_id": selected_action_id,
+                "predicted_effect_class": predicted,
+                "actual_effect_class": actual,
+                "reason": "selected_action_mismatch",
+            })
+            return
+        action_id = action_id or selected_action_id or "unknown"
+        action_identity = str(record.get("action_identity") or "")
+        coordinate_required = bool(record.get("coordinate_required")) or action_id in COORDINATE_REQUIRED_ACTIONS
+        falsification_key = (
+            action_identity
+            if coordinate_required and action_identity and "@" in action_identity
+            else action_id
+        )
+        confidence = float(prediction.get("confidence", 0.5) or 0.5)
+        try:
+            if falsification_key != action_id:
+                self.world_model.record_action_identity_falsification(
+                    action_identity=falsification_key,
+                    predicted_effect=predicted,
+                    actual_effect=actual,
+                    step=int(record.get("step", 0) or 0),
+                    confidence=confidence,
+                )
+            else:
+                self.world_model.record_prediction_falsification(
+                    action_id=action_id,
+                    predicted_effect=predicted,
+                    actual_effect=actual,
+                    step=int(record.get("step", 0) or 0),
+                    confidence=confidence,
+                )
+        except Exception:
+            logger.debug("A093: graph prediction falsification update failed", exc_info=True)
+        hyp_id = f"prediction-{falsification_key}-{predicted}"
+        claim = f"{falsification_key} predicts {predicted}; observed {actual}."
+        hyp_node_id = self.world_model.upsert_hypothesis(
+            hyp_id,
+            "prediction",
+            claim,
+            confidence,
+            "active",
+        )
+        self.world_model.link_contradiction(
+            obs_node_id,
+            hyp_node_id,
+            1.0,
+            f"Prediction mismatch: expected {predicted}, observed {actual}",
+        )
+        self.world_model.upsert_hypothesis(
+            hyp_id,
+            "prediction",
+            claim,
+            max(0.0, confidence - 0.25),
+            "demoted",
+        )
+        record["prediction_mismatch"] = {
+            "predicted_effect_class": predicted,
+            "actual_effect_class": actual,
+            "confidence": confidence,
+        }
+        counts = getattr(self, "_prediction_falsification_counts", {})
+        counts[falsification_key] = int(counts.get(falsification_key, 0) or 0) + 1
+        self._prediction_falsification_counts = counts
+        try:
+            threshold = int((self.config.get("reasoning_gate", {}) if isinstance(self.config, dict) else {}).get("prediction_quarantine_threshold", 2))
+            window = int((self.config.get("reasoning_gate", {}) if isinstance(self.config, dict) else {}).get("prediction_quarantine_steps", 5))
+        except Exception:
+            threshold, window = 2, 5
+        quarantined_until = None
+        if actual == "harmful" or counts[falsification_key] >= threshold:
+            until = int(record.get("step", 0) or 0) + max(1, window)
+            quarantined_until = until
+            if falsification_key != action_id:
+                try:
+                    self.world_model.quarantine_action_identity(
+                        falsification_key,
+                        until,
+                        f"predicted_{predicted}_but_{actual}",
+                    )
+                except Exception:
+                    logger.debug("A106: graph action-identity quarantine update failed", exc_info=True)
+            else:
+                self._prediction_quarantine_until[action_id] = until
+            record["prediction_quarantine"] = {
+                "action_id": action_id,
+                "action_identity": falsification_key if falsification_key != action_id else None,
+                "until_step": until,
+                "falsification_count": counts[falsification_key],
+            }
+        self._emit_trace_event("operation", "prediction_falsified", {
+            "step": record.get("step"),
+            "action_id": action_id,
+            "action_identity": falsification_key if falsification_key != action_id else action_identity or None,
+            "predicted_effect_class": predicted,
+            "actual_effect_class": actual,
+            "confidence": confidence,
+            "falsification_count": counts[falsification_key],
+            "quarantined_until_step": quarantined_until or self._prediction_quarantine_until.get(action_id),
+        })
+
+    def _select_deterministic_cheap_probe_action(self, observation: dict, step_num: int) -> dict | None:
+        available_actions = list(observation.get("available_actions") or [])
+        if not available_actions:
+            return None
+
+        selection = getattr(self, "_last_planner_selection", None) or (
+            self._solve_context_get(self._solve_context, "planner_selection")
+            if self._solve_context is not None
+            else None
+        )
+        selected = getattr(selection, "selected", None)
+
+        cheap_probe_reason = str(getattr(self._last_reasoning_decision, "trigger", "cheap_probe"))
+        if cheap_probe_reason == "multi_action_churn":
+            return self._select_multi_action_churn_probe_action(
+                available_actions=available_actions,
+                selection=selection,
+                selected=selected,
+            )
+
+        quarantined_action_identities = {
+            str(row.get("action_identity"))
+            for row in getattr(self, "_step_history", [])
+            if isinstance(row, dict) and row.get("action_identity")
+        }
+        quarantined_action_identities.update({
+            str(aid)
+            for aid, meta in (getattr(self.world_model, "_action_identity_quarantine", {}) or {}).items()
+            if int((meta or {}).get("quarantined_until_step", 0) or 0) > int(step_num)
+        })
+        if "ACTION6" in available_actions:
+            try:
+                active_goals = self.world_model.get_active_goal_hypotheses(limit=3)
+            except Exception:
+                active_goals = []
+            click_candidate = self.world_model_planner.suggest_pattern_correspondence_action(
+                world_model=self.world_model,
+                available_actions=available_actions,
+                active_goal_hypotheses=active_goals,
+                quarantined_action_identities=quarantined_action_identities,
+            )
+            if click_candidate is None:
+                click_candidate = self.world_model_planner.suggest_click_probe_action(
+                    world_model=self.world_model,
+                    available_actions=available_actions,
+                    quarantined_actions=set(),
+                    quarantined_action_identities=quarantined_action_identities,
+                    step_num=step_num,
+            )
+            if click_candidate is not None:
+                args = getattr(click_candidate, "args", {}) or {}
+                raw_x = args.get("x")
+                raw_y = args.get("y")
+                if raw_x is not None and raw_y is not None:
+                    try:
+                        x = int(raw_x)
+                        y = int(raw_y)
+                    except (TypeError, ValueError):
+                        x = y = None
+                    if x is not None and y is not None:
+                        raw_identity = getattr(click_candidate, "action_identity", None)
+                        computed_identity = build_action_identity("ACTION6", x, y)
+                        action_identity = raw_identity if raw_identity and "@" in str(raw_identity) else computed_identity
+                        if action_identity not in quarantined_action_identities:
+                            return {
+                                "action_id": "ACTION6",
+                                "x": x,
+                                "y": y,
+                                "action_identity": action_identity,
+                                "coordinate_required": True,
+                                "missing_coordinate_click": False,
+                                "click_candidate_id": getattr(click_candidate, "click_candidate_id", None),
+                                "selected_click_candidate_id": getattr(click_candidate, "click_candidate_id", None),
+                                "click_candidate_role": getattr(click_candidate, "click_candidate_role", None),
+                                "selected_click_candidate_role": getattr(click_candidate, "click_candidate_role", None),
+                                "click_candidate_rank": 0,
+                                "selected_click_candidate_rank": 0,
+                                "rationale": f"cheap graph click probe: {action_identity}",
+                                "decision_source": "cheap_probe",
+                                "cheap_probe_reason": "graph_click_candidate",
+                                "planner_candidate_count": int(getattr(selection, "candidate_count", 0) or 0),
+                                "evidence_path": getattr(click_candidate, "evidence_path", ""),
+                                "bypassed_llm": True,
+                                "thinking_trace": [
+                                    "World graph selected an untried click coordinate from candidate evidence."
+                                ],
+                            }
+
+        if selected is not None and getattr(selected, "action_id", None) in available_actions:
+            args = getattr(selected, "args", {}) or {}
+            raw_x = args.get("x")
+            raw_y = args.get("y")
+            selected_coordinate_required = selected.action_id in COORDINATE_REQUIRED_ACTIONS
+            raw_identity = getattr(selected, "action_identity", None)
+            if selected_coordinate_required:
+                if raw_x is None or raw_y is None:
+                    return None
+                if not getattr(selected, "click_candidate_id", None) and not (raw_identity and "@" in str(raw_identity)):
+                    return None
+            try:
+                x = int(raw_x or 0)
+                y = int(raw_y or 0)
+            except (TypeError, ValueError):
+                return None
+            computed_identity = build_action_identity(selected.action_id, x, y)
+            action_identity = raw_identity if raw_identity and (not selected_coordinate_required or "@" in str(raw_identity)) else computed_identity
+            if selected_coordinate_required and action_identity in quarantined_action_identities:
+                return None
+            return {
+                "action_id": selected.action_id,
+                "x": x,
+                "y": y,
+                "action_identity": action_identity,
+                "coordinate_required": selected_coordinate_required,
+                "missing_coordinate_click": False,
+                "click_candidate_id": getattr(selected, "click_candidate_id", None),
+                "selected_click_candidate_id": getattr(selected, "click_candidate_id", None),
+                "click_candidate_role": getattr(selected, "click_candidate_role", None),
+                "selected_click_candidate_role": getattr(selected, "click_candidate_role", None),
+                "click_candidate_rank": 0 if getattr(selected, "click_candidate_id", None) else -1,
+                "selected_click_candidate_rank": 0 if getattr(selected, "click_candidate_id", None) else -1,
+                "rationale": f"cheap probe from planner ({cheap_probe_reason})",
+                "decision_source": "cheap_probe",
+                "cheap_probe_reason": "planner_selection",
+                "planner_candidate_count": int(getattr(selection, "candidate_count", 0) or 0),
+                "planner_selected_prior_id": getattr(selected, "mechanic_prior_id", None),
+                "planner_selected_prior_source": getattr(selected, "mechanic_prior_source", "none"),
+                "evidence_path": getattr(selected, "evidence_path", ""),
+                "route_actions": list(getattr(selected, "route_actions", []) or []),
+                "route_confidence": float(getattr(selected, "route_confidence", 0.0) or 0.0),
+                "route_candidate_count": 1 if getattr(selected, "route_actions", None) else 0,
+                "bypassed_llm": True,
+                "thinking_trace": [f"Reasoning controller triggered cheap_probe via {cheap_probe_reason}"],
+            }
+
+        used_actions = [
+            s.get("action_id")
+            for s in getattr(self, "_step_history", [])
+            if isinstance(s, dict) and s.get("action_id") in available_actions
+        ]
+        used_set = set(used_actions)
+        fallback_action = next((aid for aid in available_actions if aid not in used_set), available_actions[0])
+        if fallback_action in COORDINATE_REQUIRED_ACTIONS:
+            return None
+        action_identity = build_action_identity(fallback_action, 0, 0)
+        return {
+            "action_id": fallback_action,
+            "x": 0,
+            "y": 0,
+            "action_identity": action_identity,
+            "coordinate_required": fallback_action in COORDINATE_REQUIRED_ACTIONS,
+            "missing_coordinate_click": False,
+            "rationale": f"cheap probe deterministic fallback ({cheap_probe_reason})",
+            "decision_source": "cheap_probe",
+            "cheap_probe_reason": "deterministic_fallback",
+            "planner_candidate_count": int(getattr(selection, "candidate_count", 0) or 0),
+            "planner_selected_prior_id": getattr(selected, "mechanic_prior_id", None) if selected is not None else None,
+            "planner_selected_prior_source": getattr(selected, "mechanic_prior_source", "none") if selected is not None else "none",
+            "evidence_path": f"cheap_probe_fallback:{fallback_action}",
+            "bypassed_llm": True,
+            "thinking_trace": [f"Reasoning controller triggered cheap_probe via {cheap_probe_reason}"],
+        }
+
+    def _select_multi_action_churn_probe_action(
+        self,
+        available_actions: List[str],
+        selection: Any = None,
+        selected: Any = None,
+    ) -> dict | None:
+        """Choose a bounded deterministic probe that avoids harmful/recent churn actions."""
+        if not available_actions:
+            return None
+
+        productive_path = self._best_graph_productive_action_path(available_actions)
+        if productive_path:
+            candidate = productive_path.get("action_id")
+            if candidate in available_actions:
+                evidence_ids = productive_path.get("evidence_path_ids") or []
+                return {
+                    "action_id": candidate,
+                    "x": 0,
+                    "y": 0,
+                    "rationale": "graph-backed exploit: action has causal path to object/terminal progress",
+                    "decision_source": "cheap_probe",
+                    "cheap_probe_reason": "productive_graph_path",
+                    "planner_candidate_count": int(getattr(selection, "candidate_count", 0) or 0),
+                    "planner_selected_prior_id": getattr(selected, "mechanic_prior_id", None) if selected is not None else None,
+                    "planner_selected_prior_source": getattr(selected, "mechanic_prior_source", "none") if selected is not None else "none",
+                    "evidence_path": f"productive_path:{candidate}:{','.join(evidence_ids[:3])}",
+                    "bypassed_llm": True,
+                    "thinking_trace": [
+                        f"World graph selected {candidate} because it has progress support={productive_path.get('support_count', 0)}"
+                    ],
+                }
+
+        history = [
+            step
+            for step in getattr(self, "_step_history", [])
+            if isinstance(step, dict) and step.get("action_id") in available_actions
+        ]
+        harmful_counts: Dict[str, int] = {aid: 0 for aid in available_actions}
+        progress_counts: Dict[str, int] = {aid: 0 for aid in available_actions}
+        use_counts: Dict[str, int] = {aid: 0 for aid in available_actions}
+        last_seen: Dict[str, int] = {aid: -1 for aid in available_actions}
+
+        for idx, step in enumerate(history):
+            aid = step.get("action_id")
+            effect = self._step_effect_class_for_reasoning(step)
+            use_counts[aid] += 1
+            last_seen[aid] = int(step.get("step", idx) or idx)
+            if effect == "harmful":
+                harmful_counts[aid] += 1
+            elif effect in ("object_progress", "terminal_progress", "meaningful_progress"):
+                progress_counts[aid] += 1
+
+        candidate = min(
+            available_actions,
+            key=lambda aid: (
+                harmful_counts.get(aid, 0),
+                -progress_counts.get(aid, 0),
+                use_counts.get(aid, 0),
+                last_seen.get(aid, -1),
+                aid,
+            ),
+        )
+        return {
+            "action_id": candidate,
+            "x": 0,
+            "y": 0,
+            "rationale": "multi-action churn probe: bounded deterministic probe avoiding harmful/recent actions",
+            "decision_source": "cheap_probe",
+            "cheap_probe_reason": "multi_action_churn",
+            "planner_candidate_count": int(getattr(selection, "candidate_count", 0) or 0),
+            "planner_selected_prior_id": getattr(selected, "mechanic_prior_id", None) if selected is not None else None,
+            "planner_selected_prior_source": getattr(selected, "mechanic_prior_source", "none") if selected is not None else "none",
+            "evidence_path": f"multi_action_churn_probe:{candidate}",
+            "bypassed_llm": True,
+            "thinking_trace": ["Reasoning controller triggered bounded multi_action_churn_probe"],
+        }
+
+    def _best_graph_productive_action_path(self, available_actions: List[str]) -> dict | None:
+        """Return the strongest available action backed by progress-causing graph paths."""
+        try:
+            paths = self.world_model.get_productive_action_paths(available_actions=available_actions, limit=3)
+        except Exception:
+            return None
+        if not paths:
+            return None
+        current_step = len(getattr(self, "_step_history", []) or [])
+        quarantined = {
+            aid for aid, until in (getattr(self, "_prediction_quarantine_until", {}) or {}).items()
+            if int(until or 0) > current_step
+        }
+        best = next((p for p in paths if p.get("action_id") not in quarantined), None)
+        if not best:
+            return None
+        if int(best.get("support_count", 0) or 0) <= int(best.get("harmful_count", 0) or 0):
+            return None
+        if float(best.get("confidence", 0.0) or 0.0) < 0.3:
+            return None
+        return best
+
+    def build_reasoning_decision_snapshot(self, observation: dict, executed_step_count: int) -> dict:
+        decision = getattr(self, "_last_reasoning_decision", None)
+        compiled = getattr(self, "_compiled_delta", None)
+        effect_class = "unknown"
+        if compiled is not None:
+            effect_class = next(
+                (
+                    getattr(claim, "effect_class", "unknown")
+                    for claim in getattr(compiled, "claims", [])
+                    if getattr(claim, "kind", "") == "action_effect"
+                ),
+                "unknown",
+            )
+        frame_hash = observation.get("frame_hash") or self._snapshot_for_trace(observation).get("frame_hash")
+        repeated_frame_hash_count = 0
+        if frame_hash:
+            repeated_frame_hash_count = sum(
+                1
+                for step in getattr(self, "_step_history", [])
+                if isinstance(step, dict)
+                and (
+                    (step.get("board_after") or {}).get("frame_hash") == frame_hash
+                    or (step.get("board_before") or {}).get("frame_hash") == frame_hash
+                )
+            )
+        last_action_id = None
+        if getattr(self, "_step_history", None):
+            last_action_id = (self._step_history[-1] or {}).get("action_id")
+        trace_snapshot = self.world_model.to_trace_snapshot() if hasattr(self, "world_model") else {}
+        available_actions = list(observation.get("available_actions") or [])
+        return {
+            "snapshot_type": "world_model_decision",
+            "decision": getattr(decision.mode, "value", "unknown") if decision else "unknown",
+            "world_model_decision": getattr(decision, "world_model_decision", None) or getattr(self, "_world_model_decision", None),
+            "trigger": getattr(decision, "trigger", None),
+            "executed_step_count": int(executed_step_count),
+            "decision_step": int(executed_step_count) + 1,
+            "stall_evidence_count": int(getattr(decision, "stall_evidence_count", 0) or 0),
+            "stall_threshold": int(getattr(decision, "stall_threshold", 0) or 0),
+            "action_id": last_action_id,
+            "action_effect_class": effect_class,
+            "repeated_frame_hash_count": repeated_frame_hash_count,
+            "world_model_node_count": int(trace_snapshot.get("node_count", 0) or 0),
+            "world_model_edge_count": int(trace_snapshot.get("edge_count", 0) or 0),
+            "failure_class": getattr(self, "_world_model_failure_class", None),
+            "failure_reason": getattr(self, "_world_model_failure_reason", None),
+            "all_actions_churn_evidence": self.world_model.get_all_actions_churn_evidence(
+                available_actions=available_actions,
+                lookback=18,
+                min_tests_per_action=2,
+            ) if hasattr(self, "world_model") else {},
+            "route_transition_evidence": self.world_model.get_route_transition_evidence(
+                available_actions=available_actions,
+                lookback=18,
+                limit=8,
+            ) if hasattr(self, "world_model") else {},
+        }
+
+    def _update_coordinate_relevance(self, action_id: str, requested_coord: tuple[int, int], changed_cells: List[Any]) -> None:
+        """A062: Update the learned relevance of coordinates for a specific action."""
+        if not action_id:
+            return
+            
+        status = self._action_coord_relevance.get(action_id)
+        if not status:
+            status = {
+                "samples": [],
+                "args_effective": "unknown",
+                "relevance_score": 1.0,
+                "relevance_reason": "initial",
+            }
+            self._action_coord_relevance[action_id] = status
+            
+        # Extract distance from grid_analysis
+        from agents.arc3.grid_analysis import GridDiffEngine
+        engine = GridDiffEngine()
+        relevance_info = engine.calculate_coordinate_relevance(requested_coord, changed_cells)
+        
+        # Add sample
+        status["samples"].append({
+            "requested": requested_coord,
+            "min_dist": relevance_info["min_dist"],
+            "n_cells": relevance_info["n_cells"]
+        })
+        
+        # Keep only last 10 samples
+        if len(status["samples"]) > 10:
+            status["samples"] = status["samples"][-10:]
+            
+        # Compute status after 3+ samples
+        if len(status["samples"]) >= 3:
+            # Relevance metric: mean min_dist
+            valid_samples = [s for s in status["samples"] if s["min_dist"] is not None]
+            if not valid_samples:
+                return
+                
+            mean_min_dist = sum(s["min_dist"] for s in valid_samples) / len(valid_samples)
+            
+            # Check requested coordinate variance
+            requested_coords = set(s["requested"] for s in valid_samples)
+            
+            # If coordinates varied but effect is always far away
+            if len(requested_coords) >= 2 and mean_min_dist > 5.0:
+                status["args_effective"] = "false"
+                status["relevance_score"] = max(0.0, 1.0 - (mean_min_dist / 10.0))
+                status["relevance_reason"] = f"mean_min_dist={mean_min_dist:.1f} over {len(valid_samples)} varied samples"
+            elif mean_min_dist < 1.5:
+                status["args_effective"] = "true"
+                status["relevance_score"] = 1.0
+                status["relevance_reason"] = "closely_tracking_requested_coords"
+            else:
+                # Moderate distance or not enough variance to be sure
+                status["args_effective"] = "unknown"
+                status["relevance_score"] = 0.5
+                status["relevance_reason"] = f"ambiguous_dist={mean_min_dist:.1f}"
+
+    def get_args_effective(self, action_id: str) -> bool:
+        """A062: Return True if action arguments appear to be causal/effective."""
+        status = self._action_coord_relevance.get(action_id)
+        if not status:
+            return True # Default to True until proven otherwise
+        return status.get("args_effective") != "false"
 
     # B153: Map ARC colors to single characters for compact display
     _COLOR_CHARS = ".#@*+~^%&$!?<>="
@@ -3402,6 +6010,15 @@ class ARCOrchestrator:
         # No-op at step 0
         if step == 0:
             return {"graph_evidence": {"grounded_hypotheses": []}}
+
+        if getattr(self.brain, "memory_degraded", False) is True:
+            return {
+                "graph_evidence": {
+                    "grounded_hypotheses": [],
+                    "memory_degraded": True,
+                    "memory_degraded_reason": str(getattr(self.brain, "memory_degraded_reason", "") or ""),
+                }
+            }
 
         # Determine archetype from solve context or observation
         archetype = None
@@ -3582,6 +6199,43 @@ class ARCOrchestrator:
             )
             # Clear nudge after injecting into prompt
             self._supervisor_nudge = None
+
+        # A062: Coordinate relevance warnings
+        irrelevant_actions = [aid for aid in available_actions if self.get_args_effective(aid) is False]
+        if irrelevant_actions:
+            packet.blocks.append(
+                ContentBlock(
+                    type="ACTION_SEMANTICS",
+                    content=(
+                        f"NOTE: For the following actions, the environment ignores the requested x/y coordinates: {irrelevant_actions}. "
+                        "When choosing these actions, do not spend effort on coordinate selection; the effect is determined by other state."
+                    ),
+                    header="ACTION SEMANTICS",
+                )
+            )
+
+        # A065: Reasoning workspace
+        workspace_block = self._build_workspace_block()
+        if workspace_block:
+            packet.blocks.append(workspace_block)
+            
+        # A077: Planner Proposals
+        planner_block = self._build_planner_candidates_block()
+        if planner_block:
+            packet.blocks.append(planner_block)
+
+        # Always include the live action mask so LLM choices stay in-bounds.
+        if packet.get_block("ACTION_INVOCATION") is None:
+            packet.blocks.append(
+                ContentBlock(
+                    type="ACTION_INVOCATION",
+                    content=(
+                        f"Available actions (must choose one): {available_actions}\n"
+                        "Return JSON: {\"action_id\": \"...\", \"rationale\": \"...\"}"
+                    ),
+                    header="CHOOSE ACTION",
+                )
+            )
 
         return packet
 
@@ -3802,6 +6456,30 @@ class ARCOrchestrator:
             packet.blocks.append(ContentBlock(type="GRAPH_EVIDENCE", content="\n".join(graph_lines), header="GRAPH EVIDENCE"))
 
         return packet
+
+    def _build_planner_candidates_block(self) -> Optional[object]:
+        """A077: Build a prompt block with evidence-backed planner candidates."""
+        if not self._solve_context:
+            return None
+            
+        selection = self._solve_context_get(self._solve_context, "planner_selection")
+        if not selection or not getattr(selection, "candidates", []):
+            return None
+            
+        candidates = getattr(selection, "candidates", [])
+        lines = []
+        for c in candidates[:3]:
+            line = f"- {c.action_id}: {c.mode.value} (gain: {c.expected_gain:.1f})"
+            if c.predicted_observation:
+                line += f" | predicts: {c.predicted_observation}"
+            if c.evidence_path:
+                line += f" | evidence: {c.evidence_path}"
+            lines.append(line)
+            
+        from agents.arc3.prompts import PLANNER_CANDIDATES_SECTION
+        content = PLANNER_CANDIDATES_SECTION.format(planner_candidates="\n".join(lines))
+        
+        return ContentBlock(type="PLANNER_PROPOSALS", content=content, header="PLANNER PROPOSALS")
 
     def _build_navigation_packet(
         self,
@@ -4178,6 +6856,35 @@ class ARCOrchestrator:
 
         return None
 
+    def _validate_tool_payload(self, parsed: dict | None, tool: str) -> None:
+        """Validate that a parsed tool payload exists and is non-empty.
+
+        Emits a compact trace event and raises ValueError when the model
+        included the tool key but the payload was missing, None, or blank.
+        This prevents downstream incidental crashes when callers assume a
+        non-empty string payload (e.g., REPL code) and allows the failure
+        to be recorded as malformed model output.
+        """
+        try:
+            if not isinstance(parsed, dict):
+                return
+            if tool not in parsed:
+                return
+            val = parsed.get(tool)
+            # Treat None or empty/whitespace-only strings as malformed
+            if val is None or (isinstance(val, str) and not val.strip()):
+                # Record malformed output for downstream observability
+                self._emit_trace_event(
+                    "operation",
+                    "malformed_model_output",
+                    {"tool": tool},
+                    {"raw_preview": (str(parsed)[:200])},
+                )
+                raise ValueError(f"failed to parse tool payload for '{tool}': failed to parse (missing or blank)")
+        except Exception:
+            # Keep validation defensive: re-raise for the caller to handle.
+            raise
+
     @staticmethod
     def _normalize_action_id(action_id: Any) -> str | None:
         if action_id is None:
@@ -4339,6 +7046,27 @@ class ARCOrchestrator:
         candidates: List[tuple[str, tuple[int, int]]] = []
         seen: set[tuple[int, int]] = set()
 
+        # A040: Tier 0: Target Color Frontier (Bias toward goal objects/territory)
+        target_color_id = self._resolve_replan_target_color()
+        if target_color_id is not None and grid:
+            target_cells = [
+                (x, y)
+                for y, row in enumerate(grid)
+                for x, cell in enumerate(row)
+                if int(cell) == target_color_id
+            ]
+            if target_cells:
+                # Add neighbors of target cells (frontier)
+                for tx, ty in target_cells:
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            nx, ny = tx + dx, ty + dy
+                            if 0 <= nx < cols and 0 <= ny < rows:
+                                coord = (nx, ny)
+                                if coord not in seen:
+                                    seen.add(coord)
+                                    candidates.append(("target_color_frontier", coord))
+
         # Tier 1: Goal Vector
         if player_pos and goal_pos:
             for c in self._coords_along_vector(player_pos, goal_pos, margin=1):
@@ -4387,8 +7115,20 @@ class ARCOrchestrator:
                 seen.add(norm)
                 candidates.append(("fallback", norm))
 
-        return candidates or [("fallback", (0, 0))]
+        # A049: Tier 4: Quadrant Exploration (Diverse spatial coverage)
+        quads = [
+            (cols // 4, rows // 4),
+            (3 * cols // 4, rows // 4),
+            (cols // 4, 3 * rows // 4),
+            (3 * cols // 4, 3 * rows // 4),
+        ]
+        for c in quads:
+            norm = (max(0, min(63, int(c[0]))), max(0, min(63, int(c[1]))))
+            if norm not in seen:
+                seen.add(norm)
+                candidates.append(("quadrant_exploration", norm))
 
+        return candidates or [("fallback", (0, 0))]
     def _infer_action6_coordinates(self, observation: ARC3Observation) -> tuple[int, int]:
         """B143: Smarter coordinate selection with anti-clustering."""
         candidates_with_meta = self._candidate_action6_coordinates(observation)
@@ -4427,7 +7167,7 @@ class ARCOrchestrator:
             best_candidate: tuple[str, tuple[int, int]] | None = None
             best_score: tuple[int, int, int] | None = None
             for tier, coord in candidates_with_meta:
-                if coord in used_coords:
+                if coord in used_coords or coord in self._action6_no_effect_coords:
                     continue
                 if self._is_cluster_exhausted(coord, action6_attempts):
                     continue
@@ -4460,7 +7200,7 @@ class ARCOrchestrator:
             policy = "goal_directed"
 
         for tier, coord in candidates_with_meta:
-            if coord in used_coords:
+            if coord in used_coords or coord in self._action6_no_effect_coords:
                 continue
             
             # Anti-clustering skip
@@ -4478,12 +7218,16 @@ class ARCOrchestrator:
 
         # Emergency fallback: just use first unused or absolute first
         for _, coord in candidates_with_meta:
-            if coord not in used_coords:
+            if coord not in used_coords and coord not in self._action6_no_effect_coords:
                 return coord
         return candidates_with_meta[0][1]
 
     def _ensure_action6_coordinates(self, action: ARC3Action, observation: ARC3Observation) -> ARC3Action:
         normalized_id = self._normalize_action_id(action.get("action_id"))
+        
+        # A062: Check coordinate relevance
+        args_effective = self.get_args_effective(normalized_id)
+        
         if normalized_id != "ACTION6":
             if normalized_id and normalized_id != action.get("action_id"):
                 updated = dict(action)
@@ -4495,17 +7239,26 @@ class ARCOrchestrator:
         updated["action_id"] = normalized_id
         x = self._coerce_action6_coordinate(updated.get("x"))
         y = self._coerce_action6_coordinate(updated.get("y"))
-        inferred = x is None or y is None
-        if inferred:
-            x, y = self._infer_action6_coordinates(observation)
+        
+        # A062: If args are NOT effective, use a stable default (0,0)
+        if not args_effective:
+            x, y = 0, 0
+            inferred = True
+            reason = "coordinate_irrelevant_default"
+        else:
+            inferred = x is None or y is None
+            if inferred:
+                x, y = self._infer_action6_coordinates(observation)
+            reason = "targeting inferred coord" if inferred else "targeting coord"
+
         updated["x"] = x
         updated["y"] = y
+        updated["args_effective"] = args_effective
 
         rationale = str(updated.get("rationale") or "ACTION6 coordinate probe")
         coord_note = f"x={x}, y={y}"
         if coord_note not in rationale:
             prefix = f"{rationale}; " if rationale else ""
-            reason = "targeting inferred coord" if inferred else "targeting coord"
             updated["rationale"] = f"{prefix}{reason} ({coord_note})"
         return updated
 
@@ -4627,9 +7380,13 @@ class ARCOrchestrator:
         """Apply hard exploration guards and chunk enforcement (B109/B112/B133)."""
         hyp_ctx = self._hypothesis_context or {}
         coverage = hyp_ctx.get("action_coverage") or {}
+        step = len(self._step_history) + 1
+        self._prune_replan_temporal_blocks(step)
+        def _allowed(aid: str | None) -> bool:
+            return bool(aid in available_actions and not self._is_temporarily_blocked(aid, step))
         unexplored = [
             candidate for candidate in coverage.get("untested_actions", [])
-            if candidate in available_actions
+            if _allowed(candidate)
         ]
         observed_effects = {
             effect.get("action"): effect
@@ -4644,6 +7401,74 @@ class ARCOrchestrator:
         source = action.get("decision_source", "llm")
         active_chunk = (self._solve_context or {}).get("active_chunk")
         skip_chunk_enforcement = False  # Set True below for fallback decisions
+
+        # A058: Preserve original candidate action for trace auditing
+        if "original_candidate_id" not in action:
+            action["original_candidate_id"] = action_id
+
+        forced_action = self._consume_replan_forced_action(step, available_actions)
+        if forced_action and source != "autopilot":
+            productive_path = self._best_graph_productive_action_path(available_actions)
+            if productive_path:
+                productive_id = self._normalize_action_id(productive_path.get("action_id"))
+                if productive_id in available_actions:
+                    evidence_ids = productive_path.get("evidence_path_ids") or []
+                    action.update(
+                        {
+                            "action_id": productive_id,
+                            "x": action.get("x", 0),
+                            "y": action.get("y", 0),
+                            "rationale": (
+                                f"graph-backed exploit: preserved productive action {productive_id} "
+                                f"over replan forced probe. Original rationale: {rationale}"
+                            ),
+                            "decision_source": "policy_override",
+                            "override_reason": "productive_graph_path",
+                            "evidence_path": f"productive_path:{productive_id}:{','.join(evidence_ids[:3])}",
+                        }
+                    )
+                    self._emit_trace_event(
+                        "operation",
+                        "guard_override_reason",
+                        {"original": action_id, "override": productive_id},
+                        {
+                            "reason": "productive_graph_path",
+                            "policy": "replan_probe_suppressed",
+                            "support_count": productive_path.get("support_count", 0),
+                        },
+                    )
+                    return action
+            # A058: Bound replan-forced probes by run/window counters
+            total_probes = sum(1 for s in self._step_history if s.get("decision_source") == "replan_forced_probe")
+            recent_probes = sum(1 for s in self._step_history[-15:] if s.get("decision_source") == "replan_forced_probe")
+            
+            if total_probes < 6 and recent_probes < 3:
+                forced_id = self._normalize_action_id(forced_action.get("action_id"))
+                if self._is_temporarily_blocked(forced_id, step):
+                    forced_id = next((a for a in available_actions if _allowed(a)), forced_id)
+                
+                action.update(
+                    {
+                        "action_id": forced_id,
+                        "x": forced_action.get("x"),
+                        "y": forced_action.get("y"),
+                        "rationale": (
+                            f"replan perturbation: forced targeted probe {forced_id} "
+                            f"(reason={forced_action.get('reason')}). Original rationale: {rationale}"
+                        ),
+                        "decision_source": "replan_forced_probe",
+                        "override_reason": forced_action.get("reason") or "replan_perturbation",
+                    }
+                )
+                self._emit_trace_event(
+                    "operation",
+                    "guard_override_reason",
+                    {"original": action_id, "override": forced_id},
+                    {"reason": forced_action.get("reason"), "policy": "replan_probe", "total_probes": total_probes + 1}
+                )
+                return action
+            else:
+                logger.debug("A058: Replan probe budget exhausted (total=%d, recent=%d); skipping probe.", total_probes, recent_probes)
 
         # A023: proactive untested-action probe.
         #
@@ -4684,17 +7509,21 @@ class ARCOrchestrator:
                 except Exception:
                     pass
                 action.update({
-                    "action_id": forced,
-                    "rationale": (
-                        f"A023 proactive coverage probe: {forced} has not been "
-                        f"tried yet. Original rationale: {rationale}"
-                    ),
-                    "decision_source": "policy_untested_probe",
-                    "original_action": action_id,
-                    "adherence_ok": False,
+                   "action_id": forced,
+                   "rationale": (
+                       f"A023 proactive coverage probe: {forced} has not been "
+                       f"tried yet. Original rationale: {rationale}"
+                   ),
+                   "decision_source": "policy_untested_probe",
+                   "override_reason": "untested_action_probe",
+                   "original_action": action_id,
+                   "adherence_ok": False,
                 })
+                self._emit_trace_event("operation", "guard_override_reason", 
+                   {"original": action_id, "override": forced},
+                   {"reason": "untested_action_probe"}
+                )
                 return action
-
         # B209: Route->Execute adherence contract.
         # If route provided an expected action, enforce it unless we have an explicit override class.
         expected_action = (self._solve_context or {}).get("expected_action")
@@ -4714,7 +7543,25 @@ class ARCOrchestrator:
             or (coverage.get("top_two_low_value") is True)
         )
         if expected_action and expected_action in available_actions and action_id:
+            expected_progress = self._recent_action_progress(expected_action, lookback=16)
+            best_alt = None
+            best_alt_progress = expected_progress
+            for candidate in available_actions:
+                if candidate == expected_action or not _allowed(candidate):
+                    continue
+                cand_progress = self._recent_action_progress(candidate, lookback=16)
+                if cand_progress > best_alt_progress:
+                    best_alt_progress = cand_progress
+                    best_alt = candidate
+            weak_expected_action = expected_progress <= 0.001 and best_alt is not None and best_alt_progress >= 0.003
+
             if action_id != expected_action and source not in explicit_override_sources and not relax_adherence:
+                if weak_expected_action:
+                    action["expected_action"] = expected_action
+                    action["selected_action"] = action_id
+                    action["override_reason"] = "expected_action_low_progress"
+                    action["adherence_ok"] = False
+                    return action
                 self._emit_trace_event(
                     "operation",
                     "route_execute_adherence_enforced",
@@ -4731,9 +7578,15 @@ class ARCOrchestrator:
                         "decision_source": "policy_override",
                         "expected_action": expected_action,
                         "selected_action": action_id,
-                        "override_reason": "missing_explicit_override_reason",
+                        "override_reason": "route_adherence_enforced",
                         "adherence_ok": False,
                     }
+                )
+                self._emit_trace_event(
+                    "operation",
+                    "guard_override_reason",
+                    {"original": action_id, "override": expected_action},
+                    {"reason": "route_adherence_enforced", "policy": "planner_adherence"},
                 )
                 return action
             if action_id != expected_action and source not in explicit_override_sources and relax_adherence:
@@ -4750,6 +7603,57 @@ class ARCOrchestrator:
                 action["expected_action"] = expected_action
                 action["selected_action"] = action_id
                 action["adherence_ok"] = True
+
+        # A058: Terminal-reward exploitation: when a recent step produced terminal progress,
+        # keep that action in rotation briefly instead of immediately diffusing.
+        if source not in {"autopilot", "replan_forced_probe"}:
+            last_step = self._step_history[-1] if self._step_history else {}
+            hot_action = self._normalize_action_id(last_step.get("action_id"))
+            # A058: Use terminal_value_score instead of progress_reward (pixel churn)
+            hot_terminal = last_step.get("terminal_value_score")
+            try:
+                hot_terminal_val = float(hot_terminal or 0.0)
+            except (TypeError, ValueError):
+                hot_terminal_val = 0.0
+
+            hot_progress = last_step.get("progress_reward", last_step.get("reward"))
+            try:
+                hot_progress_val = float(hot_progress or 0.0)
+            except (TypeError, ValueError):
+                hot_progress_val = 0.0
+            exploit_reason = None
+            if hot_terminal_val > 0.0:
+                exploit_reason = "terminal_progress_exploit"
+            elif hot_progress_val >= 0.1:
+                exploit_reason = "high_progress_exploit"
+
+            if (
+                hot_action
+                and hot_action in available_actions
+                and hot_action != action_id
+                and _allowed(hot_action)
+                and exploit_reason
+            ):
+                score_label = "terminal_value_score" if exploit_reason == "terminal_progress_exploit" else "progress_reward"
+                score_value = hot_terminal_val if exploit_reason == "terminal_progress_exploit" else hot_progress_val
+                action.update(
+                    {
+                        "action_id": hot_action,
+                        "rationale": (
+                            f"policy override: recent positive {score_label}={score_value:.3f} "
+                            f"on {hot_action}; exploiting before switching. Original rationale: {rationale}"
+                        ),
+                        "decision_source": "policy_override",
+                        "override_reason": exploit_reason,
+                    }
+                )
+                self._emit_trace_event(
+                    "operation",
+                    "guard_override_reason",
+                    {"original": action_id, "override": hot_action},
+                    {"reason": exploit_reason, score_label: score_value},
+                )
+                return action
 
         # Rotation-specific heuristic removed (B213): do not inject puzzle-specific overrides here.
 
@@ -4796,7 +7700,7 @@ class ARCOrchestrator:
 
             if active_chunk and active_chunk.get("estimated_actions"):
                 for candidate in active_chunk["estimated_actions"]:
-                    if candidate == action_id or candidate not in available_actions:
+                    if candidate == action_id or not _allowed(candidate):
                         continue
                     if not self._should_skip_chunk_action(observed_effects.get(candidate)):
                         replacement = candidate
@@ -4826,9 +7730,11 @@ class ARCOrchestrator:
                     ),
                 )
                 replacement = viable_ranked[0].get("action")
+                if not _allowed(replacement):
+                    replacement = None
 
             if replacement is None:
-                alternatives = [candidate for candidate in available_actions if candidate != action_id]
+                alternatives = [candidate for candidate in available_actions if candidate != action_id and _allowed(candidate)]
                 if alternatives:
                     replacement = min(
                         alternatives,
@@ -4853,11 +7759,12 @@ class ARCOrchestrator:
                         f"switching to {replacement}. Original rationale: {rationale}"
                     ),
                     "decision_source": "policy_override",
+                    "override_reason": "stale_low_value_decay",
                 })
                 return action
 
         # B141: Blocked action enforcement
-        if action_id in self._blocked_actions:
+        if action_id in self._blocked_actions or self._is_temporarily_blocked(action_id, step):
             if unexplored:
                 forced = unexplored[0]
                 self._emit_trace_event("operation", "guard_override_reason", 
@@ -4868,7 +7775,21 @@ class ARCOrchestrator:
                     "action_id": forced,
                     "rationale": f"policy override: {action_id} is blocked due to persistent no-progress; forcing exploration of {forced}.",
                     "decision_source": "policy_override",
+                    "override_reason": "persistent_no_progress_blocked",
                 })
+                return action
+            fallback = next((candidate for candidate in available_actions if _allowed(candidate)), None)
+            if fallback and fallback != action_id:
+                action.update({
+                    "action_id": fallback,
+                    "rationale": f"policy override: {action_id} is temporarily blocked post-replan; switching to {fallback}.",
+                    "decision_source": "policy_override",
+                    "override_reason": "action_blocked_post_replan",
+                })
+                self._emit_trace_event("operation", "guard_override_reason", 
+                    {"original": action_id, "override": fallback},
+                    {"reason": "action blocked post-replan fallback"}
+                )
                 return action
 
         # B133 revised: When LLM failed (fallback), skip chunk enforcement but
@@ -4887,7 +7808,7 @@ class ARCOrchestrator:
             # B112: Only hard-enforce guidance-grade sources (bfs, directional).
             if chunk_source == "bfs":
                 first_planned = suggested[0] if suggested else None
-                if first_planned and first_planned in available_actions and not self._should_skip_chunk_action(observed_effects.get(first_planned)):
+                if first_planned and _allowed(first_planned) and not self._should_skip_chunk_action(observed_effects.get(first_planned)):
                     chunk_action = first_planned
                     if self.solve_engine._active_chunk and self.solve_engine._active_chunk.estimated_actions:
                         try:
@@ -4899,12 +7820,17 @@ class ARCOrchestrator:
                             "action_id": chunk_action,
                             "rationale": f"policy override: enforcing bfs chunk '{active_chunk.get('description', '')}'. Original rationale: {rationale}",
                             "decision_source": "policy_override",
+                            "override_reason": "bfs_chunk_enforced",
                         })
+                        self._emit_trace_event("operation", "guard_override_reason", 
+                            {"original": action_id, "override": chunk_action},
+                            {"reason": "bfs_chunk_enforced", "chunk_id": active_chunk.get("id")}
+                        )
                         return action
                     return action
 
             elif chunk_source == "directional":
-                valid_suggested = [a for a in suggested if a in available_actions]
+                valid_suggested = [a for a in suggested if _allowed(a)]
                 viable_suggested = [
                     candidate for candidate in valid_suggested
                     if not self._should_skip_chunk_action(observed_effects.get(candidate))
@@ -4923,13 +7849,18 @@ class ARCOrchestrator:
                             "action_id": chunk_action,
                             "rationale": f"policy override: enforcing directional chunk '{active_chunk.get('description', '')}'. Original rationale: {rationale}",
                             "decision_source": "policy_override",
+                            "override_reason": "directional_chunk_enforced",
                         })
+                        self._emit_trace_event("operation", "guard_override_reason", 
+                            {"original": action_id, "override": chunk_action},
+                            {"reason": "directional_chunk_enforced", "chunk_id": active_chunk.get("id")}
+                        )
                         return action
                     return action
                 elif valid_suggested and self.solve_engine._active_chunk and self.solve_engine._active_chunk.estimated_actions:
                     chunk_list = self.solve_engine._active_chunk.estimated_actions
                     while chunk_list and (
-                        chunk_list[0] not in available_actions
+                        not _allowed(chunk_list[0])
                         or self._should_skip_chunk_action(observed_effects.get(chunk_list[0]))
                     ):
                         chunk_list.pop(0)
@@ -4953,6 +7884,7 @@ class ARCOrchestrator:
                         "action_id": forced,
                         "rationale": f"policy override: repeated {action_id} on same frame; forcing exploration of {forced}.",
                         "decision_source": "policy_override",
+                        "override_reason": "repeated_action_same_frame",
                     })
                     return action
             else:
@@ -5002,7 +7934,12 @@ class ARCOrchestrator:
                 "action_id": forced,
                 "rationale": f"exploration step {self._forced_exploration_count}/{max_explore} (level {self._current_level})",
                 "decision_source": "policy_override",
+                "override_reason": "forced_exploration",
             })
+            self._emit_trace_event("operation", "guard_override_reason", 
+                {"original": action_id, "override": forced},
+                {"reason": "forced_exploration", "step": self._forced_exploration_count, "max": max_explore}
+            )
             return action
 
         ranked_effects = [
@@ -5011,13 +7948,18 @@ class ARCOrchestrator:
         ]
 
         if coverage.get("initial_exploration_complete") and ranked_effects:
-            preferred = self._select_ranked_action(ranked_effects)
+            preferred = self._select_ranked_action([e for e in ranked_effects if _allowed(e.get("action"))])
             if preferred and action_id != preferred:
                 action.update({
                     "action_id": preferred,
                     "rationale": f"policy override: post-exploration ranking prefers {preferred} over {action_id}. Original rationale: {rationale}",
                     "decision_source": "policy_override",
+                    "override_reason": "ranked_selection_enforced",
                 })
+                self._emit_trace_event("operation", "guard_override_reason", 
+                    {"original": action_id, "override": preferred},
+                    {"reason": "ranked_selection_enforced"}
+                )
                 return action
 
         # B144/B145/B146: Plateau-aware exploitation policy
@@ -5055,7 +7997,12 @@ class ARCOrchestrator:
                                 f"{top_fatigue} zero-reward uses; trying secondary {secondary}."
                             ),
                             "decision_source": "fatigue_override",
+                            "override_reason": "plateau_fatigue_escape",
                         })
+                        self._emit_trace_event("operation", "guard_override_reason", 
+                            {"original": action_id, "override": secondary},
+                            {"reason": "plateau_fatigue_escape", "fatigue": top_fatigue}
+                        )
                         return action
 
                 # Check if we are trying to switch away from the authoritative locked family
@@ -5086,7 +8033,12 @@ class ARCOrchestrator:
                             "action_id": top_family,
                             "rationale": f"plateau lock: exploiting authoritative family {top_family} (switch budget exhausted). Original: {rationale}",
                             "decision_source": "plateau_override",
+                            "override_reason": "plateau_budget_exhausted",
                         })
+                        self._emit_trace_event("operation", "guard_override_reason", 
+                            {"original": action_id, "override": top_family},
+                            {"reason": "plateau_budget_exhausted"}
+                        )
                         return action
                 else:
                     # Consistent with authoritative lock
@@ -5121,7 +8073,12 @@ class ARCOrchestrator:
                         f"rotating to alternative {best_alt}."
                     ),
                     "decision_source": "fatigue_override",
+                    "override_reason": "general_fatigue_rotation",
                 })
+                self._emit_trace_event("operation", "guard_override_reason", 
+                    {"original": action_id, "override": best_alt},
+                    {"reason": "general_fatigue_rotation", "fatigue": fatigue_count}
+                )
                 return action
 
         return action
@@ -5355,26 +8312,109 @@ class ARCOrchestrator:
         return False
 
     def _memory_query(self, observation: ARC3Observation) -> str:
-        """B155: Build memory query from grid structural characteristics."""
+        """Build a structured graph-oriented retrieval query from puzzle facets."""
         grid = observation.get("grid") or []
         if not grid:
             return "ARC puzzle transformation"
 
         chars = grid_characteristic_summary(grid)
         available = observation.get("available_actions") or []
+        solve_ctx = self._solve_context or {}
+        archetype = str(solve_ctx.get("archetype") or "unknown")
+        goal = solve_ctx.get("goal") or {}
+        if isinstance(goal, dict):
+            goal_color = goal.get("target_color")
+        else:
+            goal_color = None
 
         query_parts = [
-            "ARC",
-            f"{chars['rows']}x{chars['cols']} grid",
-            f"{chars['n_colors']} colors",
-            f"{len(available)} actions",
+            "domain:arc",
+            "kind:memory_recall",
+            f"grid_rows:{chars['rows']}",
+            f"grid_cols:{chars['cols']}",
+            f"n_colors:{chars['n_colors']}",
+            f"n_actions:{len(available)}",
+            f"archetype:{archetype}",
+            f"available_actions:{','.join(sorted(str(a) for a in available))}" if available else "available_actions:none",
+            f"goal_color:{goal_color}" if goal_color is not None else "goal_color:unknown",
+            f"fingerprint:{chars['rows']}x{chars['cols']}-{chars['n_colors']}-{len(available)}",
         ]
         if chars.get("symmetry"):
             for sym in chars["symmetry"]:
-                query_parts.append(f"{sym} symmetry")
+                query_parts.append(f"symmetry:{sym}")
 
+        # Keep a short human-readable prefix for legacy handlers that still do
+        # token matching on natural language fragments.
+        query_parts.extend(
+            [
+                "ARC",
+                f"{chars['rows']}x{chars['cols']} grid",
+                f"{chars['n_colors']} colors",
+                f"{len(available)} actions",
+            ]
+        )
 
         return " ".join(query_parts)
+
+    def _plan_recall_query(self, observation: ARC3Observation) -> str:
+        """Build a structured query for cross-puzzle plan recall."""
+        grid = observation.get("grid") or []
+        chars = grid_characteristic_summary(grid) if grid else {"rows": 0, "cols": 0, "n_colors": 0, "n_regions": 0}
+        available = observation.get("available_actions") or []
+        solve_ctx = self._solve_context or {}
+        archetype = str(solve_ctx.get("archetype") or "unknown")
+        goal = solve_ctx.get("goal") or {}
+        if isinstance(goal, dict):
+            goal_color = goal.get("target_color")
+        else:
+            goal_color = None
+        parts = [
+            "domain:arc",
+            "kind:plan_recall",
+            f"archetype:{archetype}",
+            f"grid_rows:{chars.get('rows', 0)}",
+            f"grid_cols:{chars.get('cols', 0)}",
+            f"n_colors:{chars.get('n_colors', 0)}",
+            f"n_regions:{chars.get('n_regions', 0)}",
+            f"n_actions:{len(available)}",
+            f"available_actions:{','.join(sorted(str(a) for a in available))}" if available else "available_actions:none",
+            f"goal_color:{goal_color}" if goal_color is not None else "goal_color:unknown",
+            f"fingerprint:{chars.get('rows', 0)}x{chars.get('cols', 0)}-{chars.get('n_colors', 0)}-{len(available)}-{chars.get('n_regions', 0)}",
+        ]
+        return " ".join(parts)
+
+    def _analogical_query(self, observation: ARC3Observation) -> str:
+        """Build a stable puzzle fingerprint query for analogical graph recall."""
+        grid = observation.get("grid") or []
+        if not grid:
+            return "domain:arc kind:analogical_search fingerprint:unknown"
+        chars = grid_characteristic_summary(grid)
+        available = observation.get("available_actions") or []
+        solve_ctx = self._solve_context or {}
+        archetype = str(solve_ctx.get("archetype") or "unknown")
+        return " ".join(
+            [
+                "domain:arc",
+                "kind:analogical_search",
+                f"archetype:{archetype}",
+                f"fingerprint:{chars['rows']}x{chars['cols']}-{chars['n_colors']}-{len(available)}-{chars.get('n_regions', 0)}",
+                f"available_actions:{','.join(sorted(str(a) for a in available))}" if available else "available_actions:none",
+            ]
+        )
+
+    @staticmethod
+    def _validate_lesson_upsert_result(payload: Any) -> tuple[bool, str]:
+        """Treat missing lesson ids as failed persistence (B214 guard)."""
+        if not isinstance(payload, dict):
+            return False, "non_dict_payload"
+        lesson_id = payload.get("lesson_id") or payload.get("id")
+        if lesson_id not in (None, "", "None"):
+            return True, "ok"
+        if payload.get("status") == "queued_offline":
+            return False, "queued_offline"
+        if payload.get("status") == "error" or payload.get("error"):
+            return False, "tool_error"
+        return False, "missing_lesson_id"
 
     # _detect_split_map_rotate_cross removed as part of B213: puzzle-specific heuristic reverted
 
@@ -5810,9 +8850,11 @@ class ARCOrchestrator:
         if not history:
             return "No steps taken yet."
         
-        # A013: Collapse adjacent identical rationales
+        # A013 + prompt cap: collapse adjacent identical rationales and
+        # shrink to a single-step window on long runs to avoid linear prompt growth.
         compact_history = []
-        for record in history[-self.MAX_PROMPT_HISTORY :]:
+        history_window = 1 if len(history) >= 10 else self.MAX_PROMPT_HISTORY
+        for record in history[-history_window:]:
             action_id = record.get("action_id")
             rationale = self._truncate_text(record.get("rationale") or "", 120)
             reward = record.get("reward")
@@ -6009,18 +9051,128 @@ class ARCOrchestrator:
             "coarse_map": self._coarse_grid_summary(grid, block_count=block_count),
         }
 
+    def _update_mechanic_world_model(
+        self,
+        *,
+        step_num: int,
+        action_id: str,
+        observation: ARC3Observation,
+        record: dict,
+    ) -> tuple[Optional[MechanicGraphSnapshot], Optional[GraphTransformation]]:
+        """A101-A105 live integration: compile frame objects into graph beliefs.
+
+        This is deliberately local and bounded. It turns the current frame into an
+        object/relation graph, induces explicit goal hypotheses, and records the
+        graph transformation caused by the just-taken action.
+        """
+        grid = observation.get("grid") or []
+        if not grid:
+            return None, None
+
+        frame_hash = str(observation.get("frame_hash") or record.get("frame_hash") or f"step-{step_num}")
+        snapshot = self.mechanic_graph_extractor.extract(
+            grid=grid,
+            frame_hash=frame_hash,
+            step=step_num,
+        )
+        self.world_model.apply_mechanic_graph_snapshot(snapshot)
+
+        objects_for_goal = [
+            {
+                "id": obj.id,
+                "signature": obj.signature,
+                "color": obj.color,
+                "shape_kind": obj.shape_kind,
+                "bbox": obj.bbox,
+                "centroid": obj.centroid,
+                "area": obj.area,
+                "confidence": obj.confidence,
+            }
+            for obj in snapshot.objects.values()
+        ]
+
+        env_signals = record.get("env_signals") if isinstance(record.get("env_signals"), dict) else {}
+        available_actions = list(observation.get("available_actions") or record.get("available_actions") or [])
+        terminal_context = {
+            "done": bool(record.get("done")),
+            "reward": record.get("reward"),
+            "state": observation.get("state"),
+            "terminal_goal_distance": record.get("terminal_goal_distance"),
+            "terminal_progress_trend": record.get("terminal_progress_trend"),
+            "levels_completed": env_signals.get("levels_completed", 0) if isinstance(env_signals, dict) else 0,
+            "available_actions": available_actions,
+            "coordinate_click_available": "ACTION6" in available_actions,
+        }
+        goal_hypotheses = self.goal_hypothesis_inducer.induce(
+            objects_for_goal,
+            self.world_model,
+            terminal_context,
+            env_signals=env_signals,
+        )
+        for hypothesis in goal_hypotheses:
+            self.world_model.upsert_goal_hypothesis(hypothesis)
+
+        active_goals = self.world_model.get_active_goal_hypotheses(limit=3)
+        try:
+            click_candidates = self.click_candidate_generator.generate(
+                mechanic_graph_snapshot=snapshot,
+                active_goal_hypotheses=active_goals,
+                limit=32,
+            )
+            click_candidate_rows = [candidate.to_dict() for candidate in click_candidates]
+            self.world_model.upsert_click_candidates(click_candidate_rows, frame_hash)
+            record["click_candidate_count"] = len(click_candidate_rows)
+            record["top_click_candidate_ids"] = [row.get("id") for row in click_candidate_rows[:5]]
+        except Exception:
+            logger.debug("A107: click candidate generation failed", exc_info=True)
+        active_goal = active_goals[0] if active_goals else {}
+        transform = None
+        if self._last_mechanic_graph_snapshot is not None:
+            transform = self.graph_transformation_learner.diff(
+                self._last_mechanic_graph_snapshot,
+                snapshot,
+                {"action_id": action_id, "step": step_num},
+                active_goal_hypotheses=active_goals,
+            )
+            if transform is not None:
+                self.world_model.record_graph_transformation(transform)
+
+        self._last_mechanic_graph_snapshot = snapshot
+
+        transform_dict = transform.to_dict() if transform is not None and hasattr(transform, "to_dict") else {}
+        record.update(
+            {
+                "active_goal_hypothesis_id": active_goal.get("id"),
+                "active_goal_type": active_goal.get("goal_type"),
+                "active_goal_confidence": float(active_goal.get("confidence", 0.0) or 0.0),
+                "active_goal_evidence_count": len(active_goal.get("evidence_path_ids") or []),
+                "mechanic_graph_object_count": len(snapshot.objects),
+                "mechanic_graph_relation_count": len(snapshot.relations),
+                "mechanic_graph_configuration_hash": snapshot.configuration_hash,
+                "configuration_hash_current": snapshot.configuration_hash,
+                "configuration_hash_after_action": snapshot.configuration_hash,
+                "graph_transform_class": transform_dict.get("transform_class"),
+                "graph_transform_goal_relevance": float(transform_dict.get("goal_relevance", 0.0) or 0.0),
+                "affected_mechanic_objects_count": len(transform_dict.get("affected_object_ids") or []),
+            }
+        )
+        return snapshot, transform
+
     # ------------------------------------------------------------------
 
-    def record_step_result(self, reward: float, done: bool, next_observation: Optional[ARC3Observation] = None) -> None:
+    def record_step_result(self, reward: float, done: bool, next_observation: Optional[ARC3Observation] = None, reward_components: Optional[dict] = None) -> None:
         if not self._step_history:
             return
         record = self._step_history[-1]
         record["reward"] = reward
         record["done"] = done
+        if reward_components:
+            record["reward_components"] = reward_components
 
         # B133: Track frame hash for this action to detect genuine repetition
         action_id = record.get("action_id")
         board_before = record.get("board_before")
+        frame_hash = None
         if action_id and board_before:
             frame_hash = board_before.get("frame_hash")
             if frame_hash:
@@ -6052,6 +9204,17 @@ class ARCOrchestrator:
                         "n_cells_changed": delta.n_cells_changed,
                         "direction": delta.direction
                     }
+
+                    # A040: Blacklist ACTION6 coordinates that produced no_effect
+                    if action_id == "ACTION6" and delta.apparent_effect == "no_effect":
+                        try:
+                            ax = self._coerce_action6_coordinate(record.get("x"))
+                            ay = self._coerce_action6_coordinate(record.get("y"))
+                            if ax is not None and ay is not None:
+                                self._action6_no_effect_coords.add((ax, ay))
+                                logger.debug("A040: Blacklisting ACTION6 coordinate (%d, %d) due to no_effect", ax, ay)
+                        except Exception:
+                            pass
                     
                     # B161: ACTION5 effect analysis
                     if action_id == "ACTION5" and delta.n_cells_changed > 30:
@@ -6062,6 +9225,28 @@ class ARCOrchestrator:
                             "step": len(self._step_history)
                         }
                     
+                    # A062: Update coordinate relevance
+                    if action_id in ("ACTION6", "ACTION5") or (isinstance(action_id, str) and "ACTION" in action_id):
+                        try:
+                            rx = self._coerce_action6_coordinate(record.get("x"))
+                            ry = self._coerce_action6_coordinate(record.get("y"))
+                            if rx is not None and ry is not None:
+                                self._update_coordinate_relevance(action_id, (rx, ry), delta.cells_changed)
+                        except Exception:
+                            pass
+                    
+                    # A063: Compute object-centric progress
+                    try:
+                        roles = (self._solve_context or {}).get("object_roles", {})
+                        obj_progress = diff_engine.compute_object_progress(self._last_grid, curr_grid, roles)
+                        record["object_progress"] = {
+                            "score": obj_progress.score,
+                            "summary": obj_progress.summary,
+                            "components": obj_progress.components
+                        }
+                    except Exception as exc:
+                        logger.warning("A063: object progress computation failed: %s", exc)
+
                     # Update last_grid for next step
                     self._last_grid = curr_grid
             except Exception as exc:
@@ -6074,15 +9259,152 @@ class ARCOrchestrator:
             # Keep only last 5 frames
             self._recent_frame_hashes = self._recent_frame_hashes[-5:]
 
-        # B89: Track no-progress steps (reward = 0)
-        if reward == 0.0:
+        # A066: meaningful progress gate
+        # If we have reward_components, use its meaningful_progress flag.
+        # Fallback to reward > 0 for legacy callers.
+        meaningful = bool(reward_components.get("meaningful_progress", False)) if reward_components else (reward > 0)
+
+        # A070: Terminal progress scoring
+        if next_observation:
+            self._update_terminal_progress(next_observation, record)
+
+        # A073: Update World Model Graph
+        try:
+            step_num = len(self._step_history)
+            state_hash = next_observation.get("frame_hash") if next_observation else ""
+            if state_hash:
+                state_id = self.world_model.record_state(step_num, state_hash)
+                action_id = record.get("action_id", "unknown")
+                args = {k: record.get(k) for k in ("x", "y") if k in record}
+                action_identity = record.get("action_identity") or build_action_identity(
+                    action_id,
+                    args.get("x"),
+                    args.get("y"),
+                )
+                record["action_identity"] = action_identity
+                record["coordinate_required"] = action_id in COORDINATE_REQUIRED_ACTIONS
+                record["missing_coordinate_click"] = bool(
+                    record["coordinate_required"] and (args.get("x") is None or args.get("y") is None)
+                )
+                self.world_model.record_action(step_num, action_id, args, state_id)
+                obs_id = self.world_model.record_observation(
+                    step_num, state_hash, 
+                    reward, 
+                    float(getattr(self._solve_context, "terminal_value_score", 0.0) if self._solve_context else 0.0)
+                )
+
+                graph_transform = None
+                try:
+                    action_for_graph = record.get("action_id", "unknown")
+                    _, graph_transform = self._update_mechanic_world_model(
+                        step_num=step_num,
+                        action_id=action_for_graph,
+                        observation=next_observation,
+                        record=record,
+                    )
+                except Exception:
+                    logger.debug("A101-A105: mechanic world model update failed", exc_info=True)
+                
+                # A074: Compile step telemetry into world model claims
+                try:
+                    prev_hash = self._step_history[-2].get("board_before", {}).get("frame_hash") if len(self._step_history) >= 2 else None
+                    if not prev_hash and self._last_grid:
+                        # Fallback for step 0 or manual grid tracking
+                        pass
+                        
+                    delta = self.world_model_compiler.compile_step(
+                        step=step_num,
+                        prev_hash=prev_hash,
+                        curr_hash=state_hash,
+                        action=record,
+                        reward_components=reward_components or {},
+                        terminal_trend=record.get("terminal_progress_trend", "flat"),
+                        object_progress=record.get("object_progress", {}),
+                        goal_distance=record.get("terminal_goal_distance"),
+                        available_actions=list(next_observation.get("available_actions") or [])
+                    )
+                    if graph_transform is not None:
+                        self.world_model_compiler.apply_graph_transformation(graph_transform, delta)
+                    self.world_model.apply_compiled_delta(delta)
+                    self._compiled_delta = delta
+                    effect_claim = next((c for c in delta.claims if hasattr(c, "effect_class")), None)
+                    effect_class = getattr(effect_claim, "effect_class", "unknown") if effect_claim is not None else "unknown"
+                    terminal_alignment = getattr(effect_claim, "terminal_alignment", None) if effect_claim is not None else None
+                    effect_props = getattr(effect_claim, "props", {}) if effect_claim is not None else {}
+                    # Store delta in record for trace
+                    record["compiled_world_delta"] = {
+                        "claims_count": len(delta.claims),
+                        "failure_signal": delta.failure_signal,
+                        "effect_class": effect_class,
+                        "terminal_alignment": terminal_alignment,
+                        "terminal_aligned": bool(effect_props.get("terminal_aligned", False)),
+                        "goal_distance_before": effect_props.get("goal_distance_before"),
+                        "goal_distance_after": effect_props.get("goal_distance_after"),
+                        "goal_distance_delta": effect_props.get("goal_distance_delta"),
+                        "distance_trend": effect_props.get("distance_trend"),
+                    }
+                    if terminal_alignment:
+                        record["terminal_alignment"] = terminal_alignment
+                    if (
+                        effect_class in ("object_progress", "meaningful_progress")
+                        and terminal_alignment in ("local_only", "regressing", "oscillating")
+                    ):
+                        meaningful = False
+                        if reward_components is None:
+                            reward_components = {}
+                        reward_components["meaningful_progress"] = False
+                        reward_components["progress_class"] = "local_object_progress"
+                        reward_components["progress_gate_reason"] = f"{terminal_alignment}_without_terminal_progress"
+                        record["meaningful_progress"] = False
+                        record["progress_class"] = "local_object_progress"
+                        record["progress_gate_reason"] = reward_components["progress_gate_reason"]
+                    self._record_prediction_feedback(record, obs_id)
+                    try:
+                        frame_hash_before = (record.get("board_before") or {}).get("frame_hash")
+                        telemetry = extract_click_telemetry_from_step(
+                            record,
+                            frame_hash_before=frame_hash_before,
+                            frame_hash_after=state_hash,
+                            config_hash_before=record.get("configuration_hash_before_action"),
+                            config_hash_after=record.get("configuration_hash_after_action"),
+                        )
+                        if telemetry is not None:
+                            self.click_telemetry_store.record_click_outcome(telemetry)
+                            click_row = telemetry.to_dict()
+                            record.update(click_row)
+                            record["selected_click_candidate_id"] = click_row.get("click_candidate_id")
+                            record["selected_click_candidate_role"] = click_row.get("click_candidate_role")
+                            record["selected_click_candidate_rank"] = click_row.get("click_candidate_rank")
+                            record["click_summary"] = self.click_telemetry_store.get_click_summary()
+                            failure_message = self.click_telemetry_store.get_failure_message()
+                            if failure_message:
+                                record["click_failure_message"] = failure_message
+                    except Exception:
+                        logger.debug("A110: click telemetry extraction failed", exc_info=True)
+                    if delta.failure_signal:
+                         self._emit_trace_event("operation", "world_model_failure_signal", {"signal": delta.failure_signal, "step": step_num})
+                except Exception:
+                    logger.debug("A074: world model compilation failed", exc_info=True)
+        except Exception:
+            logger.debug("A073: world model update failed", exc_info=True)
+
+        # B89: Track no-progress steps
+        if not meaningful:
             self._no_progress_step_count += 1
             self._consecutive_no_progress_steps += 1
             # B149: Increment fatigue
             if action_id:
                 self._action_fatigue[action_id] = self._action_fatigue.get(action_id, 0) + 1
+            # Do not reuse cached decisions across no-progress outcomes.
+            self._last_llm_action = None
+            self._last_observation_fingerprint = None
         else:
             self._consecutive_no_progress_steps = 0
+            self._replan_perturbation_count = 0
+            self._replan_goal_rotation_count = 0
+            self._replan_goal_colors_tried.clear()
+            self._replan_recent_goal_colors.clear()
+            self._action6_no_effect_coords.clear()
             # B177: Clear blocks on progress
             self._blocked_actions.clear()
             # B149: Productive action — reset its fatigue
@@ -6092,6 +9414,23 @@ class ARCOrchestrator:
         # B175: Clear blocked axes on significant movement or reward
         if reward > 0 or (centroid_shift > 3.0):
             self._blocked_axes.clear()
+            self._action6_no_effect_coords.clear()
+
+        # A065: Update hypothesis workspace
+        try:
+            step_num = len(self._step_history)
+            self._update_hypothesis_workspace(step_num, next_obs=next_observation)
+        except Exception as exc:
+            logger.warning("A065: hypothesis workspace update failed: %s", exc)
+
+        # Also invalidate reuse cache when we observed no frame delta.
+        try:
+            frame_delta = record.get("frame_delta") or {}
+            if int(frame_delta.get("n_cells_changed", 0) or 0) == 0:
+                self._last_llm_action = None
+                self._last_observation_fingerprint = None
+        except Exception:
+            pass
 
     def reset_for_retry(self, attempt: int) -> None:
         """Reset internal state for a retry attempt while preserving history.
@@ -6105,6 +9444,10 @@ class ARCOrchestrator:
         self._plan_steps = []
         self._consecutive_no_progress_steps = 0
         self._untested_probes_forced_in_run = 0
+        self._replan_perturbation_count = 0
+        self._replan_goal_rotation_count = 0
+        self._replan_goal_colors_tried.clear()
+        self._replan_recent_goal_colors.clear()
         self._last_coverage_snapshot_step = None
         self._blocked_actions = set()
         self._exploitation_switch_budget = 2
@@ -6118,6 +9461,8 @@ class ARCOrchestrator:
             "step": len(self._step_history) + 1,
             "action_id": "GAME_OVER",
             "rationale": f"Attempt {attempt} failed — resetting with new strategy",
+            "decision_source": "harness_retry",
+            "override_reason": "attempt_failure_reset",
             "reward": -1.0,
             "done": True,
         })

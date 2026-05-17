@@ -10,6 +10,7 @@ import pytest
 
 from benchmarks.ab_harness import ABTask
 from agents.arc3.checkpoint import CheckpointManager, RunCheckpoint
+from agents.arc3.solver import TerminalGroundedScore
 
 
 def _sample_tasks() -> list[ABTask]:
@@ -58,6 +59,25 @@ def test_mark_complete_persists(tmp_path):
     mgr.mark_complete(cp, "task-1", "plan-1", {"task_id": "task-1"})
     cp2 = mgr.load_or_create(_sample_tasks())
     assert cp2.tasks["task-1"].status == "complete"
+
+
+def test_mark_complete_serializes_terminal_grounded_score(tmp_path):
+    CheckpointManager.CHECKPOINT_DIR = tmp_path
+    mgr = CheckpointManager("test")
+    cp = mgr.load_or_create(_sample_tasks())
+    mgr.mark_complete(
+        cp,
+        "task-1",
+        "plan-1",
+        {
+            "task_id": "task-1",
+            "terminal_score": TerminalGroundedScore(total_score=0.25, reason="checkpoint"),
+        },
+    )
+
+    cp2 = mgr.load_or_create(_sample_tasks())
+    assert cp2.tasks["task-1"].status == "complete"
+    assert cp2.tasks["task-1"].result["terminal_score"]["reason"] == "checkpoint"
 
 
 def test_save_is_atomic(tmp_path, monkeypatch):

@@ -1,6 +1,12 @@
 import pytest
 from agents.arc3.grid_analysis import GridDiffEngine, PatternRegion, RegionComparison
-from agents.arc3.solver import PatternMatchTracker, RoleType, ObjectRoleMapper, ObjectRole
+from agents.arc3.solver import (
+    PatternMatchTracker,
+    RoleType,
+    ObjectRoleMapper,
+    ObjectRole,
+    HybridProgressEvidence,
+)
 from agents.arc3.orchestrator import ARCOrchestrator
 from unittest.mock import MagicMock, AsyncMock
 
@@ -71,9 +77,10 @@ class TestRegionComparison:
             location_hint="center"
         )
         result = engine.compare_regions(a, b, allow_color_shift=True)
-        assert result.similarity == 1.0
+        # A050: similarity uses real foreground match ratio; color shift is flagged separately.
+        assert result.similarity == 0.0
         assert result.color_shift == {1: 3, 2: 4}
-        assert result.description == "color-shifted match"
+        assert "color-shifted" in result.description
 
     def test_size_mismatch_small(self):
         """B168: Small size differences (<=2) use overlap comparison instead of rejecting."""
@@ -233,14 +240,32 @@ class TestOrchestratorB167:
         assert orchestrator._pattern_tracker.phase == "intermediate"
         assert brain.current_truth.called
 
-    def test_autopilot_phase_aware(self):
+    @pytest.mark.asyncio
+    async def test_autopilot_phase_aware(self):
         orchestrator = ARCOrchestrator(MagicMock(), MagicMock(), "session-1", MagicMock(), {})
         
         # Mock pattern tracker update to return expected state
-        orchestrator._pattern_tracker.update = MagicMock(return_value={
-            "phase": "intermediate",
-            "similarity": 0.5
-        })
+        orchestrator._pattern_tracker.update = AsyncMock(return_value=HybridProgressEvidence(
+            local_progress=0.4,
+            local_distance=None,
+            local_monotone_steps=1,
+            scene_wl_hash="abc",
+            scene_node_count=2,
+            graph_text_score=0.4,
+            graph_text_evidence_count=1,
+            graph_text_top_lesson_ids=[],
+            graph_vector_score=0.3,
+            graph_vector_top_hash=None,
+            graph_vector_top_trajectory_id=None,
+            graph_prior_score=None,
+            graph_prior_evidence_count=0,
+            combined_similarity=0.4,
+            combined_confidence=0.5,
+            channel_agreement_range=0.1,
+            finish_mode_allowed=False,
+            phase="intermediate",
+            reason="test",
+        ))
         
         # Mock solve context with player and intermediate
         orchestrator._solve_context = {
@@ -251,7 +276,7 @@ class TestOrchestratorB167:
         }
         
         # Step 0: should target intermediate
-        action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"])
+        action = await orchestrator._try_autopilot_async_enriched({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"])
         assert action is not None
         assert "intermediate" in action["rationale"]
         # Moving from 0,0 to 5,5 -> should move down (ACTION2) or right (ACTION4)
@@ -259,19 +284,36 @@ class TestOrchestratorB167:
         
         # If we are near intermediate, should interact
         orchestrator._solve_context["object_roles"]["1"]["estimated_position"] = {"row": 4.1, "col": 4.1}
-        action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION5"])
+        action = await orchestrator._try_autopilot_async_enriched({"grid": [[0]*10 for _ in range(10)]}, ["ACTION5"])
         assert action is not None
         assert action["action_id"] == "ACTION5"
         assert (5, 5) in orchestrator._visited_intermediates
         
         # After visit, if phase becomes finish, should target goal
-        orchestrator._pattern_tracker.update.return_value = {
-            "phase": "finish",
-            "similarity": 1.0
-        }
+        orchestrator._pattern_tracker.update.return_value = HybridProgressEvidence(
+            local_progress=0.9,
+            local_distance=None,
+            local_monotone_steps=3,
+            scene_wl_hash="abc2",
+            scene_node_count=2,
+            graph_text_score=0.9,
+            graph_text_evidence_count=3,
+            graph_text_top_lesson_ids=["x"],
+            graph_vector_score=0.8,
+            graph_vector_top_hash="h",
+            graph_vector_top_trajectory_id=None,
+            graph_prior_score=0.95,
+            graph_prior_evidence_count=2,
+            combined_similarity=0.9,
+            combined_confidence=0.9,
+            channel_agreement_range=0.1,
+            finish_mode_allowed=True,
+            phase="finish",
+            reason="test_finish",
+        )
         orchestrator._solve_context["object_roles"]["7"] = {"role": "goal", "confidence": 0.9, "estimated_position": {"row": 9.0, "col": 9.0}}
         
-        action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"])
+        action = await orchestrator._try_autopilot_async_enriched({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5"])
         assert action is not None
         assert "finish" in action["rationale"]
         assert action["action_id"] in ("ACTION2", "ACTION4")

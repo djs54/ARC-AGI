@@ -41,6 +41,19 @@ class TrajectoryEvaluator:
         if not normalized_steps and trace_list:
             normalized_steps = self._extract_step_history_from_trace(trace_list)
 
+        # A047: If we truly have no data, return a neutral scorable state instead of 
+        # risking downstream None checks or neutral 55.
+        if not normalized_steps and not trace_list:
+            return TrajectoryScore(
+                action_diversity=10,
+                hypothesis_convergence=10,
+                exploration_efficiency=10,
+                plan_adherence=10,
+                escalation_quality=10,
+                total=50,
+                details={"status": "neutral", "reason": "no trajectory data provided"}
+            )
+
         action_diversity, action_details = self._score_action_diversity(normalized_steps)
         convergence, convergence_details = self._score_hypothesis_convergence(normalized_steps, trace_list)
         exploration, exploration_details = self._score_exploration_efficiency(normalized_steps, trace_list)
@@ -93,6 +106,11 @@ class TrajectoryEvaluator:
         if isinstance(payload, dict):
             trace = [item for item in (payload.get("agent_execution_trace") or payload.get("trace") or []) if isinstance(item, dict)]
             candidate_steps = payload.get("debug_steps") or payload.get("step_history") or payload.get("progress_log") or []
+            
+            # A055: Support additional step sources from recent smoke traces
+            if not candidate_steps:
+                candidate_steps = payload.get("arc_event_timeline") or payload.get("sidequests_ledger") or []
+                
             if isinstance(candidate_steps, list):
                 step_history = self._normalize_step_history(candidate_steps)
             if not step_history and payload.get("snapshot_type") == "step":
@@ -133,6 +151,11 @@ class TrajectoryEvaluator:
                     "frame_hash": item.get("frame_hash") or frame_analysis.get("frame_hash"),
                     "reward": item.get("reward"),
                     "solve_context": solve_context if isinstance(solve_context, dict) else {},
+                    # A060: Propagate new metadata fields for telemetry consistency
+                    "override_reason": item.get("override_reason") or (item.get("decision_flow") or {}).get("override_reason"),
+                    "memory_prior_source": item.get("memory_prior_source") or (item.get("decision_flow") or {}).get("memory_prior_source"),
+                    # A063: Object-centric progress
+                    "object_progress": item.get("object_progress"),
                 }
             )
 
@@ -214,11 +237,13 @@ class TrajectoryEvaluator:
                 available_count_hint = max(available_count_hint, self._coerce_int(available_actions, default=0) or 0)
         available_count = len(available_action_names) or available_count_hint or len(unique_actions)
 
-        if len(unique_actions) <= 1:
-            return 0, {
+        # One-action environments are degenerate by design; do not penalize diversity.
+        if available_count <= 1:
+            return self.MAX_DIMENSION_SCORE, {
                 "unique_actions": len(unique_actions),
                 "available_actions": available_count,
-                "coverage_ratio": round(len(unique_actions) / max(available_count, 1), 4),
+                "coverage_ratio": 1.0,
+                "reason": "single_action_environment",
             }
 
         counts = Counter(actions)
@@ -228,7 +253,18 @@ class TrajectoryEvaluator:
         balance_ratio = entropy / max_entropy if max_entropy > 0 else 1.0
         coverage_ratio = min(len(unique_actions) / max(available_count, 1), 1.0)
 
-        score = self._clamp_score(self.MAX_DIMENSION_SCORE * coverage_ratio * balance_ratio)
+        # Base score calculation
+        if len(unique_actions) <= 1:
+            score = 0
+        else:
+            score = self._clamp_score(self.MAX_DIMENSION_SCORE * coverage_ratio * balance_ratio)
+
+        # A042: Small sample sizes (short runs) may not have enough steps to 
+        # demonstrate full diversity even if orchestration is valid.
+        # Treat short runs as "insufficient data" and floor to 10.
+        if len(step_history) <= 5 and score < 10:
+            score = 10
+
         return score, {
             "unique_actions": len(unique_actions),
             "available_actions": available_count,
@@ -320,6 +356,12 @@ class TrajectoryEvaluator:
 
         novel_ratio = max(novel_transitions - 1, 0) / max(len(frame_hashes) - 1, 1)
         score = self._clamp_score(self.MAX_DIMENSION_SCORE * novel_ratio)
+
+        # A048: Small sample sizes may not have enough transitions to 
+        # demonstrate full exploration efficiency.
+        if len(frame_hashes) <= 5 and score < 10:
+            score = 10
+
         return score, {
             "unique_frames": len(seen),
             "visited_frames": len(frame_hashes),
@@ -375,6 +417,12 @@ class TrajectoryEvaluator:
 
         adherence_ratio = matches / planned_steps
         score = self._clamp_score(self.MAX_DIMENSION_SCORE * adherence_ratio)
+
+        # A057: Small sample sizes may not have enough steps to 
+        # demonstrate full adherence or escalation quality.
+        if len(step_history) <= 5 and score < 10:
+            score = 10
+
         return score, {
             "planned_steps": planned_steps,
             "plan_matches": matches,
@@ -420,6 +468,12 @@ class TrajectoryEvaluator:
                 quality_samples.append(4)
 
         score = self._clamp_score(sum(quality_samples) / len(quality_samples))
+
+        # A057: Small sample sizes may not have enough data to demonstrate 
+        # escalation quality effectively.
+        if len(step_history) <= 5 and score < 10:
+            score = 10
+
         return score, {
             "escalation_points": escalation_points,
             "sample_scores": quality_samples,

@@ -30,7 +30,7 @@ def test_apply_llm_overrides_updates_only_llm_block():
 
 
 def test_remove_db_artifacts_deletes_wal_and_shm(tmp_path: Path):
-    db_path = tmp_path / "brain_single_test.db"
+    db_path = tmp_path / "brain.db"
     wal_path = Path(f"{db_path}.wal")
     shm_path = Path(f"{db_path}.shm")
 

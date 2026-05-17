@@ -75,3 +75,6 @@ async def test_report_and_upsert_called(tmp_path):
     # The Spy should have recorded report_outcome and upsert_lesson
     assert any(c[0] == "report_outcome" for c in spy.calls), "report_outcome not called"
     assert any(c[0] == "upsert_lesson" for c in spy.calls), "upsert_lesson not called"
+    upserts = [c for c in spy.calls if c[0] == "upsert_lesson"]
+    assert len(upserts) >= 2, "expected structured post-solve upsert lessons"
+    assert any('"lesson_type": "run_summary"' in c[2] for c in upserts), "run_summary lesson missing"

@@ -61,6 +61,9 @@ class ABTaskResult:
     final_state: Optional[str] = None  # WIN, GAME_OVER, NOT_FINISHED
     final_observation: Optional[dict] = None  # Full observation with grid, state, etc.
     judge_verdict: Optional[dict] = None  # B181: LLM-as-Judge near-miss grading
+    # A058: Terminal-grounded score tracking
+    terminal_value_score: float = 0.0
+    terminal_value_components: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_tokens(self) -> int:

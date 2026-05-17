@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import inspect
 import time
 from collections import Counter, deque
 from contextlib import nullcontext
@@ -27,7 +28,7 @@ class BrainClientProtocol(Protocol):
     def db(self) -> Optional[Any]:
         ...
 
-    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
+    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None, async_dispatch: bool = False) -> Mapping[str, Any]:
         ...
 
     async def current_truth(
@@ -67,7 +68,35 @@ class BrainClientProtocol(Protocol):
     async def recall_relevant_lessons(self, *, query: str, limit: int) -> Mapping[str, Any]:
         ...
 
-    async def analogical_search(self, *, query: str, current_quest_id: str, limit: int, min_similarity: float) -> Mapping[str, Any]:
+    async def recall_lessons(
+        self,
+        *,
+        lesson_type: str,
+        scene_wl_hash: Optional[str] = None,
+        archetype: Optional[str] = None,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        ...
+
+    async def analogical_search(
+        self,
+        *,
+        query: Optional[str] = None,
+        vector: Optional[Mapping[str, int]] = None,
+        current_quest_id: str,
+        limit: int,
+        min_similarity: float,
+    ) -> Mapping[str, Any]:
+        ...
+
+    async def recall_scene_graph_priors(
+        self,
+        *,
+        archetype: str,
+        node_count: int,
+        wl_hash: str,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
         ...
 
     # NEW — Knowledge gap inspection (B193/B199)
@@ -104,8 +133,9 @@ class NoOpBrainClient(BrainClientProtocol):
     def db(self) -> Optional[Any]:
         return None
 
-    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
-        return {"status": "skipped"}
+    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None, async_dispatch: bool = False) -> Mapping[str, Any]:
+        return {"status": "ok", "message": "no-op"}
+
 
     async def current_truth(self, *, query: str, session_id: str, scope: str, limit: int) -> Mapping[str, Any]:
         return {"results": []}
@@ -159,7 +189,39 @@ class NoOpBrainClient(BrainClientProtocol):
         tags = tags or [domain]
         return await self.store_lesson(content=text, tags=tags, session_id="noop")
 
-    async def analogical_search(self, *, query: str, current_quest_id: str, limit: int, min_similarity: float) -> Mapping[str, Any]:
+    async def recall_lessons(
+        self,
+        *,
+        lesson_type: str,
+        scene_wl_hash: Optional[str] = None,
+        archetype: Optional[str] = None,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        terms = [lesson_type, scene_wl_hash or "", archetype or ""]
+        query = " ".join(t for t in terms if t)
+        if not query:
+            return {"lessons": []}
+        return await self.recall_relevant_lessons(query=query, limit=limit)
+
+    async def analogical_search(
+        self,
+        *,
+        query: Optional[str] = None,
+        vector: Optional[Mapping[str, int]] = None,
+        current_quest_id: str,
+        limit: int,
+        min_similarity: float,
+    ) -> Mapping[str, Any]:
+        return {"results": []}
+
+    async def recall_scene_graph_priors(
+        self,
+        *,
+        archetype: str,
+        node_count: int,
+        wl_hash: str,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
         return {"results": []}
 
     async def branch_quest(self, *, name: str, purpose: str, parent_quest_id: str) -> Mapping[str, Any]:
@@ -223,7 +285,7 @@ class LocalBrainClient(BrainClientProtocol):
         self._get_knowledge_gaps_handler = get_knowledge_gaps
         """
 
-    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
+    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None, async_dispatch: bool = False) -> Mapping[str, Any]:
         params = {"role": role, "content": content, "session_id": session_id}
         if precomputed:
             params["precomputed"] = precomputed
@@ -275,9 +337,40 @@ class LocalBrainClient(BrainClientProtocol):
         params = {"archetype": archetype, "limit": limit}
         return await self._recall_procedures_handler(params, self.db, self.config)
 
-    async def analogical_search(self, *, query: str, current_quest_id: str, limit: int, min_similarity: float) -> Mapping[str, Any]:
-        params = {"query": query, "current_quest_id": current_quest_id, "limit": limit, "min_similarity": min_similarity}
+    async def recall_lessons(
+        self,
+        *,
+        lesson_type: str,
+        scene_wl_hash: Optional[str] = None,
+        archetype: Optional[str] = None,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        query = " ".join(p for p in [lesson_type, scene_wl_hash or "", archetype or ""] if p)
+        return await self.recall_relevant_lessons(query=query, limit=limit)
+
+    async def analogical_search(
+        self,
+        *,
+        query: Optional[str] = None,
+        vector: Optional[Mapping[str, int]] = None,
+        current_quest_id: str,
+        limit: int,
+        min_similarity: float,
+    ) -> Mapping[str, Any]:
+        params = {"query": query or "", "current_quest_id": current_quest_id, "limit": limit, "min_similarity": min_similarity}
+        if vector is not None:
+            params["vector"] = dict(vector)
         return await self._analogical_search_handler(params, self.db, self.config)
+
+    async def recall_scene_graph_priors(
+        self,
+        *,
+        archetype: str,
+        node_count: int,
+        wl_hash: str,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        return {"results": []}
 
     async def branch_quest(self, *, name: str, purpose: str, parent_quest_id: str) -> Mapping[str, Any]:
         params = {"name": name, "purpose": purpose, "parent_quest_id": parent_quest_id}
@@ -351,11 +444,13 @@ class LedgerBrainClient(BrainClientProtocol):
         self.step_provider = step_provider
         self.cost_tracker = cost_tracker
         self.observability = observability
-        self.current_phase: str = "unknown"
+        self._current_phase: str = "unknown"
         self.start_time = start_time or time.time()
         self._arc_call_seq = 0
         self._event_seq = 0
         self.arc_event_timeline: List[dict] = []
+        self.memory_degraded: bool = bool(getattr(inner, "memory_degraded", False))
+        self.memory_degraded_reason: str = str(getattr(inner, "memory_degraded_reason", "") or "")
 
     def _span_attributes(self, *, phase: str, mode: str, latency_ms: float, extra: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         attrs = {
@@ -371,6 +466,18 @@ class LedgerBrainClient(BrainClientProtocol):
     @property
     def db(self) -> Optional[Any]:
         return self.inner.db
+
+    @property
+    def current_phase(self) -> str:
+        return self._current_phase
+
+    @current_phase.setter
+    def current_phase(self, phase: str) -> None:
+        self._current_phase = str(phase or "unknown")
+        try:
+            setattr(self.inner, "current_phase", self._current_phase)
+        except Exception:
+            pass
 
     def _record(self, phase: str, call_type: str, mode: str, input_summary: str, result_summary: str, latency_ms: float, decision_used: Optional[Any] = None, arc_api_io: Optional[dict] = None):
         import datetime
@@ -409,6 +516,21 @@ class LedgerBrainClient(BrainClientProtocol):
                 "received": arc_api_io.get("response", {}).get("received", True),
             }
         self.ledger.append(entry)
+
+    def _update_memory_degraded(self, resp: Mapping[str, Any] | Any) -> None:
+        if isinstance(resp, Mapping):
+            err_text = str(resp.get("error") or "").lower()
+            status = str(resp.get("status") or "").lower()
+            if status == "queued_offline" or "daemon_offline" in err_text:
+                self.memory_degraded = True
+                self.memory_degraded_reason = "daemon_offline" if "daemon_offline" in err_text else "queued_offline"
+            elif resp.get("status") != "error":
+                # Successful response from memory tools indicates backend is reachable.
+                self.memory_degraded = bool(getattr(self.inner, "memory_degraded", False))
+                self.memory_degraded_reason = str(getattr(self.inner, "memory_degraded_reason", "") or "")
+        else:
+            self.memory_degraded = bool(getattr(self.inner, "memory_degraded", False))
+            self.memory_degraded_reason = str(getattr(self.inner, "memory_degraded_reason", "") or "")
 
     @staticmethod
     def _humanize_arc_operation(method: str, endpoint: str, request_payload: Any = None) -> str:
@@ -486,8 +608,18 @@ class LedgerBrainClient(BrainClientProtocol):
             if isinstance(response_payload, dict):
                 state = response_payload.get("state")
                 reward = response_payload.get("reward")
+                score = response_payload.get("score")
+                levels_completed = response_payload.get("levels_completed")
+                win_levels = response_payload.get("win_levels")
+                lives = response_payload.get("lives")
+                life = response_payload.get("life")
                 if state: summary += f"; state {state}"
                 if reward is not None: summary += f"; reward {reward}"
+                if score is not None: summary += f"; score {score}"
+                if levels_completed is not None: summary += f"; levels {levels_completed}"
+                if win_levels is not None: summary += f"/{win_levels}"
+                if lives is not None: summary += f"; lives {lives}"
+                elif life is not None: summary += f"; life {life}"
         else:
             summary = f"failed: {error_details.get('error_type') if error_details else 'unknown'}"
 
@@ -543,11 +675,29 @@ class LedgerBrainClient(BrainClientProtocol):
             return payload.get(key, default)
         return default
 
-    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
-        import time
-        start = time.time()
-        resp = await self.inner.notify_turn(role=role, content=content, session_id=session_id, precomputed=precomputed)
-        latency = (time.time() - start) * 1000
+    async def _call_inner_supported(self, method_name: str, **kwargs: Any) -> Mapping[str, Any]:
+        """Call an inner brain method while tolerating older mock/client signatures."""
+        method = getattr(self.inner, method_name)
+        try:
+            signature = inspect.signature(method)
+            params = signature.parameters
+            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs = {k: v for k, v in kwargs.items() if k in params}
+        except (TypeError, ValueError):
+            pass
+        return await method(**kwargs)
+
+    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None, async_dispatch: bool = False) -> Mapping[str, Any]:
+        start_t = time.time()
+        resp = await self._call_inner_supported(
+            "notify_turn",
+            role=role,
+            content=content,
+            session_id=session_id,
+            precomputed=precomputed,
+            async_dispatch=async_dispatch,
+        )
+        latency = (time.time() - start_t) * 1000
         self._record("unknown", "notify_turn", "write", content, self._safe_get(resp, "status", "ok"), latency)
         return resp
 
@@ -557,6 +707,7 @@ class LedgerBrainClient(BrainClientProtocol):
         resp = await self.inner.current_truth(query=query, session_id=session_id, scope=scope, limit=limit)
         latency = (time.time() - start) * 1000
         results = self._safe_get(resp, "results", []) or []
+        self._update_memory_degraded(resp)
         self._record("unknown", "current_truth", "read", query, f"found {len(results)} items", latency)
         return resp
 
@@ -565,6 +716,7 @@ class LedgerBrainClient(BrainClientProtocol):
         start = time.time()
         resp = await self.inner.register_plan(goal=goal, steps=steps, session_id=session_id)
         latency = (time.time() - start) * 1000
+        self._update_memory_degraded(resp)
         self._record("unknown", "register_plan", "write", f"goal={goal}, steps={len(steps)}", f"plan_id={self._safe_get(resp, 'plan_id')}", latency)
         return resp
 
@@ -612,6 +764,7 @@ class LedgerBrainClient(BrainClientProtocol):
         resp = await self.inner.recall_plans(goal_query=goal_query, session_id=session_id, min_valence=min_valence, limit=limit)
         latency = (time.time() - start) * 1000
         plans = self._safe_get(resp, "plans", []) or []
+        self._update_memory_degraded(resp)
         self._record("unknown", "recall_plans", "read", goal_query, f"found {len(plans)} plans", latency)
         return resp
 
@@ -621,7 +774,40 @@ class LedgerBrainClient(BrainClientProtocol):
         resp = await self.inner.recall_relevant_lessons(query=query, limit=limit)
         latency = (time.time() - start) * 1000
         lessons = self._safe_get(resp, "lessons", []) or []
+        self._update_memory_degraded(resp)
         self._record("unknown", "recall_lessons", "read", query, f"found {len(lessons)} lessons", latency)
+        return resp
+
+    async def recall_lessons(
+        self,
+        *,
+        lesson_type: str,
+        scene_wl_hash: Optional[str] = None,
+        archetype: Optional[str] = None,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        import time
+        start = time.time()
+        query = " ".join(part for part in [lesson_type, scene_wl_hash or "", archetype or ""] if part)
+        if hasattr(self.inner, "recall_lessons"):
+            resp = await self._call_inner_supported(
+                "recall_lessons",
+                lesson_type=lesson_type,
+                scene_wl_hash=scene_wl_hash,
+                archetype=archetype,
+                limit=limit,
+            )
+        else:
+            resp = await self.inner.recall_relevant_lessons(query=query, limit=limit)
+        latency = (time.time() - start) * 1000
+        lessons = self._safe_get(resp, "lessons", self._safe_get(resp, "results", [])) or []
+        self._update_memory_degraded(resp)
+        
+        # A068: mark skipped/cached execute reads as policy-compliant in mode
+        fw_action = self._safe_get(resp, "memory_firewall_action", "fresh")
+        mode = f"read:{fw_action}" if fw_action != "fresh" else "read"
+        
+        self._record("unknown", "recall_lessons", mode, query, f"found {len(lessons)} lessons", latency)
         return resp
 
     async def recall_procedures(self, *, archetype: str, limit: int = 3) -> Mapping[str, Any]:
@@ -630,6 +816,7 @@ class LedgerBrainClient(BrainClientProtocol):
         resp = await self.inner.recall_procedures(archetype=archetype, limit=limit)
         latency = (time.time() - start) * 1000
         procs = self._safe_get(resp, "procedures", []) or []
+        self._update_memory_degraded(resp)
         self._record("unknown", "recall_procedures", "read", archetype, f"found {len(procs)} procedures", latency)
         return resp
 
@@ -643,13 +830,123 @@ class LedgerBrainClient(BrainClientProtocol):
         self._record("unknown", "get_knowledge_gaps", "read", str(domain or ""), f"found {len(gaps)} gaps", latency)
         return resp
 
-    async def analogical_search(self, *, query: str, current_quest_id: str, limit: int, min_similarity: float) -> Mapping[str, Any]:
+    async def analogical_search(
+        self,
+        *,
+        query: Optional[str] = None,
+        vector: Optional[Mapping[str, int]] = None,
+        current_quest_id: str,
+        limit: int,
+        min_similarity: float,
+    ) -> Mapping[str, Any]:
         import time
         start = time.time()
-        resp = await self.inner.analogical_search(query=query, current_quest_id=current_quest_id, limit=limit, min_similarity=min_similarity)
+        # A068: preserve firewall fields in ledger
+        resp = await self._call_inner_supported(
+            "analogical_search",
+            query=query,
+            vector=vector,
+            current_quest_id=current_quest_id,
+            limit=limit,
+            min_similarity=min_similarity,
+        )
         latency = (time.time() - start) * 1000
         results = self._safe_get(resp, "results", []) or []
-        self._record("unknown", "analogical_search", "read", query, f"found {len(results)} results", latency)
+        self._update_memory_degraded(resp)
+        
+        # A068: mark skipped/cached execute reads as policy-compliant in mode
+        fw_action = self._safe_get(resp, "memory_firewall_action", "fresh")
+        mode = f"read:{fw_action}" if fw_action != "fresh" else "read"
+        
+        input_summary = query or (f"vector_keys={len(vector)}" if vector else "empty_search")
+        self._record("unknown", "analogical_search", mode, input_summary, f"found {len(results)} results", latency)
+        return resp
+
+    async def recall_scene_graph_priors(
+        self,
+        *,
+        archetype: str,
+        scene_wl_hash: Optional[str] = None,
+        wl_hash: Optional[str] = None,
+        node_count: Optional[int] = None,
+        min_valence: float = 0.5,
+        limit: int = 5,
+    ) -> Mapping[str, Any]:
+        import time
+        start = time.time()
+        actual_wl_hash = scene_wl_hash or wl_hash or ""
+        if hasattr(self.inner, "recall_scene_graph_priors"):
+            resp = await self._call_inner_supported(
+                "recall_scene_graph_priors",
+                archetype=archetype,
+                scene_wl_hash=actual_wl_hash,
+                wl_hash=actual_wl_hash,
+                node_count=node_count,
+                min_valence=min_valence,
+                limit=limit,
+            )
+        else:
+            resp = {"results": []}
+        latency = (time.time() - start) * 1000
+        results = self._safe_get(resp, "results", []) or []
+        self._update_memory_degraded(resp)
+        
+        # A068: use firewall-aware mode
+        fw_action = self._safe_get(resp, "memory_firewall_action", "fresh")
+        mode = f"read:{fw_action}" if fw_action != "fresh" else "read"
+        
+        self._record("unknown", "recall_scene_graph_priors", mode, f"{archetype}:{wl_hash}", f"found {len(results)} priors", latency)
+        return resp
+
+    async def recall_mechanic_priors(
+        self,
+        *,
+        signature: Mapping[str, Any],
+        limit: int = 5,
+        min_confidence: float = 0.0,
+    ) -> Mapping[str, Any]:
+        import time
+        start = time.time()
+        resp = await self._call_inner_supported(
+            "recall_mechanic_priors",
+            signature=signature,
+            limit=limit,
+            min_confidence=min_confidence,
+        )
+        latency = (time.time() - start) * 1000
+        results = self._safe_get(resp, "results", []) or []
+        self._update_memory_degraded(resp)
+        
+        fw_action = self._safe_get(resp, "memory_firewall_action", "fresh")
+        mode = f"read:{fw_action}" if fw_action != "fresh" else "read"
+
+        if isinstance(resp, dict):
+            status = self._safe_get(resp, "status", "ok")
+            resp.setdefault("prior_count", len(results))
+            resp.setdefault("mechanic_prior_recall_status", status)
+            resp.setdefault("mechanic_prior_count", len(results))
+            resp.setdefault("mechanic_prior_error_code", self._safe_get(resp, "error_code"))
+        
+        sig_summary = "|".join(f"{k}={v}" for k,v in list(signature.items())[:3])
+        self._record("unknown", "recall_mechanic_priors", mode, sig_summary, f"found {len(results)} mechanics", latency)
+        return resp
+
+    async def publish_mechanic_summary(
+        self,
+        *,
+        summary: Mapping[str, Any],
+        async_dispatch: bool = True,
+    ) -> Mapping[str, Any]:
+        import time
+        start = time.time()
+        resp = await self._call_inner_supported(
+            "publish_mechanic_summary",
+            summary=summary,
+            async_dispatch=async_dispatch,
+        )
+        latency = (time.time() - start) * 1000
+        self._update_memory_degraded(resp)
+        self._record("unknown", "publish_mechanic_summary", "write", summary.get("id", "unknown"), "published", latency)
         return resp
 
     async def branch_quest(self, *, name: str, purpose: str, parent_quest_id: str) -> Mapping[str, Any]:
@@ -703,6 +1000,7 @@ class LedgerBrainClient(BrainClientProtocol):
 
         latency = (time.time() - start) * 1000
         lesson_id = resp.get('lesson_id') if isinstance(resp, dict) else None
+        self._update_memory_degraded(resp)
         self._record("unknown", "store_lesson", "write", f"session_id={session_id}", f"lesson_id={lesson_id}", latency)
         return resp
 
@@ -736,8 +1034,15 @@ class LedgerBrainClient(BrainClientProtocol):
 
         latency = (time.time() - start) * 1000
         lesson_id = resp.get('lesson_id') if isinstance(resp, dict) else None
+        self._update_memory_degraded(resp)
         self._record("unknown", "upsert_lesson", "write", f"domain={domain}", f"lesson_id={lesson_id}", latency)
         return resp
+
+    async def flush_deferred_writes(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        handler = getattr(self.inner, "flush_deferred_writes", None)
+        if callable(handler):
+            return await handler(*args, **kwargs)
+        return {"status": "ok", "count": 0}
 
     async def fail_task(self, *, graph_id: str, task_id: str, reason: str) -> Mapping[str, Any]:
         import time

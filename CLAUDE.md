@@ -1,29 +1,37 @@
 # Claude Code Instructions — ARC_AGI
 
-This repo is the ARC solver/evaluation workspace. The sibling `sidequests-brain` repo owns the memory engine; this repo is a pure MCP-over-stdio consumer.
+Codex/Aider read [AGENTS.md](AGENTS.md); Gemini CLI reads [GEMINI.md](GEMINI.md). All three are thin pointers to the single source of truth below.
 
 ## Canonical docs (keep these as the source of truth)
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — system design, MCP seam contract, cognitive model, A-series notes. **Update this file first** when architectural facts change; other agent-facing docs (CLAUDE.md, AGENTS.md, GEMINI.md) intentionally stay thin pointers to it.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system design, MCP seam contract, cognitive model, A-series notes. **Update this file first** when architectural facts change.
 - [README.md](README.md) — setup, local dev, smoke invocation, MCP adapter wiring.
 - [backlog/BacklogRules.md](backlog/BacklogRules.md) — backlog conventions. Active cards use the `A###` numeric ID with matching `backlog/Axxx.md` card + `backlog/plans/A-xxx-*.md` plan + row in `backlog/masterBacklogTracker.md`.
+
+## Current ARC-AGI-3 strategy
+
+Before implementing architecture-affecting ARC runtime work, read [ARCHITECTURE.md](ARCHITECTURE.md), especially `ARC-AGI-3 Strategic Architecture`.
+
+Technical mission statement:
+
+> GPT-5.5-style reasoning should generate hypotheses, but the graph world model should decide what is believed, what is falsified, what transfers, and what experiment is worth paying for next.
+
+Relevant backlog sequence: A073-A078.
 
 ## Non-negotiables
 
 1. **MCP seam only (runtime scope).** Runtime production code under `agents/`, `arc_runtime/`, `run_single_puzzle.py`, and `sidequest_mcp_client/` must not import `mcp_engine.*` or `campy.*` / `sidequests.*`. `benchmarks/arc3/` is offline scoring / submission packaging and is exempt (A030) — it embeds the brain directly. `tests/test_import_boundary.py` enforces the runtime scope. The MCP stdio adapter lives in `sidequests-brain/campy/adapters/mcp_server.py` and is spawned via `CAMPY_MCP_CMD` — do not vendor it here.
-2. **No ephemeral chips for follow-up work.** If you notice something worth doing later, write a `backlog/Axxx.md` + `backlog/plans/A-xxx-*.md` pair and add the tracker row. Never use `spawn_task` or other ephemeral mechanisms for persistent backlog work.
-3. **Green-baseline signal is `make test-a`**, not `pytest -q`. The full-suite triage is tracked under A029 — do not restore full-suite green by re-introducing brain-internal imports.
+2. **Persistent backlog for follow-up work.** New work goes into a `backlog/Axxx.md` + `backlog/plans/A-xxx-*.md` pair with a tracker row. No ephemeral task mechanisms.
+3. **Green-baseline signal is `make test-a`**, not `pytest -q`. Full-suite triage is tracked under A029.
 
 ## Development workflow
 
 ```bash
 pip install -e ../sidequests-brain  # HippoCampy/Campy repo; use ../hippocampy if your checkout was renamed
 pip install -e .
-make test-a            # A-series green baseline (18/18)
-make smoke             # live one-puzzle smoke (requires Ollama + brain daemon)
+make test-a
+make smoke
 ```
-
-`CAMPY_MCP_CMD` must point at the sibling adapter — see [README.md](README.md) for the exact invocation.
 
 ## When architectural facts change
 

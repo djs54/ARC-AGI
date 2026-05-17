@@ -48,8 +48,8 @@ class BufferedBrainClient:
         return await self.inner.get_task_graph(graph_id=graph_id)
 
     # --- Buffered writes --------------------------------------------------
-    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None):
-        self._buffer.append(("notify_turn", {"role": role, "content": content, "session_id": session_id, "precomputed": precomputed}))
+    async def notify_turn(self, *, role: str, content: str, session_id: str, precomputed: Optional[Mapping[str, Any]] = None, async_dispatch: bool = False):
+        self._buffer.append(("notify_turn", {"role": role, "content": content, "session_id": session_id, "precomputed": precomputed, "async_dispatch": async_dispatch}))
         return {"status": "buffered"}
 
     async def register_plan(self, *, goal: str, steps: List[str], session_id: str):

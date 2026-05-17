@@ -1334,6 +1334,42 @@ async def test_archetype_regression_guard():
 
 
 @pytest.mark.asyncio
+async def test_archetype_stickiness_guard_holds_on_weak_switch():
+    from agents.arc3.solver import SolveEngine, GameArchetype
+    from agents.arc3.hypothesis import StateGraph
+
+    brain = AsyncMock()
+    brain.recall_plans.return_value = {"plans": []}
+    brain.recall_relevant_lessons.return_value = {"lessons": []}
+    brain.analogical_search.return_value = {"results": []}
+    brain.register_plan.return_value = {"plan_id": "p-stick"}
+    brain.report_outcome.return_value = {"status": "ok"}
+
+    llm = AsyncMock()
+    engine = SolveEngine(brain, llm, "s1")
+    engine._archetype = GameArchetype.RACE
+    engine._archetype_confidence = 0.50
+    engine._archetype_locked = False
+
+    # Candidate pivot is not strong enough (+0.20 margin required).
+    engine.archetype_classifier.update = MagicMock(return_value=(GameArchetype.SPACE, 0.56))
+
+    obs = {"colors": [], "available_actions": ["ACTION1"], "task_id": "t1", "dataset_id": "d1"}
+    ctx = {
+        "last_transition_effect": {"meaningful_change_score": 0.0, "reward_signal": 0.0},
+        "action_facts": [],
+        "hud_rows": [],
+        "path_hypotheses": [],
+        "current_state_hash": "h1",
+    }
+
+    await engine.solve(obs, ctx, step=3, state_graph=StateGraph(), current_state_hash="h1")
+
+    assert engine._archetype == GameArchetype.RACE
+    assert engine._archetype_confidence <= 0.50
+
+
+@pytest.mark.asyncio
 async def test_plateau_lock_exhaustion():
     from agents.arc3.solver import SolveEngine, PlanChunk, ObjectRole, RoleType
     from agents.arc3.hypothesis import StateGraph

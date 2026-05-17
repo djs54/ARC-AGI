@@ -69,7 +69,8 @@ def test_pick_action_for_direction_diagonal(orchestrator):
     # Desired: Down-Right (5, 5) -> should pick ACTION2
     assert orchestrator._pick_action_for_direction(5, 5, available) == "ACTION2"
 
-def test_autopilot_uses_discovered_map(orchestrator):
+@pytest.mark.asyncio
+async def test_autopilot_uses_discovered_map(orchestrator):
     orchestrator.solve_engine._object_roles = {
         1: ObjectRole(color_id=1, role=RoleType.PLAYER, confidence=0.9, estimated_position={"row": 5.0, "col": 5.0}),
         2: ObjectRole(color_id=2, role=RoleType.GOAL, confidence=0.9, estimated_position={"row": 0.0, "col": 5.0})
@@ -82,7 +83,7 @@ def test_autopilot_uses_discovered_map(orchestrator):
         "ACTION1": (1.0, 0.0),
     }
     
-    action = orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2"])
+    action = await orchestrator._try_autopilot({"grid": [[0]*10 for _ in range(10)]}, ["ACTION1", "ACTION2"])
     assert action["action_id"] == "ACTION2"
     assert "discovered mapping" in action["rationale"]
 

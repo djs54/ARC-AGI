@@ -30,10 +30,10 @@ from mcp_engine.loop.step3_schema_org import load_routing_table
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = REPO_ROOT / "sidequests.toml"
+CONFIG_PATH = (REPO_ROOT / "campy.toml") if (REPO_ROOT / "campy.toml").exists() else (REPO_ROOT / "sidequests.toml")
 MANIFEST_PATH = REPO_ROOT / "benchmarks/arc3/tasks_manifest.json"
 OUTPUT_PATH = REPO_ROOT / "submission_results.json"
-DB_PATH = Path.home() / ".sidequests" / "brain.db"
+DB_PATH = (Path.home() / ".campy" / "brain.db") if (Path.home() / ".campy" / "brain.db").exists() else (Path.home() / ".sidequests" / "brain.db")
 SEED_PATH = REPO_ROOT / "InvertorsDocs" / "GistSeedExamples.md"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

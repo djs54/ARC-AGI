@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List
 
@@ -12,6 +13,21 @@ from benchmarks.ab_harness import ABTask
 
 
 CHECKPOINT_VERSION = 1
+
+
+def _json_default(obj):
+    if is_dataclass(obj):
+        return asdict(obj)
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, set):
+        return sorted(obj, key=str)
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return str(obj)
 
 
 @dataclass
@@ -100,7 +116,7 @@ class CheckpointManager:
         }
         tmp_path = self._path.with_suffix(".json.tmp")
         with tmp_path.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
+            json.dump(payload, fh, indent=2, default=_json_default)
         os.replace(tmp_path, self._path)
 
     def mark_complete(self, checkpoint: RunCheckpoint, task_id: str, plan_id: str | None, result: dict) -> None:
