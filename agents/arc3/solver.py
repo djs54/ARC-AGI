@@ -390,10 +390,14 @@ class ArchetypeClassifier:
         vote_scores: Dict[str, float] = {}
         for result in analogy_results[:5]:
             # Analogical results include text_raw; only parse explicit archetype
-            # tags. Substring matching lets unrelated text such as "race-safe"
-            # vote for the race archetype.
+            # tags and short "chase archetype" style phrases. Avoid bare
+            # substring matching so unrelated text such as "race-safe" does
+            # not vote for the race archetype.
             text = (result.get("text_raw") or "").lower()
             matches = re.findall(r"(?:puzzle_)?archetype\s*[:=]\s*([a-z_]+)", text)
+            matches.extend(re.findall(r"\b([a-z_]+)\s+archetype\b", text))
+            matches.extend(re.findall(r"\barchetype\s+([a-z_]+)\b", text))
+            matches.extend(re.findall(r"\barc\s+([a-z_]+)\s+game\b", text))
             for match in matches:
                 if match in {a.value for a in GameArchetype if a != GameArchetype.UNKNOWN}:
                     vote_scores[match] = vote_scores.get(match, 0.0) + result.get("similarity", 0.5)
@@ -2332,13 +2336,19 @@ class SolveEngine:
         A066: uses meaningful progress history if available.
         """
         if hasattr(self, "_meaningful_history") and self._meaningful_history:
-            streak = 0
+            meaningful_streak = 0
             for meaningful in reversed(self._meaningful_history):
                 if not meaningful:
-                    streak += 1
+                    meaningful_streak += 1
                 else:
                     break
-            return streak
+            reward_streak = 0
+            for reward in reversed(self._reward_history):
+                if reward <= 0.0:
+                    reward_streak += 1
+                else:
+                    break
+            return max(meaningful_streak, reward_streak)
 
         streak = 0
         for reward in reversed(self._reward_history):
@@ -3042,7 +3052,7 @@ class SolveEngine:
             # 2. Meaningful change (demoted to low-priority tie-breaker)
             # A066: Also discount by meaningful_ratio
             avg_change = float(effect.get("avg_meaningful_change", 0.0) or 0.0)
-            scores[aid] += avg_change * meaningful_ratio * 0.1
+            scores[aid] += avg_change * meaningful_ratio * 0.5
             
             # 3. Repeat failure penalty (B144 core requirement)
             zero_streak = int(effect.get("zero_reward_streak", 0) or 0)
@@ -3265,6 +3275,13 @@ class SolveEngine:
             should_replan = True
             dissonance_reason = dissonance_reason or "orchestrator_no_progress_escalation"
         zero_reward_streak = self._recent_zero_reward_streak()
+        try:
+            zero_reward_streak = max(
+                zero_reward_streak,
+                int((hypothesis_context or {}).get("consecutive_zero_reward_steps", 0) or 0),
+            )
+        except Exception:
+            pass
         chunk_context = dict(hypothesis_context or {})
         if zero_reward_streak > 0:
             chunk_context["consecutive_zero_reward_steps"] = max(
@@ -3649,6 +3666,13 @@ class SolveEngine:
 
         # B144/B145/B146/B147: Plateau-aware exploitation policy logic
         zero_reward_streak = self._recent_zero_reward_streak()
+        try:
+            zero_reward_streak = max(
+                zero_reward_streak,
+                int((hypothesis_context or {}).get("consecutive_zero_reward_steps", 0) or 0),
+            )
+        except Exception:
+            pass
         
         # B147: Grounding hysteresis — enter at 0.70, sustain at 0.65
         ENTER_THRESHOLD = 0.70
@@ -3753,7 +3777,7 @@ class SolveEngine:
                 current_score = action_family_scores.get(self._plateau_locked_family, -1.0)
                 best_score = action_family_scores.get(best_candidate, -1.0) if best_candidate else -1.0
                 
-                if best_candidate and best_score > current_score + lock_threshold:
+                if best_candidate and best_score > current_score + lock_threshold + 1e-9:
                     unlock_reason = f"evidence shift (threshold={lock_threshold:.2f}): {best_candidate}({best_score:.2f}) outranks {self._plateau_locked_family}({current_score:.2f})"
                 
                 # 2. Current lock is no longer available
@@ -3929,6 +3953,14 @@ class SolveEngine:
                 self._trace("solve_plateau_detection", "plateau_policy", 
                             {"step": step, "streak": zero_reward_streak, "locked": self._plateau_locked_family}, 
                             {"top_candidate": ranked_families[0] if ranked_families else "none", "score": action_family_scores.get(ranked_families[0]) if ranked_families else 0.0})
+
+        if (
+            should_replan
+            and self._plateau_locked_family is None
+            and self._active_chunk is not None
+            and getattr(self._active_chunk, "source", "") == "plateau_exploitation"
+        ):
+            self._active_chunk = None
 
         # Build strategy summary for prompt
         strategy = self._build_strategy_summary()

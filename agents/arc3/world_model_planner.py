@@ -450,7 +450,7 @@ class WorldModelPlanner:
                     continue
                 if aid in quarantined_actions:
                     continue
-                if aid in COORDINATE_REQUIRED_ACTIONS:
+                if aid in COORDINATE_REQUIRED_ACTIONS and len(available_actions) != 1:
                     continue
                 normalized_prior = dict(prior)
                 normalized_prior["effects"] = p_effects
@@ -624,7 +624,10 @@ class WorldModelPlanner:
             return candidates
         
         # Get candidates from graph
-        click_candidates = world_model.get_click_candidates(limit=16)
+        get_click_candidates = getattr(world_model, "get_click_candidates", None)
+        if not callable(get_click_candidates):
+            return candidates
+        click_candidates = get_click_candidates(limit=16)
         
         if not click_candidates:
             return candidates
@@ -722,7 +725,10 @@ class WorldModelPlanner:
         candidates = []
         
         # Find pattern correspondence candidates
-        corr_candidates = world_model.find_pattern_correspondence_candidates(
+        find_corr_candidates = getattr(world_model, "find_pattern_correspondence_candidates", None)
+        if not callable(find_corr_candidates):
+            return []
+        corr_candidates = find_corr_candidates(
             goal_type="color_correspondence",
             limit=16
         )

@@ -918,14 +918,19 @@ class EntityGraphBuilder:
                     region_b = self._entity_to_pattern_region(e2, grid)
                     if region_a and region_b:
                         comparison = diff_engine.compare_regions(region_a, region_b)
-                        if comparison.similarity >= 0.5:
+                        same_extent = (
+                            (e1["bbox_max_row"] - e1["bbox_min_row"]) == (e2["bbox_max_row"] - e2["bbox_min_row"])
+                            and (e1["bbox_max_col"] - e1["bbox_min_col"]) == (e2["bbox_max_col"] - e2["bbox_min_col"])
+                            and e1["pixel_count"] == e2["pixel_count"]
+                        )
+                        if comparison.similarity >= 0.5 or same_extent:
                             color_shifted = comparison.color_shift is not None
                             await self.db.execute_write(
                                 "MATCH (a:GridEntity {entity_id: $id1}), (b:GridEntity {entity_id: $id2}) "
                                 "MERGE (a)-[:STRUCTURALLY_SIMILAR "
                                 "{similarity: $sim, color_shifted: $cs, step: 0}]->(b)",
                                 {"id1": e1["entity_id"], "id2": e2["entity_id"],
-                                 "sim": float(comparison.similarity), "cs": color_shifted},
+                                 "sim": float(max(comparison.similarity, 0.5 if same_extent else 0.0)), "cs": color_shifted or same_extent},
                             )
 
     def _entity_to_pattern_region(self, entity: dict, grid: List[List[int]]) -> Optional[PatternRegion]:

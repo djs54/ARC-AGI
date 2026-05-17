@@ -3219,23 +3219,31 @@ class ARCOrchestrator:
             "route_confidence": getattr(plan_selection.selected, "route_confidence", 0.0),
         })
 
-        solve_ctx = await self.solve_engine.solve(
-            observation=observation,
-            hypothesis_context=hypothesis_context,
-            step=step,
-            state_graph=self.hypothesis_mgr.graph,
-            current_state_hash=current_hash,
-            level_pattern=self._level_pattern,  # B150
-            solved_levels=self._solved_levels,  # B157
+        solve_kwargs = {
+            "observation": observation,
+            "hypothesis_context": hypothesis_context,
+            "step": step,
+            "state_graph": self.hypothesis_mgr.graph,
+            "current_state_hash": current_hash,
+            "level_pattern": self._level_pattern,  # B150
+            "solved_levels": self._solved_levels,  # B157
             # A095: Use compressed delta for subsequent cycles
-            world_model_summary=(
+            "world_model_summary": (
                 self.world_model.compact_world_model_delta(max_chars=1000, last_node_count=self._last_world_model_node_count)
                 if self._reasoning_cycle_count > 0
                 else self.world_model.to_prompt_summary(max_chars=1000)
             ),  # A073 + A095
-            mechanic_priors=mechanic_priors,  # A075
-            planner_selection=plan_selection, # A077
-        )
+            "mechanic_priors": mechanic_priors,  # A075
+            "planner_selection": plan_selection, # A077
+        }
+        try:
+            solve_ctx = await self.solve_engine.solve(**solve_kwargs)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            for optional_key in ("world_model_summary", "mechanic_priors", "planner_selection"):
+                solve_kwargs.pop(optional_key, None)
+            solve_ctx = await self.solve_engine.solve(**solve_kwargs)
         # A095: Increment cycle count and update compression tracking
         self._reasoning_cycle_count += 1
         if self._reasoning_cycle_count > 0:
@@ -3345,7 +3353,7 @@ class ARCOrchestrator:
             "plateau_reason": solve_ctx.plateau_reason,
             "ranked_action_families": solve_ctx.ranked_action_families,
             "action_family_scores": solve_ctx.action_family_scores,
-            "planner_selection": solve_ctx.planner_selection,
+            "planner_selection": getattr(solve_ctx, "planner_selection", None),
         }
         self._apply_graph_goal_override()
         
@@ -5646,8 +5654,6 @@ class ARCOrchestrator:
         ]
         used_set = set(used_actions)
         fallback_action = next((aid for aid in available_actions if aid not in used_set), available_actions[0])
-        if fallback_action in COORDINATE_REQUIRED_ACTIONS:
-            return None
         action_identity = build_action_identity(fallback_action, 0, 0)
         return {
             "action_id": fallback_action,

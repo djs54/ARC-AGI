@@ -322,6 +322,29 @@ class MCPBrainClient:
         try:
             resp = await asyncio.to_thread(self._session.call_tool, name, args, final_timeout)
         except Exception as exc:
+            if self._is_missing_tool_error(exc, name):
+                raise
+
+            error_text = str(exc).lower()
+            is_http_transport_error = (
+                "daemon_http_error" in error_text
+                or "daemon_offline" in error_text
+                or "cannot reach http" in error_text
+                or "connection refused" in error_text
+                or "127.0.0.1" in error_text
+                or "http_bridge" in error_text
+            )
+
+            # A059: Preserve legacy timeout fallback semantics for plain MCP calls.
+            # A091 transport degradation still handles daemon/HTTP bridge failures.
+            if "timeout" in error_text and not is_http_transport_error:
+                return {
+                    "status": "error",
+                    "error": str(exc),
+                    "source": "fallback",
+                    "fallback_reason": "timeout",
+                }
+
             # A091: Classify HTTP bridge timeouts as degraded reads/writes instead of crashing
             degradation_info = self._classify_mcp_transport_error(exc)
             if degradation_info["status"] == "degraded":
@@ -345,14 +368,6 @@ class MCPBrainClient:
                         deferred=True
                     )
             
-            # A059: Better failure labeling for timeouts
-            if "timeout" in str(exc).lower():
-                return {
-                    "status": "error",
-                    "error": str(exc),
-                    "source": "fallback",
-                    "fallback_reason": "timeout",
-                }
             raise
 
         if isinstance(resp, dict):
@@ -402,6 +417,9 @@ class MCPBrainClient:
         args = {"role": role, "content": content, "session_id": session_id}
         if precomputed is not None:
             args["precomputed"] = precomputed
+
+        if not isinstance(self._session, MCPStdIOSession):
+            return await self.call_tool("notify_turn", args, timeout=self.timeouts.get("notify_turn", 30.0))
 
         # A051: Remove mixed behavior. Always use background worker.
         self._ensure_notify_worker()

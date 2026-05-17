@@ -336,7 +336,7 @@ class ReasoningController:
                     decision.mode = ReasoningMode.EARLY_STOP
                     decision.trigger = "all_actions_churn_strategy_exhausted"
                     decision.stall_policy = "strategy_exhausted"
-                    decision.world_model_decision = "multi_action_churn_exhausted"  # A094
+                    decision.world_model_decision = "strategy_exhausted"  # A094
                 else:
                     decision.mode = ReasoningMode.LLM_REASON
                     decision.trigger = "multi_action_churn_budget_exhausted" if churn_detected else "contradiction_probe_budget_exhausted"

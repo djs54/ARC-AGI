@@ -834,7 +834,14 @@ class DurableARCRunner:
 
                 # A061: Single-Action Macro Executor
                 # Check for deterministic progress in one-action environments
-                is_eligible, macro_action_id = orchestrator.check_macro_eligibility(observation)
+                macro_eligibility = orchestrator.check_macro_eligibility(observation)
+                if (
+                    isinstance(macro_eligibility, tuple)
+                    and len(macro_eligibility) == 2
+                ):
+                    is_eligible, macro_action_id = macro_eligibility
+                else:
+                    is_eligible, macro_action_id = False, None
                 macro_reason = getattr(orchestrator, "_macro_eligibility_reason", None) or "single_action_deterministic_progress"
                 if is_eligible:
                     orchestrator.enter_macro_mode(macro_action_id, reason=macro_reason)
@@ -1015,7 +1022,7 @@ class DurableARCRunner:
                 await orchestrator.solve(observation, hyp_ctx, total_steps)
 
                 # A079: Honor EARLY_STOP signal from reasoning controller
-                if getattr(orchestrator, "_force_replan", False):
+                if getattr(orchestrator, "_force_replan", False) is True:
                     logger.warning(f"A079: early_stop triggered at step {total_steps}")
                     self._emit_world_model_decision_snapshot(
                         task=task,
@@ -1458,7 +1465,9 @@ class DurableARCRunner:
              setattr(task_result, "world_model_snapshot", orchestrator.world_model.to_trace_snapshot())
         # A075: Publish learned mechanics to aggregate memory
         if hasattr(orchestrator, "publish_mechanic_memory"):
-            await orchestrator.publish_mechanic_memory()
+            publish_result = orchestrator.publish_mechanic_memory()
+            if inspect.isawaitable(publish_result):
+                await publish_result
             
         return task_result, duration
 
@@ -1844,7 +1853,14 @@ class DurableARCRunner:
                     logger.exception("Failed syncing variant brain phase during solve/route")
 
                 # A061: Single-Action Macro Executor
-                is_eligible, macro_action_id = orchestrator.check_macro_eligibility(observation)
+                macro_eligibility = orchestrator.check_macro_eligibility(observation)
+                if (
+                    isinstance(macro_eligibility, tuple)
+                    and len(macro_eligibility) == 2
+                ):
+                    is_eligible, macro_action_id = macro_eligibility
+                else:
+                    is_eligible, macro_action_id = False, None
                 macro_reason = getattr(orchestrator, "_macro_eligibility_reason", None) or "single_action_deterministic_progress"
                 if is_eligible:
                     orchestrator.enter_macro_mode(macro_action_id, reason=macro_reason)
@@ -2018,7 +2034,7 @@ class DurableARCRunner:
 
                 await orchestrator.solve(observation, hyp_ctx, total_steps)
 
-                if getattr(orchestrator, "_force_replan", False):
+                if getattr(orchestrator, "_force_replan", False) is True:
                     logger.warning(f"A079: variant early_stop triggered at step {total_steps}")
                     self._emit_world_model_decision_snapshot(
                         task=task,
@@ -2463,7 +2479,9 @@ class DurableARCRunner:
              setattr(task_result, "world_model_snapshot", orchestrator.world_model.to_trace_snapshot())
         # A075: Publish learned mechanics to aggregate memory
         if hasattr(orchestrator, "publish_mechanic_memory"):
-            await orchestrator.publish_mechanic_memory()
+            publish_result = orchestrator.publish_mechanic_memory()
+            if inspect.isawaitable(publish_result):
+                await publish_result
             
         return task_result, duration, orchestrator
 
@@ -3158,13 +3176,14 @@ class DurableARCRunner:
         route_actions = list(getattr(selected_candidate, "route_actions", []) or [])
         route_confidence = float(getattr(selected_candidate, "route_confidence", 0.0) or 0.0)
         phase_memory_degraded = bool(phase_summary.get("memory_degraded", False)) if isinstance(phase_summary, dict) else False
-        brain_inner = getattr(self.brain, "inner", None)
+        brain = getattr(self, "brain", None)
+        brain_inner = getattr(brain, "inner", None)
         brain_memory_degraded = bool(
-            getattr(self.brain, "memory_degraded", False) is True
+            getattr(brain, "memory_degraded", False) is True
             or (getattr(brain_inner, "memory_degraded", False) is True if brain_inner is not None else False)
         )
         memory_degraded_reason = str(
-            getattr(self.brain, "memory_degraded_reason", "")
+            getattr(brain, "memory_degraded_reason", "")
             or (getattr(brain_inner, "memory_degraded_reason", "") if brain_inner is not None else "")
             or (phase_summary.get("memory_degraded_reason", "") if isinstance(phase_summary, dict) else "")
             or ""
@@ -3243,7 +3262,7 @@ class DurableARCRunner:
             "memory_degraded": bool(brain_memory_degraded or phase_memory_degraded),
             "memory_degraded_reason": memory_degraded_reason,
             "mcp_http_timeout_count": int(
-                getattr(self.brain, "mcp_http_timeout_count", 0)
+                getattr(brain, "mcp_http_timeout_count", 0)
                 or (getattr(brain_inner, "mcp_http_timeout_count", 0) if brain_inner is not None else 0)
                 or 0
             ),

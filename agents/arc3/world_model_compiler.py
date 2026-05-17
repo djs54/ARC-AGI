@@ -197,10 +197,12 @@ class WorldModelCompiler:
             return "distance_regressing_move"
         if terminal_trend == "regressing":
             return "harmful"
+        if reward_components.get("state_transition", False) or reward_components.get("state_changed", False):
+            return "state_transition"
         if distance_trend == "flat" and prev_hash and curr_hash and prev_hash != curr_hash:
             return "reversible_movement"
         if prev_hash and curr_hash and prev_hash != curr_hash:
-            return "state_transition"
+            return "pixel_churn"
 
         return "visual_churn"
 
