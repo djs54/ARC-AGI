@@ -36,15 +36,11 @@ def _cmd_from_env(env_var: str = "CAMPY_MCP_CMD"):
     if not parts:
         return None
 
-    def _looks_stale(path_text: str) -> bool:
-        return "sidequests-brain" in path_text and not Path(path_text).expanduser().exists()
-
-    # If the caller still points at the renamed sibling checkout, upgrade the
-    # path in-place so old shells keep working after the repo rename.
-    if _looks_stale(parts[0]) and "sidequests-brain" in parts[0]:
-        updated = parts[0].replace("sidequests-brain", "hippocampy")
-        if Path(updated).expanduser().exists():
-            parts[0] = updated
+    if any("sidequests-brain" in part for part in parts):
+        python_exe = parts[0]
+        if "sidequests-brain" in python_exe:
+            python_exe = python_exe.replace("sidequests-brain", "hippocampy")
+        return [python_exe, "-m", "campy.adapters.mcp_server"]
 
     return parts
 

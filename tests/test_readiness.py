@@ -124,6 +124,18 @@ def test_cmd_from_env_supports_legacy_sidequests_fallback(monkeypatch):
     assert _cmd_from_env() == ["python", "legacy.py"]
 
 
+def test_cmd_from_env_upgrades_renamed_repo_paths(monkeypatch):
+    old_cmd = "/Users/djshelton/Desktop/GitProjects/sidequests-brain/.venv/bin/python /Users/djshelton/Desktop/GitProjects/sidequests-brain/sidequests/adapters/mcp_server.py"
+    monkeypatch.setenv("CAMPY_MCP_CMD", old_cmd)
+
+    cmd = _cmd_from_env()
+    assert cmd == [
+        "/Users/djshelton/Desktop/GitProjects/hippocampy/.venv/bin/python",
+        "-m",
+        "campy.adapters.mcp_server",
+    ]
+
+
 def test_readiness_success():
     cmd = python_cmd_for(SERVER_SCRIPT)
     # Should not raise
