@@ -49,7 +49,7 @@ The MCP stdio adapter that serves this seam lives in the sibling `hippocampy` re
 From inside `ARC_AGI/`, the intended setup is:
 
 ```bash
-pip install -e ../sidequests-brain  # HippoCampy/Campy repo; use ../hippocampy if your checkout was renamed
+pip install -e ../hippocampy
 pip install -e .
 make test-a
 ```
@@ -63,7 +63,7 @@ If `hippocampy` is published where you want to consume it from, you can install 
 Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke:
 
 ```bash
-export CAMPY_MCP_CMD="../sidequests-brain/.venv/bin/python -m campy.adapters.mcp_server"
+export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
 PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
 ```
 

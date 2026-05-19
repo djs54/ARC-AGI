@@ -115,7 +115,7 @@ The submission collects repeatable metrics to measure prompt strategy effectiven
 - `total_retrieval_size_bytes`: Cumulative retrieval payload
 
 The exported submission rows keep these metrics under `metadata.benchmark_metrics`, and
-[`benchmarks/arc3/model_eval.py`](/Users/djshelton/Desktop/GitProjects/sidequests-brain/benchmarks/arc3/model_eval.py)
+[`benchmarks/arc3/model_eval.py`](/Users/djshelton/Desktop/GitProjects/ARC_AGI/benchmarks/arc3/model_eval.py)
 now includes helpers to compare two result rows and report prompt-budget deltas.
 
 ### Comparison Baseline

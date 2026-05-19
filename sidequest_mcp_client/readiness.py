@@ -13,6 +13,7 @@ import shlex
 import stat
 import time
 import uuid
+from pathlib import Path
 from typing import List, Optional
 
 from .mcp_session import MCPStdIOSession
@@ -30,7 +31,22 @@ def _cmd_from_env(env_var: str = "CAMPY_MCP_CMD"):
 
     if not cmd:
         return None
-    return shlex.split(cmd)
+
+    parts = shlex.split(cmd)
+    if not parts:
+        return None
+
+    def _looks_stale(path_text: str) -> bool:
+        return "sidequests-brain" in path_text and not Path(path_text).expanduser().exists()
+
+    # If the caller still points at the renamed sibling checkout, upgrade the
+    # path in-place so old shells keep working after the repo rename.
+    if _looks_stale(parts[0]) and "sidequests-brain" in parts[0]:
+        updated = parts[0].replace("sidequests-brain", "hippocampy")
+        if Path(updated).expanduser().exists():
+            parts[0] = updated
+
+    return parts
 
 
 def _check_brain_socket(socket_path: Optional[str] = None) -> None:

@@ -258,12 +258,12 @@ Failure:
 
 Current mismatch:
 
-- Test fallback uses `Path.cwd().parent / "sidequests-brain"`, which fails from `/tmp/arc_agi_audit`.
+- Test fallback uses `Path.cwd().parent / "hippocampy"`, which fails from `/tmp/arc_agi_audit`.
 
 Recommendation:
 
 - Resolve seed examples through package resources when possible.
-- Otherwise search known repo roots, including `/Users/djshelton/Desktop/GitProjects/sidequests-brain/campy/data/GistSeedExamples.md`.
+- Otherwise search known repo roots, including `/Users/djshelton/Desktop/GitProjects/hippocampy/campy/data/GistSeedExamples.md`.
 - Better: avoid direct path knowledge in ARC_AGI tests and use HippoCampy package APIs/resources.
 
 ## Archive

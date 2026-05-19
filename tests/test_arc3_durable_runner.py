@@ -1091,9 +1091,7 @@ async def test_upsert_lesson_round_trip():
             repo_root = Path(mcp_engine.__file__).resolve().parents[1]
             candidates = [
                 repo_root / "campy" / "data" / "GistSeedExamples.md",
-                Path.cwd().parent / "sidequests-brain" / "campy" / "data" / "GistSeedExamples.md",
                 Path.cwd().parent / "hippocampy" / "campy" / "data" / "GistSeedExamples.md",
-                Path("/Users/djshelton/Desktop/GitProjects/sidequests-brain/campy/data/GistSeedExamples.md"),
                 Path("/Users/djshelton/Desktop/GitProjects/hippocampy/campy/data/GistSeedExamples.md"),
             ]
             seed_path = next((path for path in candidates if path.exists()), candidates[0])

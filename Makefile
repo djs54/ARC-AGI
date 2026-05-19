@@ -1,7 +1,7 @@
 .PHONY: help smoke test test-a install
 
 PYTHON ?= .venv/bin/python
-CAMPY_REPO ?= ../sidequests-brain
+CAMPY_REPO ?= ../hippocampy
 CAMPY_MCP_CMD ?= $(CAMPY_REPO)/.venv/bin/python -m campy.adapters.mcp_server
 
 help: ## show this help
