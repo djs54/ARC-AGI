@@ -9,18 +9,39 @@ import datetime
 import dataclasses
 import enum
 import importlib.util
+import inspect
 import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable, Mapping
 
+import httpx
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
+from benchmarks.arc3.adapter import ARC3Adapter, NoOpBrainClient
+from agents.arc3.trace_names import (
+    canonical_phase,
+    normalize_artifact_payload,
+    normalize_failure_payload,
+    normalize_orchestration_status,
+)
 from agents.arc3.runner import DurableARCRunner
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
+from agents.arc4.executor import Executor
+from agents.arc4.evaluator import Evaluator
+from agents.arc4.goal_resolver import GoalResolver, GoalResolverLimits
+from agents.arc4.graph_queries import ArcGraphQueryPort
+from agents.arc4.perceive import PerceiveAgent
+from agents.arc4.plan_generator import PlanGenerator, PlanGeneratorLimits
+from agents.arc4.plan_vetter import PlanVetter
+from agents.arc4.telemetry import ArcV2Telemetry
+from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
+from agents.arc4.ports import WorkflowDependencies
+from agents.arc4.types import WorkflowState
 from sidequest_mcp_client.observability import build_observability
 from arc_runtime.config import load_config
 from arc_runtime.llm import create_llm_client, LLMInitializationError
@@ -259,6 +280,306 @@ def _enforce_llm_preflight(config: dict) -> None:
         raise RuntimeError(f"LLM preflight failed: {exc}")
 
 
+@dataclasses.dataclass(slots=True)
+class ArcV2Bundle:
+    graph_port: ArcGraphQueryPort
+    telemetry: ArcV2Telemetry
+    dependencies: WorkflowDependencies
+    orchestrator: WorkflowOrchestrator
+    llm_port: Any | None = None  # _SyncLLMPortAdapter, but defined later
+
+
+class _SyncLLMPortAdapter:
+    def __init__(self, llm_client: Any) -> None:
+        self._llm_client = llm_client
+        self.total_tokens_in = 0
+        self.total_tokens_out = 0
+
+    def chat(self, messages: list[Any]) -> str:
+        if self._llm_client is None:
+            raise RuntimeError("LLM client is not configured")
+
+        # Convert LLMMessage objects to OpenAI-compatible message dicts
+        message_dicts = [
+            {"role": message.role, "content": message.content}
+            for message in messages
+        ]
+
+        # Try async chat with proper message array first (OpenAI-compatible)
+        achat = getattr(self._llm_client, "achat", None)
+        if achat is not None:
+            try:
+                result = asyncio.get_event_loop().run_until_complete(
+                    achat(message_dicts)
+                )
+                # Estimate tokens from prompt and response
+                prompt_text = " ".join(m.get("content", "") for m in message_dicts)
+                self.total_tokens_in += len(prompt_text) // 4
+                response_str = str(result.content if hasattr(result, "content") else result)
+                self.total_tokens_out += len(response_str) // 4
+                if hasattr(result, "content"):
+                    return str(result.content)
+                return str(result)
+            except RuntimeError:
+                # Event loop already running — use asyncio.run in a thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, achat(message_dicts))
+                    result = future.result(timeout=60)
+                    # Estimate tokens from prompt and response
+                    prompt_text = " ".join(m.get("content", "") for m in message_dicts)
+                    self.total_tokens_in += len(prompt_text) // 4
+                    response_str = str(result.content if hasattr(result, "content") else result)
+                    self.total_tokens_out += len(response_str) // 4
+                    if hasattr(result, "content"):
+                        return str(result.content)
+                    return str(result)
+            except Exception:
+                pass
+
+        # Fallback: flatten to prompt string for generate/complete methods
+        prompt = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        for method_name in ("generate", "complete", "chat"):
+            method = getattr(self._llm_client, method_name, None)
+            if method is None:
+                continue
+            try:
+                result = method(prompt)
+                if inspect.isawaitable(result):
+                    result = asyncio.run(result)
+                # Estimate tokens from prompt and response
+                self.total_tokens_in += len(prompt) // 4
+                response_str = str(result)
+                self.total_tokens_out += len(response_str) // 4
+                return response_str
+            except Exception:
+                return "{}"
+
+        raise TypeError(
+            "configured LLM client does not expose a sync-compatible "
+            "generate/complete/chat/achat method"
+        )
+
+
+class _ArcV2GameSession:
+    def __init__(self, harness: ARC3Harness, *, game_id: str, card_id: str, real_api: bool) -> None:
+        self._harness = harness
+        self._game_id = game_id
+        self._card_id = card_id
+        self._real_api = real_api
+        self._client: httpx.Client | None = None
+        self._guid: str | None = None
+
+    def open(self) -> Mapping[str, Any]:
+        if self._real_api:
+            self._client = httpx.Client(
+                base_url=self._harness.api_base,
+                headers={"X-API-Key": str(self._harness.api_key or "")},
+                timeout=30.0,
+            )
+            scorecard_resp = self._client.post("/api/scorecard/open", json={})
+            scorecard_resp.raise_for_status()
+            card_id = scorecard_resp.json().get("card_id") or self._card_id
+            reset_resp = self._client.post("/api/cmd/RESET", json={"game_id": self._game_id, "card_id": card_id})
+            reset_resp.raise_for_status()
+            payload = reset_resp.json()
+            self._guid = str(payload.get("guid") or "") or None
+            return payload
+
+        return self._harness._get_mock_initial_frame(self._game_id)
+
+    def execute_action(self, action_id: str, payload: Mapping[str, Any], context: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._real_api:
+            if self._client is None:
+                raise RuntimeError("ARC v2 game session not opened")
+            request_payload: dict[str, Any] = {"game_id": self._game_id, "guid": self._guid}
+            request_payload.update(dict(payload))
+            if action_id == "ACTION6":
+                request_payload.setdefault("x", payload.get("x", 0))
+                request_payload.setdefault("y", payload.get("y", 0))
+            response = self._client.post(f"/api/cmd/{action_id}", json=request_payload)
+            response.raise_for_status()
+            frame_response = response.json()
+            reward = 1.0 if frame_response.get("state") == "WIN" else 0.0
+            done = frame_response.get("state") in ("WIN", "GAME_OVER")
+            return {
+                "observation": ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response),
+                "did_progress": reward >= 1.0,
+                "actual_effect": frame_response.get("state") or frame_response.get("effect"),
+                "reward": reward,
+                "done": done,
+                "state": frame_response.get("state"),
+            }
+
+        step = int(context.get("step") or 0)
+        raw_action = {"action_id": action_id, **dict(payload)}
+        frame_response, reward, done = self._harness._execute_mock_action(self._game_id, raw_action, step)
+        return {
+            "observation": ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response),
+            "did_progress": bool(reward),
+            "actual_effect": frame_response.get("state") or frame_response.get("effect"),
+            "reward": reward,
+            "done": done,
+            "state": frame_response.get("state"),
+        }
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
+    parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
+    parser.add_argument(
+        "--live-smoke",
+        action="store_true",
+        help=(
+            "Convenience mode for a one-puzzle live smoke: implies --real-api, auto-loads ARC_API_KEY "
+            "from the repo credential file when needed, and uses more forgiving local-Ollama timeout/retry defaults."
+        ),
+    )
+    parser.add_argument("--agent-version", choices=("v1", "v2"), default="v2", help="Select the ARC agent implementation (default: v2)")
+    parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run (default: 1 for real, 5 for mock)")
+    parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle (overrides config)")
+    parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
+    parser.add_argument("--config", type=str, default=None, help="Explicit path to the campy.toml file to use for this run")
+    parser.add_argument("--model", type=str, default=None, help="Override llm.model for this run only")
+    parser.add_argument("--base-url", type=str, default=None, help="Override llm.base_url for this run only")
+    parser.add_argument("--timeout-seconds", type=float, default=None, help="Override llm.timeout_seconds for this run only")
+    parser.add_argument("--max-retries", type=int, default=None, help="Override llm.max_retries for this run only")
+    parser.add_argument(
+        "--arc-key-path",
+        type=str,
+        default=None,
+        help="Load ARC_API_KEY from this JSON file if the environment variable is not already set",
+    )
+    parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
+    parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
+    return parser
+
+
+async def _run_arc_v2_batch(runner: "SingleTaskRunner", brain_client: Any, card_id: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for task in runner.tasks:
+        result = await asyncio.to_thread(_run_arc_v2_task, task, runner, card_id, brain_client)
+        results.append(result)
+    return results
+
+
+def _build_arc_v2_bundle(
+    *,
+    task_id: str,
+    game_id: str,
+    game_title: str,
+    game_tags: tuple[str, ...],
+    brain_client: Any,
+    session_id: str,
+    append_snapshot: Callable[[dict[str, Any]], None] | None,
+    game_session: _ArcV2GameSession,
+    world_model_eval: bool,
+    max_cycles: int,
+    llm_client: Any | None = None,
+) -> ArcV2Bundle:
+    graph_port = ArcGraphQueryPort(brain_client, task_id=task_id, session_id=session_id, strict=False)
+    telemetry = ArcV2Telemetry(
+        task_id=task_id,
+        game_id=game_id,
+        game_title=game_title,
+        game_tags=game_tags,
+        append_snapshot=append_snapshot,
+        world_model_eval=world_model_eval,
+    )
+    llm_port = _SyncLLMPortAdapter(llm_client) if llm_client is not None else None
+
+    perceive = telemetry.wrap_phase("perceive", PerceiveAgent(graph_port).perceive)
+    resolve_agent = GoalResolver(GoalResolverLimits())
+    resolve = telemetry.wrap_phase(
+        "resolve",
+        lambda state, perception: resolve_agent.resolve(state, perception, graph_port=graph_port, llm_port=llm_port),
+    )
+
+    plan_agent = PlanGenerator(PlanGeneratorLimits())
+    plan = telemetry.wrap_phase(
+        "plan",
+        lambda state, perception, goal: plan_agent.generate(state, perception, goal, graph_port=graph_port, llm_port=llm_port),
+    )
+    vet = telemetry.wrap_phase("vet", PlanVetter().vet)
+    execute_agent = Executor(transport=game_session)
+    execute = telemetry.wrap_phase(
+        "execute",
+        lambda state, perception, goal, vet_decision: execute_agent.execute(
+            state,
+            vet_decision.candidate or vet_decision.alternative,
+            {
+                "game_id": game_id,
+                "guid": getattr(game_session, "_guid", None),
+                "step": state.step_index,
+                "session_id": session_id,
+                "state": perception.observation.get("state") if isinstance(perception.observation, Mapping) else None,
+            },
+        ) if (vet_decision.candidate or vet_decision.alternative) is not None else PhaseResult(
+            phase=WorkflowPhase.EXECUTE,
+            status=PhaseStatus.CRASH,
+            reason="missing_vetted_candidate",
+            payload=None,
+        ),
+    )
+    evaluate = telemetry.wrap_phase("evaluate", Evaluator(graph_query_port=graph_port).evaluate)
+
+    dependencies = WorkflowDependencies(
+        perceive=perceive,
+        resolve=resolve,
+        plan=plan,
+        vet=vet,
+        execute=execute,
+        evaluate=evaluate,
+    )
+    orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=max_cycles))
+    return ArcV2Bundle(graph_port=graph_port, telemetry=telemetry, dependencies=dependencies, orchestrator=orchestrator, llm_port=llm_port)
+
+
+def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_client: Any) -> dict[str, Any]:
+    session_id = f"arc-v2-{task.task_id}-{int(time.time())}"
+    game_id = str(getattr(task, "game_id", "unknown"))
+    game_title = str(getattr(task, "arc_game_title", "") or "")
+    game_tags = tuple(str(tag) for tag in (getattr(task, "arc_game_tags", []) or []))
+    game_session = _ArcV2GameSession(runner.harness, game_id=game_id, card_id=card_id, real_api=runner.real_api)
+    initial_frame = game_session.open()
+    adapter = ARC3Adapter(NoOpBrainClient(), session_id=session_id, task_id=task.task_id)
+    observation = adapter.normalize_observation(initial_frame)
+
+    bundle = _build_arc_v2_bundle(
+        task_id=task.task_id,
+        game_id=game_id,
+        game_title=game_title,
+        game_tags=game_tags,
+        brain_client=brain_client,
+        session_id=session_id,
+        append_snapshot=runner.append_live_snapshot,
+        game_session=game_session,
+        world_model_eval=runner.world_model_eval,
+        max_cycles=int(runner.config.get("benchmark", {}).get("max_attempts_per_puzzle", 3) or 3),
+        llm_client=create_llm_client(runner.config),
+    )
+
+    try:
+        workflow_result = bundle.orchestrator.run(WorkflowState(), observation)
+    except Exception:
+        game_session.close()
+        raise
+
+    # Extract token counts from LLM adapter
+    if bundle.llm_port is not None:
+        bundle.telemetry.tokens_input = bundle.llm_port.total_tokens_in
+        bundle.telemetry.tokens_output = bundle.llm_port.total_tokens_out
+
+    result = bundle.telemetry.build_final_result(workflow_result)
+    game_session.close()
+    return result
+
+
 class SingleTaskRunner:
     def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None, live_smoke: bool = False):
         resolved_config_path = (
@@ -367,6 +688,7 @@ class SingleTaskRunner:
             "timestamp_iso",
             datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         )
+        normalized = normalize_artifact_payload(normalized, normalized.get("task_id"))
         with open(self.live_output_path, "a") as f:
             f.write(_json_dumps(normalized) + "\n")
 
@@ -393,27 +715,29 @@ class SingleTaskRunner:
 
     @staticmethod
     def _phase_question_for_export(phase: str | None) -> str | None:
+        phase = canonical_phase(str(phase or "setup"))
         mapping = {
+            "setup": "What run setup or memory context is being prepared?",
             "perceive": "What am I seeing in the puzzle right now?",
             "model": "What world model or structure explains this board?",
-            "hypothesize": "What kind of puzzle is this and what is the likely win condition?",
-            "route": "What strategy or chunk should I follow next?",
-            "execute": "What exact action should I take now?",
+            "plan": "What strategy, chunk, or experiment should I follow next?",
+            "act": "What exact action should I take now?",
             "evaluate": "What changed, and did that action help?",
             "replan": "Why am I stuck, and which earlier phase should I return to?",
+            "summary": "What game was played, and where can I inspect it?",
         }
-        return mapping.get(str(phase or "").lower())
+        return mapping.get(phase)
 
     @staticmethod
     def _phase_answer_for_export(phase: str | None, payload: dict | None, fallback: str | None = None) -> str | None:
         if not isinstance(payload, dict):
             return fallback
-        phase_name = str(phase or "").lower()
+        phase_name = canonical_phase(str(phase or "setup"))
         if phase_name == "replan":
             return payload.get("result_summary") or payload.get("input_summary") or fallback
         if phase_name == "evaluate":
             return payload.get("result_summary") or fallback or payload.get("input_summary")
-        if phase_name == "execute":
+        if phase_name == "act":
             return payload.get("input_summary") or payload.get("result_summary") or fallback
         return payload.get("result_summary") or payload.get("input_summary") or fallback
 
@@ -421,6 +745,14 @@ class SingleTaskRunner:
     def _make_final_result_compact(result: dict) -> dict:
         """A088: Compact final result by removing large fields and preserving high-signal summaries."""
         run_review = SingleTaskRunner._build_run_review(result)
+        failure_payload = normalize_failure_payload(result)
+        failure_class = result.get("failure_class")
+        existing_evals = result.get("evals") if isinstance(result.get("evals"), dict) else {}
+        component_eval = existing_evals.get("component_eval") if isinstance(existing_evals.get("component_eval"), dict) else {}
+        orchestration_status = normalize_orchestration_status(
+            failure_class,
+            component_eval.get("orchestration_status") or result.get("orchestration_status", "ok"),
+        )
         compact = {
             "task_id": result.get("task_id"),
             "game_id": result.get("game_id"),
@@ -429,7 +761,11 @@ class SingleTaskRunner:
             "correct": result.get("correct"),
             "steps": result.get("steps"),
             "runtime_seconds": result.get("runtime_seconds"),
-            "failure_class": result.get("failure_class"),
+            "failure_class": failure_class,
+            "failure_reason": failure_payload.get("failure_reason"),
+            "exception_type": failure_payload.get("exception_type"),
+            "exception_message": failure_payload.get("exception_message"),
+            "orchestration_status": orchestration_status,
             "final_state": result.get("final_state"),
             "puzzle_description": run_review.get("puzzle_description"),
             "arc_game_url": run_review.get("arc_game_url"),
@@ -503,7 +839,8 @@ class SingleTaskRunner:
         correct = bool(result.get("correct") is True)
         slug = SingleTaskRunner._game_slug(result)
         arc_game_url = f"https://arcprize.org/tasks/{slug}" if slug else "https://arcprize.org/tasks"
-        result_file = Path(results_path) if results_path else FINAL_OUTPUT_PATH
+        result_file = FINAL_OUTPUT_PATH
+        current_artifact = Path(results_path) if results_path else FINAL_OUTPUT_PATH
         sentence = (
             f"Played ARC-AGI-3 task {title} ({game_id}), a {controls} game; "
             f"the smoke test ended {'solved' if correct else 'unsolved'} after {steps} step(s) "
@@ -513,6 +850,7 @@ class SingleTaskRunner:
             "puzzle_description": sentence,
             "arc_game_url": arc_game_url,
             "test_results_url": SingleTaskRunner._artifact_url(result_file),
+            "current_artifact_url": SingleTaskRunner._artifact_url(current_artifact),
             "artifact_urls": {
                 "submission_results_single": SingleTaskRunner._artifact_url(FINAL_OUTPUT_PATH),
                 "submission_results_single_live": SingleTaskRunner._artifact_url(LIVE_OUTPUT_PATH),
@@ -528,12 +866,23 @@ class SingleTaskRunner:
         for result in self.results:
             if isinstance(result, dict):
                 result.setdefault("run_review", self._build_run_review(result, output_path))
+                failure_class = result.get("failure_class")
+                result["orchestration_status"] = normalize_orchestration_status(
+                    failure_class,
+                    result.get("orchestration_status", "ok"),
+                )
+                if failure_class == "crash":
+                    failure_payload = normalize_failure_payload(result)
+                    for key, value in failure_payload.items():
+                        if value is not None and result.get(key) in (None, ""):
+                            result[key] = value
         results_for_export = (
             [self._make_final_result_compact(result) for result in self.results]
             if (self.live_smoke or self.world_model_eval)
             else self.results
         )
-        _atomic_dump_json(output_path, results_for_export)
+        canonical_task_id = self.results[0].get("task_id") if self.results and isinstance(self.results[0], dict) else None
+        _atomic_dump_json(output_path, normalize_artifact_payload(results_for_export, canonical_task_id))
 
         # Chronological timeline of function calls + ARC API request/response events.
         call_timeline = []
@@ -561,6 +910,7 @@ class SingleTaskRunner:
                 else:
                     event_detail_classified = "internal orchestration"
 
+                phase = canonical_phase(entry.get("phase") or "setup")
                 call_timeline.append(
                     {
                         "name": name,
@@ -569,10 +919,10 @@ class SingleTaskRunner:
                         "timestamp_iso": timestamp,
                         "event_detail": event_detail_classified,
                         "what": entry.get("input_summary") or entry.get("result_summary") or name,
-                        "phase": entry.get("phase"),
-                        "phase_question": self._phase_question_for_export(entry.get("phase")),
+                        "phase": phase,
+                        "phase_question": self._phase_question_for_export(phase),
                         "phase_answer": self._phase_answer_for_export(
-                            entry.get("phase"),
+                            phase,
                             entry,
                             entry.get("result_summary") or entry.get("input_summary") or name,
                         ),
@@ -663,6 +1013,7 @@ class SingleTaskRunner:
             )
 
         logger.info(f"Exporting ARC-only responses to {self.arc_server_output_path}")
+        call_timeline = normalize_artifact_payload(call_timeline, canonical_task_id)
         _atomic_dump_json(self.arc_server_output_path, call_timeline)
 
         # B131: Export agent execution trace (CloudWatch-style logs)
@@ -673,6 +1024,7 @@ class SingleTaskRunner:
         
         # Sort by timestamp
         agent_execution_trace.sort(key=lambda e: e.get("timestamp_iso", ""))
+        agent_execution_trace = normalize_artifact_payload(agent_execution_trace, canonical_task_id)
         
         logger.info(f"Exporting agent execution trace to {self.agent_execution_trace_path}")
         if self.results:
@@ -722,7 +1074,7 @@ class SingleTaskRunner:
                 "name": event.get("name"),
                 "event": event.get("event"),
                 "what": event.get("what"),
-                "phase": event.get("phase") or ((event.get("data") or {}).get("phase") if isinstance(event.get("data"), dict) else None),
+                "phase": canonical_phase(event.get("phase") or ((event.get("data") or {}).get("phase") if isinstance(event.get("data"), dict) else "setup")),
                 "phase_question": event.get("phase_question"),
                 "phase_answer": event.get("phase_answer"),
                 "event_detail": event.get("event_detail"),
@@ -736,13 +1088,14 @@ class SingleTaskRunner:
                 op_map = {
                     "perceive": "perceive",
                     "plan": "model",
-                    "hypothesize": "hypothesize",
-                    "solve": "route",
-                    "act": "execute",
+                    "hypothesize": "model",
+                    "solve": "plan",
+                    "act": "act",
                     "ingest": "evaluate",
                     "replan": "replan",
                 }
                 phase = op_map.get(operation)
+            phase = canonical_phase(phase or "setup")
             what = (
                 (event.get("result") or {}).get("action_id")
                 or str(details.get("action_taken", ""))
@@ -775,6 +1128,7 @@ class SingleTaskRunner:
                 if snapshot.get("snapshot_type") != "phase_transition":
                     continue
 
+                snapshot = normalize_artifact_payload(snapshot, canonical_task_id)
                 from_phase = snapshot.get("from_phase")
                 to_phase = snapshot.get("to_phase")
                 snapshot_ts = snapshot.get("timestamp_iso")
@@ -819,6 +1173,7 @@ class SingleTaskRunner:
             )
 
         logger.info(f"Exporting master timeline to {self.master_timeline_path}")
+        master_timeline = normalize_artifact_payload(master_timeline, canonical_task_id)
         _atomic_dump_json(self.master_timeline_path, master_timeline)
 
     async def shutdown(self):
@@ -860,32 +1215,7 @@ def _emergency_shutdown(runner: DurableARCRunner):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
-    parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
-    parser.add_argument(
-        "--live-smoke",
-        action="store_true",
-        help=(
-            "Convenience mode for a one-puzzle live smoke: implies --real-api, auto-loads ARC_API_KEY "
-            "from the repo credential file when needed, and uses more forgiving local-Ollama timeout/retry defaults."
-        ),
-    )
-    parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run (default: 1 for real, 5 for mock)")
-    parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle (overrides config)")
-    parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
-    parser.add_argument("--config", type=str, default=None, help="Explicit path to the campy.toml file to use for this run")
-    parser.add_argument("--model", type=str, default=None, help="Override llm.model for this run only")
-    parser.add_argument("--base-url", type=str, default=None, help="Override llm.base_url for this run only")
-    parser.add_argument("--timeout-seconds", type=float, default=None, help="Override llm.timeout_seconds for this run only")
-    parser.add_argument("--max-retries", type=int, default=None, help="Override llm.max_retries for this run only")
-    parser.add_argument(
-        "--arc-key-path",
-        type=str,
-        default=None,
-        help="Load ARC_API_KEY from this JSON file if the environment variable is not already set",
-    )
-    parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
-    parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     real_api = args.real_api or args.live_smoke
@@ -953,26 +1283,29 @@ async def main():
             card_id = f"local_test_{int(time.time())}"
         brain_client = MCPBrainClient(runner.db, runner.config)
         runner.reset_live_output()
-        durable = DurableARCRunner(
-            runner.harness,
-            brain_client,
-            runner.config,
-            progress_callback=runner.append_live_snapshot,
-        )
-        durable._emit_transition_snapshots = True
-        atexit.register(_emergency_shutdown, durable)
-
         llm_cfg = runner.config.get("llm", {})
         logger.info(
-            "Running %d puzzle(s), starting with: %s | provider=%s model=%s timeout=%s retries=%s",
+            "Running %d puzzle(s) with %s, starting with: %s | provider=%s model=%s timeout=%s retries=%s",
             len(runner.tasks),
+            args.agent_version,
             runner.tasks[0].task_id,
             llm_cfg.get("provider"),
             llm_cfg.get("model"),
             llm_cfg.get("timeout_seconds", "default"),
             llm_cfg.get("max_retries", "default"),
         )
-        runner.results = await durable.run(runner.tasks, card_id)
+        if args.agent_version == "v2":
+            runner.results = await _run_arc_v2_batch(runner, brain_client, card_id)
+        else:
+            durable = DurableARCRunner(
+                runner.harness,
+                brain_client,
+                runner.config,
+                progress_callback=runner.append_live_snapshot,
+            )
+            durable._emit_transition_snapshots = True
+            atexit.register(_emergency_shutdown, durable)
+            runner.results = await durable.run(runner.tasks, card_id)
 
         for result in runner.results:
             run_review = SingleTaskRunner._build_run_review(result, runner.final_output_path)
@@ -1002,8 +1335,9 @@ async def main():
         # Print result summary
         for idx, result in enumerate(runner.results):
             logger.info(f"Task {idx+1}: {result.get('task_id')}")
-            logger.info(f"  Correct: {result['metadata'].get('correct')}")
-            logger.info(f"  Steps: {result['metadata'].get('steps')}")
+            result_metadata = result.get('metadata', {}) if isinstance(result, dict) else {}
+            logger.info(f"  Correct: {result_metadata.get('correct', result.get('correct') if isinstance(result, dict) else None)}")
+            logger.info(f"  Steps: {result_metadata.get('steps', result.get('steps') if isinstance(result, dict) else None)}")
 
             solve_summary = result.get("solve_phase_summary") or result.get("metadata", {}).get("solve_phase_summary") or {}
             if solve_summary:
@@ -1014,7 +1348,7 @@ async def main():
                 if solve_summary.get("archetype_evolution"):
                     logger.info(f"  [SOLVE] archetype evolution: {' → '.join(solve_summary['archetype_evolution'])}")
 
-            error = result['metadata'].get('error')
+            error = result_metadata.get('error')
             if error:
                 logger.error(f"  Error: {error}")
             else:

@@ -182,7 +182,7 @@ same non-terminal-relevant action.
 
 ### Implementation Track
 
-The active backlog sequence for this architecture is:
+The strategic backlog sequence for this architecture is:
 
 - A073: Per-game world model graph
 - A074: World-model compiler from step telemetry
@@ -190,6 +190,64 @@ The active backlog sequence for this architecture is:
 - A076: Evidence-gated reasoning controller
 - A077: World-model-guided planner
 - A078: World-model evaluation harness and live stream
+
+The currently landed executable prototype for that direction is the ARC v2 runtime slice:
+
+- A118: ARC v2 workflow contracts and orchestrator
+- A119: ARC v2 perceive and executor modules
+- A120: ARC v2 goal resolver
+- A121: ARC v2 plan generator and plan vetter
+- A122: ARC v2 evaluator
+- A123: `run_single_puzzle.py` integration, telemetry, and smoke path
+- B278: ARC-specific MCP query tool surface in the sibling `hippocampy` repo
+
+### ARC v2 Runtime (Production Default — A127)
+
+The repo contains a modular ARC v2 runtime under `agents/arc4/`. This is the current production implementation path, promoting the v2 prototype to default agent.
+
+**Phase 4 (A127): Promotion complete.** v2 is now the default agent. Use `--agent-version=v1` to run the archived v1 orchestrator for regression testing.
+
+The ARC v2 slice is organized around shared contracts and injected ports:
+
+- `agents/arc4/types.py` defines workflow dataclasses, decisions, and phase result contracts
+- `agents/arc4/ports.py` defines protocol boundaries for graph access, optional LLM escalation, and phase callables
+- `agents/arc4/workflow.py` owns the thin `WorkflowOrchestrator` over the phase order `PERCEIVE -> RESOLVE -> PLAN -> VET -> EXECUTE -> EVALUATE`
+- `agents/arc4/perceive.py`, `goal_resolver.py`, `plan_generator.py`, `plan_vetter.py`, `executor.py`, and `evaluator.py` implement the phase logic behind those contracts
+- `agents/arc4/graph_queries.py` adapts ARC runtime calls onto the ARC-specific MCP tool surface exposed by the sibling `hippocampy` repo
+- `agents/arc4/telemetry.py` converts workflow events into smoke/live artifact rows
+
+#### v2 Layer Model
+
+| Layer | Module | Brain Region | Role |
+|---|---|---|---|
+| **1. Orchestrator** | `agents/arc4/workflow.py` | Thalamus | Routes phases, enforces gates. Does not reason. |
+| **2. Perceive** | `agents/arc4/perceive.py` | Sensory Cortex | Observation → structured perception (GridSnapshot, entities) |
+| **2. Goal Resolve** | `agents/arc4/goal_resolver.py` | Temporal Lobe | Tiered goal system (heuristic → graph → LLM) |
+| **2. Plan Generate** | `agents/arc4/plan_generator.py` | Prefrontal Cortex | Goal-conditioned action planning (LLM) |
+| **2. Plan Vet** | `agents/arc4/plan_vetter.py` | Basal Ganglia | Go/No-Go advisory gate (deterministic) |
+| **2. Execute** | `agents/arc4/executor.py` | Motor Cortex | Action execution (no LLM, no graph) |
+| **2. Evaluate** | `agents/arc4/evaluator.py` | Temporal Lobe | Adversarial post-action review (deterministic) |
+| **3. Tools** | `agents/arc3/solver.py`, `grid_analysis.py` | — | Deterministic scoring, grid analysis |
+| **4. Memory** | HippoCampy via MCP | Hippocampus + Basal Ganglia | 15 `arc_*` query tools (B278) |
+
+**Design principles:**
+1. The graph decides, the LLM advises
+2. MCP seam only — all memory access through MCP
+3. No module grades its own work — PlanVetter and Evaluator are independent
+4. Deterministic where possible, LLM where needed
+
+**v1 archival:** The v1 `agents/arc3/orchestrator.py` is archived (see module docstring for notice) and remains available only via `--agent-version=v1` for regression testing.
+
+### ARC v2 MCP Rollout Status
+
+ARC v2 is designed to use ARC-specific MCP tools provided by the sibling `hippocampy` repo. During rollout, the runtime must tolerate a server that has not yet exposed the new `arc_*` methods.
+
+Current policy:
+
+- runtime ARC v2 uses non-strict MCP graph access and degrades gracefully when ARC-specific tools are unavailable
+- missing capability placeholders must not be treated as real graph evidence
+- optional LLM escalation must fail closed rather than crash the workflow
+- the production dependency boundary is unchanged: runtime code still talks to memory through the MCP seam only
 
 ## Relationship To HippoCampy / Campy
 

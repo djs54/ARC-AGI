@@ -1,4 +1,20 @@
-"""ARC-AGI-3 orchestrator wrapping the local LLM with SideQuests intelligence."""
+"""ARCHIVE NOTICE (A127):
+
+This module is now archived and no longer part of the production hot path.
+It is retained for reference and regression testing via --agent-version=v1.
+All new development uses agents/arc4/ (v2 workflow).
+
+Historical: This orchestrator was the primary ARC agent through A123.
+It has been superseded by the v2 workflow layers (perceive → resolve → plan →
+vet → execute → evaluate) in agents/arc4/, which provide better composability,
+testability, and port-based dependency injection.
+
+To run v1 for validation: python run_single_puzzle.py --agent-version=v1
+
+---
+
+ARC-AGI-3 orchestrator wrapping the local LLM with SideQuests intelligence.
+"""
 
 from __future__ import annotations
 
@@ -238,6 +254,7 @@ class ARCOrchestrator:
         self._mechanic_prior_recall_status: str = "not_called"
         self._mechanic_prior_count: int = 0
         self._mechanic_prior_error_code: str | None = None
+        self._last_active_goal_hypothesis: Optional[Dict[str, Any]] = None
         
         # A101-A105: New components for goal hypotheses, mechanic graphs, transformations, cycles, and level transfer
         self.goal_hypothesis_inducer = GoalHypothesisInducer(config)
@@ -1663,7 +1680,7 @@ class ARCOrchestrator:
                 "x": x,
                 "y": y,
                 "expires_step": step + 1,
-                "reason": "replan_forced_action6_probe",
+                "reason": "replan_forced_probe",
             }
         else:
             coverage = hyp_ctx.get("action_coverage") or {}
@@ -3003,6 +3020,17 @@ class ARCOrchestrator:
             active_graph_goals = []
         if active_graph_goals:
             active_graph_goal = active_graph_goals[0]
+            self._last_active_goal_hypothesis = dict(active_graph_goal)
+        elif getattr(self, "_last_active_goal_hypothesis", None):
+            active_graph_goal = dict(self._last_active_goal_hypothesis or {})
+            active_graph_goal_type = active_graph_goal.get("goal_type")
+            active_graph_goal_id = active_graph_goal.get("id")
+            try:
+                active_graph_goal_confidence = float(active_graph_goal.get("confidence", 0.0) or 0.0)
+            except Exception:
+                active_graph_goal_confidence = 0.0
+            active_graph_goal_confidence = min(active_graph_goal_confidence, 0.62)
+        if active_graph_goals:
             active_graph_goal_type = active_graph_goal.get("goal_type")
             active_graph_goal_id = active_graph_goal.get("id")
             try:
@@ -4489,14 +4517,16 @@ class ARCOrchestrator:
                     )
                     
                     if action_id not in available_actions:
-                        fallback = available_actions[0]
+                        selected_plan = getattr(getattr(self, "_last_planner_selection", None), "selected", None)
+                        planner_action = getattr(selected_plan, "action_id", None)
+                        fallback = planner_action if planner_action in available_actions else available_actions[0]
                         logger.warning(
                             "LLM selected unavailable action %r in sandbox; falling back to %r.",
                             action_id, fallback
                         )
                         return {
                             "action_id": fallback,
-                            "rationale": f"Invalid LLM action {action_id!r} in sandbox; fallback to {fallback}. Original rationale: {rationale}",
+                            "rationale": f"Invalid LLM action {action_id!r} in sandbox; graph-policy fallback to {fallback}. Original rationale: {rationale}",
                             "thinking_trace": thinking_trace,
                             "decision_source": f"{source}_invalid_fallback"
                         }
@@ -5348,6 +5378,8 @@ class ARCOrchestrator:
                 return "terminal_progress"
             if progress_class in ("object_monotonic", "object_progress", "score"):
                 return "object_progress"
+            if progress_class in ("route_progress", "local_route_progress"):
+                return "distance_improving_move"
             if bool(reward_components.get("meaningful_progress", False)):
                 return "meaningful_progress"
 
@@ -7305,7 +7337,9 @@ class ARCOrchestrator:
                 logger.info("LLM response parsed via %s: %s", parse_method, action_id)
 
             if action_id not in available_actions:
-                fallback = available_actions[0]
+                selected_plan = getattr(getattr(self, "_last_planner_selection", None), "selected", None)
+                planner_action = getattr(selected_plan, "action_id", None)
+                fallback = planner_action if planner_action in available_actions else available_actions[0]
                 logger.warning(
                     "LLM selected unavailable action %r; falling back to %r. Available=%s",
                     action_id,
@@ -7314,7 +7348,7 @@ class ARCOrchestrator:
                 )
                 return {
                     "action_id": fallback,
-                    "rationale": f"Invalid LLM action {action_id!r}; fallback to {fallback}. Original rationale: {rationale}",
+                    "rationale": f"Invalid LLM action {action_id!r}; graph-policy fallback to {fallback}. Original rationale: {rationale}",
                 }
 
             action: ARC3Action = {
@@ -9119,6 +9153,10 @@ class ARCOrchestrator:
             self.world_model.upsert_goal_hypothesis(hypothesis)
 
         active_goals = self.world_model.get_active_goal_hypotheses(limit=3)
+        if active_goals:
+            self._last_active_goal_hypothesis = dict(active_goals[0])
+        elif getattr(self, "_last_active_goal_hypothesis", None):
+            active_goals = [dict(self._last_active_goal_hypothesis or {})]
         try:
             click_candidates = self.click_candidate_generator.generate(
                 mechanic_graph_snapshot=snapshot,
@@ -9363,6 +9401,15 @@ class ARCOrchestrator:
                         reward_components["progress_gate_reason"] = f"{terminal_alignment}_without_terminal_progress"
                         record["meaningful_progress"] = False
                         record["progress_class"] = "local_object_progress"
+                        record["progress_gate_reason"] = reward_components["progress_gate_reason"]
+                    elif effect_class == "distance_improving_move":
+                        if reward_components is None:
+                            reward_components = {}
+                        reward_components["meaningful_progress"] = True
+                        reward_components["progress_class"] = "route_progress"
+                        reward_components["progress_gate_reason"] = "graph route distance improved"
+                        record["meaningful_progress"] = True
+                        record["progress_class"] = "route_progress"
                         record["progress_gate_reason"] = reward_components["progress_gate_reason"]
                     self._record_prediction_feedback(record, obs_id)
                     try:
