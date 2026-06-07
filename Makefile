@@ -1,4 +1,4 @@
-.PHONY: help smoke smoke-compare test test-a install temporal-up temporal-down
+.PHONY: help smoke smoke-compare smoke-temporal test test-a install temporal-up temporal-down
 
 PYTHON ?= .venv/bin/python
 CAMPY_REPO ?= ../hippocampy
@@ -38,4 +38,18 @@ temporal-up: ## start local Temporal + Postgres + UI
 
 temporal-down: ## stop local Temporal services
 	docker compose -f docker-compose.temporal.yml down
+
+smoke-temporal: temporal-up ## full Temporal smoke: start server, run puzzle via Temporal, stop server
+	@echo "Waiting for Temporal to be ready..."
+	@sleep 5
+	@echo "Starting Temporal worker..."
+	@ARC_TEMPORAL_ENABLED=1 $(PYTHON) -m agents.arc4.temporal_worker > /tmp/temporal_worker.log 2>&1 &
+	@WORKER_PID=$$!; \
+	sleep 2; \
+	echo "Running puzzle through Temporal..."; \
+	PYTHONPATH=. ARC_TEMPORAL_ENABLED=1 $(PYTHON) run_single_puzzle.py --agent-version=v2 --num-puzzles 1 --max-steps 5 --temporal; \
+	RESULT=$$?; \
+	kill $$WORKER_PID 2>/dev/null || true; \
+	$(MAKE) temporal-down; \
+	exit $$RESULT
 

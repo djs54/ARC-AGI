@@ -41,11 +41,18 @@ from agents.arc4.plan_vetter import PlanVetter
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
 from agents.arc4.ports import WorkflowDependencies
-from agents.arc4.types import WorkflowState
+from agents.arc4.types import WorkflowState, WorkflowRunResult
 from sidequest_mcp_client.observability import build_observability
 from arc_runtime.config import load_config
 from arc_runtime.llm import create_llm_client, LLMInitializationError
 from sidequest_mcp_client.readiness import check_mcp_readiness, ReadinessError
+
+# Guarded import for Temporal (optional dependency)
+try:
+    from agents.arc4.temporal_client import is_temporal_enabled, start_arc_workflow
+    HAS_TEMPORAL = True
+except ImportError:
+    HAS_TEMPORAL = False
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[0]
@@ -457,13 +464,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
     parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
+    parser.add_argument("--temporal", action="store_true", help="Enable Temporal.io workflow dispatch (requires running Temporal server)")
     return parser
 
 
-async def _run_arc_v2_batch(runner: "SingleTaskRunner", brain_client: Any, card_id: str) -> list[dict[str, Any]]:
+async def _run_arc_v2_batch(runner: "SingleTaskRunner", brain_client: Any, card_id: str, args: Any = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for task in runner.tasks:
-        result = await asyncio.to_thread(_run_arc_v2_task, task, runner, card_id, brain_client)
+        result = await asyncio.to_thread(_run_arc_v2_task, task, runner, card_id, brain_client, args)
         results.append(result)
     return results
 
@@ -540,7 +548,7 @@ def _build_arc_v2_bundle(
     return ArcV2Bundle(graph_port=graph_port, telemetry=telemetry, dependencies=dependencies, orchestrator=orchestrator, llm_port=llm_port)
 
 
-def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_client: Any) -> dict[str, Any]:
+def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_client: Any, args: Any = None) -> dict[str, Any]:
     session_id = f"arc-v2-{task.task_id}-{int(time.time())}"
     game_id = str(getattr(task, "game_id", "unknown"))
     game_title = str(getattr(task, "arc_game_title", "") or "")
@@ -564,11 +572,32 @@ def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_
         llm_client=create_llm_client(runner.config),
     )
 
-    try:
+    # Determine whether to use Temporal dispatch
+    use_temporal = HAS_TEMPORAL and (is_temporal_enabled() or (args and getattr(args, "temporal", False)))
+
+    if use_temporal:
+        # Dispatch through Temporal if enabled and reachable
+        try:
+            import asyncio as _asyncio
+            handle = _asyncio.get_event_loop().run_until_complete(
+                start_arc_workflow(task.task_id, observation, WorkflowState().to_dict())
+            )
+            if handle is not None:
+                # Temporal was reachable; wait for result
+                result_dict = _asyncio.get_event_loop().run_until_complete(handle.result())
+                workflow_result = WorkflowRunResult.from_dict(result_dict)
+                logger.info(f"Puzzle {task.task_id} completed via Temporal workflow")
+            else:
+                # Temporal unavailable; fall back to inline execution
+                logger.info(f"Temporal unavailable, falling back to inline execution for {task.task_id}")
+                workflow_result = bundle.orchestrator.run(WorkflowState(), observation)
+        except Exception as exc:
+            # Unexpected error during Temporal dispatch; fall back to inline
+            logger.warning(f"Temporal dispatch failed for {task.task_id}: {exc}; falling back to inline execution")
+            workflow_result = bundle.orchestrator.run(WorkflowState(), observation)
+    else:
+        # Inline execution path (default)
         workflow_result = bundle.orchestrator.run(WorkflowState(), observation)
-    except Exception:
-        game_session.close()
-        raise
 
     # Extract token counts from LLM adapter
     if bundle.llm_port is not None:
@@ -1295,7 +1324,7 @@ async def main():
             llm_cfg.get("max_retries", "default"),
         )
         if args.agent_version == "v2":
-            runner.results = await _run_arc_v2_batch(runner, brain_client, card_id)
+            runner.results = await _run_arc_v2_batch(runner, brain_client, card_id, args)
         else:
             durable = DurableARCRunner(
                 runner.harness,
