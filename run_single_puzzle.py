@@ -389,7 +389,7 @@ class _ArcV2GameSession:
             card_id = scorecard_resp.json().get("card_id") or self._card_id
             reset_resp = self._client.post("/api/cmd/RESET", json={"game_id": self._game_id, "card_id": card_id})
             reset_resp.raise_for_status()
-            payload = reset_resp.json()
+            payload = _unwrap_arc_game_payload(reset_resp.json())
             self._guid = str(payload.get("guid") or "") or None
             return payload
 
@@ -406,7 +406,7 @@ class _ArcV2GameSession:
                 request_payload.setdefault("y", payload.get("y", 0))
             response = self._client.post(f"/api/cmd/{action_id}", json=request_payload)
             response.raise_for_status()
-            frame_response = response.json()
+            frame_response = _unwrap_arc_game_payload(response.json())
             reward = 1.0 if frame_response.get("state") == "WIN" else 0.0
             done = frame_response.get("state") in ("WIN", "GAME_OVER")
             return {
@@ -429,6 +429,19 @@ class _ArcV2GameSession:
             "done": done,
             "state": frame_response.get("state"),
         }
+
+
+def _unwrap_arc_game_payload(payload: Any) -> Mapping[str, Any]:
+    current = payload
+    while isinstance(current, Mapping) and isinstance(current.get("payload"), Mapping):
+        nested = dict(current["payload"])
+        for key in ("game_id", "guid", "task_id", "dataset_id", "episode_num", "step_num", "available_actions", "frame", "state", "training_examples", "levels_completed", "win_levels"):
+            if key in current and key not in nested:
+                nested[key] = current[key]
+        current = nested
+    if isinstance(current, Mapping):
+        return dict(current)
+    raise TypeError("ARC game server response payload must be a mapping")
 
     def close(self) -> None:
         if self._client is not None:
@@ -576,21 +589,66 @@ def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_
     use_temporal = HAS_TEMPORAL and (is_temporal_enabled() or (args and getattr(args, "temporal", False)))
 
     if use_temporal:
-        # Dispatch through Temporal if enabled and reachable
+        # Dispatch through Temporal with in-process worker so activities share runtime context
         try:
             import asyncio as _asyncio
-            handle = _asyncio.get_event_loop().run_until_complete(
-                start_arc_workflow(task.task_id, observation, WorkflowState().to_dict())
+            from agents.arc4.temporal_activities import register_phases
+            from agents.arc4.temporal_workflows import ArcPuzzleWorkflow
+            from agents.arc4.temporal_activities import (
+                perceive_activity, resolve_activity, plan_activity,
+                vet_activity, execute_activity, evaluate_activity,
             )
-            if handle is not None:
-                # Temporal was reachable; wait for result
-                result_dict = _asyncio.get_event_loop().run_until_complete(handle.result())
+            from temporalio.client import Client as TemporalClient
+            from temporalio.worker import Worker as TemporalWorker
+
+            # Register real phase callables so activities use them
+            register_phases({
+                "perceive": bundle.dependencies.perceive,
+                "resolve": bundle.dependencies.resolve,
+                "plan": bundle.dependencies.plan,
+                "vet": bundle.dependencies.vet,
+                "execute": bundle.dependencies.execute,
+                "evaluate": bundle.dependencies.evaluate,
+            })
+
+            async def _temporal_dispatch():
+                import os
+                target = os.environ.get("ARC_TEMPORAL_TARGET", "localhost:7233")
+                namespace = os.environ.get("ARC_TEMPORAL_NAMESPACE", "default")
+                task_queue = os.environ.get("ARC_TEMPORAL_TASK_QUEUE", "arc-agent")
+
+                client = await TemporalClient.connect(target, namespace=namespace)
+
+                # Run in-process worker + dispatch in parallel
+                async with TemporalWorker(
+                    client,
+                    task_queue=task_queue,
+                    workflows=[ArcPuzzleWorkflow],
+                    activities=[
+                        perceive_activity, resolve_activity, plan_activity,
+                        vet_activity, execute_activity, evaluate_activity,
+                    ],
+                ):
+                    handle = await client.start_workflow(
+                        ArcPuzzleWorkflow.run,
+                        {
+                            "state": WorkflowState().to_dict(),
+                            "observation": observation,
+                            "max_cycles": bundle.orchestrator._limits.max_cycles,
+                        },
+                        id=f"arc-puzzle-{task.task_id}",
+                        task_queue=task_queue,
+                    )
+                    return await handle.result()
+
+            _loop = _asyncio.new_event_loop()
+            try:
+                result_dict = _loop.run_until_complete(_temporal_dispatch())
                 workflow_result = WorkflowRunResult.from_dict(result_dict)
                 logger.info(f"Puzzle {task.task_id} completed via Temporal workflow")
-            else:
-                # Temporal unavailable; fall back to inline execution
-                logger.info(f"Temporal unavailable, falling back to inline execution for {task.task_id}")
-                workflow_result = bundle.orchestrator.run(WorkflowState(), observation)
+            finally:
+                _loop.close()
+
         except Exception as exc:
             # Unexpected error during Temporal dispatch; fall back to inline
             logger.warning(f"Temporal dispatch failed for {task.task_id}: {exc}; falling back to inline execution")
