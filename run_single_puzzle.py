@@ -376,6 +376,8 @@ class _ArcV2GameSession:
         self._real_api = real_api
         self._client: httpx.Client | None = None
         self._guid: str | None = None
+        self._prev_levels_completed: int = 0
+        self._prev_grid_hash: str | None = None
 
     def open(self) -> Mapping[str, Any]:
         if self._real_api:
@@ -391,9 +393,16 @@ class _ArcV2GameSession:
             reset_resp.raise_for_status()
             payload = _unwrap_arc_game_payload(reset_resp.json())
             self._guid = str(payload.get("guid") or "") or None
+            initial_observation = ARC3Adapter(NoOpBrainClient(), session_id="arc-v2-init", task_id=self._game_id).normalize_observation(payload)
+            self._prev_levels_completed = int(payload.get("levels_completed") or 0)
+            self._prev_grid_hash = str(initial_observation.get("frame_hash") or "") or None
             return payload
 
-        return self._harness._get_mock_initial_frame(self._game_id)
+        payload = self._harness._get_mock_initial_frame(self._game_id)
+        initial_observation = ARC3Adapter(NoOpBrainClient(), session_id="arc-v2-init", task_id=self._game_id).normalize_observation(payload)
+        self._prev_levels_completed = int(payload.get("levels_completed") or 0)
+        self._prev_grid_hash = str(initial_observation.get("frame_hash") or "") or None
+        return payload
 
     def execute_action(self, action_id: str, payload: Mapping[str, Any], context: Mapping[str, Any]) -> Mapping[str, Any]:
         if self._real_api:
@@ -407,28 +416,60 @@ class _ArcV2GameSession:
             response = self._client.post(f"/api/cmd/{action_id}", json=request_payload)
             response.raise_for_status()
             frame_response = _unwrap_arc_game_payload(response.json())
-            reward = 1.0 if frame_response.get("state") == "WIN" else 0.0
+            observation = ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response)
+            progress = _compute_progress(
+                frame_response,
+                self._prev_levels_completed,
+                self._prev_grid_hash,
+                str(observation.get("frame_hash") or "") or None,
+            )
+            self._prev_levels_completed = int(progress["levels_completed"])
+            self._prev_grid_hash = str(observation.get("frame_hash") or "") or None
             done = frame_response.get("state") in ("WIN", "GAME_OVER")
             return {
-                "observation": ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response),
-                "did_progress": reward >= 1.0,
+                "observation": observation,
+                "did_progress": bool(progress["did_progress"]),
                 "actual_effect": frame_response.get("state") or frame_response.get("effect"),
-                "reward": reward,
+                "reward": float(progress["reward"]),
+                "progress_reward": float(progress["progress_reward"]),
+                "levels_completed": int(progress["levels_completed"]),
+                "prev_levels_completed": int(progress["prev_levels_completed"]),
+                "level_gain": int(progress["level_gain"]),
+                "grid_changed": bool(progress["grid_changed"]),
                 "done": done,
                 "state": frame_response.get("state"),
             }
 
         step = int(context.get("step") or 0)
         raw_action = {"action_id": action_id, **dict(payload)}
-        frame_response, reward, done = self._harness._execute_mock_action(self._game_id, raw_action, step)
+        frame_response, _reward, done = self._harness._execute_mock_action(self._game_id, raw_action, step)
+        observation = ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response)
+        progress = _compute_progress(
+            frame_response,
+            self._prev_levels_completed,
+            self._prev_grid_hash,
+            str(observation.get("frame_hash") or "") or None,
+        )
+        self._prev_levels_completed = int(progress["levels_completed"])
+        self._prev_grid_hash = str(observation.get("frame_hash") or "") or None
         return {
-            "observation": ARC3Adapter(NoOpBrainClient(), session_id=str(context.get("session_id") or "arc-v2"), task_id=self._game_id).normalize_observation(frame_response),
-            "did_progress": bool(reward),
+            "observation": observation,
+            "did_progress": bool(progress["did_progress"]),
             "actual_effect": frame_response.get("state") or frame_response.get("effect"),
-            "reward": reward,
+            "reward": float(progress["reward"]),
+            "progress_reward": float(progress["progress_reward"]),
+            "levels_completed": int(progress["levels_completed"]),
+            "prev_levels_completed": int(progress["prev_levels_completed"]),
+            "level_gain": int(progress["level_gain"]),
+            "grid_changed": bool(progress["grid_changed"]),
             "done": done,
             "state": frame_response.get("state"),
         }
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
 
 def _unwrap_arc_game_payload(payload: Any) -> Mapping[str, Any]:
@@ -443,10 +484,28 @@ def _unwrap_arc_game_payload(payload: Any) -> Mapping[str, Any]:
         return dict(current)
     raise TypeError("ARC game server response payload must be a mapping")
 
-    def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+
+def _compute_progress(
+    frame_response: Mapping[str, Any],
+    prev_levels: int,
+    prev_grid_hash: str | None,
+    new_grid_hash: str | None,
+) -> dict[str, Any]:
+    state = frame_response.get("state")
+    levels = int(frame_response.get("levels_completed") or 0)
+    level_gain = max(0, levels - prev_levels)
+    win = state == "WIN"
+    grid_changed = bool(new_grid_hash and prev_grid_hash and new_grid_hash != prev_grid_hash)
+    progress_reward = 1.0 if win else float(level_gain)
+    return {
+        "reward": progress_reward,
+        "progress_reward": progress_reward,
+        "did_progress": bool(win or level_gain > 0),
+        "levels_completed": levels,
+        "prev_levels_completed": prev_levels,
+        "level_gain": level_gain,
+        "grid_changed": grid_changed,
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -526,7 +585,7 @@ def _build_arc_v2_bundle(
         "plan",
         lambda state, perception, goal: plan_agent.generate(state, perception, goal, graph_port=graph_port, llm_port=llm_port),
     )
-    vet = telemetry.wrap_phase("vet", PlanVetter().vet)
+    vet = telemetry.wrap_phase("vet", PlanVetter(graph_port=graph_port).vet)
     execute_agent = Executor(transport=game_session)
     execute = telemetry.wrap_phase(
         "execute",
@@ -568,8 +627,10 @@ def _run_arc_v2_task(task: Any, runner: "SingleTaskRunner", card_id: str, brain_
     game_tags = tuple(str(tag) for tag in (getattr(task, "arc_game_tags", []) or []))
     game_session = _ArcV2GameSession(runner.harness, game_id=game_id, card_id=card_id, real_api=runner.real_api)
     initial_frame = game_session.open()
+    logger.info("RAW initial_frame available_actions=%s", initial_frame.get("available_actions"))
     adapter = ARC3Adapter(NoOpBrainClient(), session_id=session_id, task_id=task.task_id)
     observation = adapter.normalize_observation(initial_frame)
+    logger.info("NORMALIZED observation available_actions=%s", observation.get("available_actions"))
 
     bundle = _build_arc_v2_bundle(
         task_id=task.task_id,
@@ -715,6 +776,7 @@ class SingleTaskRunner:
                 require_brain_socket=True,
                 probe_memory_backend=True,
                 require_roundtrip_persistence=True,
+                call_timeout=10.0,
             )
         except ReadinessError as exc:
             raise RuntimeError(str(exc))
@@ -925,7 +987,8 @@ class SingleTaskRunner:
         failure_class = str(result.get("failure_class") or "none")
         correct = bool(result.get("correct") is True)
         slug = SingleTaskRunner._game_slug(result)
-        arc_game_url = f"https://arcprize.org/tasks/{slug}" if slug else "https://arcprize.org/tasks"
+        # ARC-AGI-3 play URL uses the full game_id (e.g. "vc33-5430563c")
+        arc_game_url = f"https://arcprize.org/play?task={game_id}" if game_id != "unknown" else "https://arcprize.org"
         result_file = FINAL_OUTPUT_PATH
         current_artifact = Path(results_path) if results_path else FINAL_OUTPUT_PATH
         sentence = (

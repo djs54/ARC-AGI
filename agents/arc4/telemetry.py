@@ -139,6 +139,14 @@ class ArcV2Telemetry:
         execution = self._latest_execution
         evaluation = self._latest_evaluation
 
+        progress_tier = "flat"
+        if evaluation is not None and isinstance(evaluation.metadata, Mapping):
+            progress_tier = str(evaluation.metadata.get("progress_tier") or "flat")
+        progress_class = "level" if progress_tier == "level" else "grid_change" if progress_tier == "grid_change" else "flat"
+        progress_reward = 0.0
+        if execution is not None and isinstance(execution.metadata, Mapping):
+            progress_reward = float(execution.metadata.get("progress_reward", execution.metadata.get("reward", 0.0)) or 0.0)
+
         snapshot = {
             "snapshot_type": "step",
             "task_id": self.task_id,
@@ -164,10 +172,10 @@ class ArcV2Telemetry:
             "selected_candidate_prediction_confidence": getattr(getattr(plan, "candidate", None), "score", 0.0) or 0.0,
             "planner_candidate_count": len(getattr(plan, "alternatives", ()) or ()) + (1 if getattr(plan, "candidate", None) else 0),
             "selected_candidate_has_falsification": bool(vet and not vet.approved),
-            "reward": 1.0 if evaluation and evaluation.meaningful_progress else 0.0,
-            "progress_reward": 1.0 if evaluation and evaluation.meaningful_progress else 0.0,
+            "reward": progress_reward,
+            "progress_reward": progress_reward,
             "meaningful_progress": bool(evaluation.meaningful_progress if evaluation else False),
-            "progress_class": "meaningful" if evaluation and evaluation.meaningful_progress else "flat",
+            "progress_class": progress_class,
             "action_effect_class": getattr(execution, "actual_effect", None) or "unknown",
             "decision_source": "arc_v2",
             "state": self._latest_observation_state(),

@@ -35,7 +35,7 @@ class ArcPuzzleWorkflow:
         while True:
             step = self._state.get("step_index", 0)
             if step >= max_cycles:
-                return self._finish("BUDGET_EXHAUSTED", "budget_exhausted")
+                return self._finish("budget_exhausted", "budget_exhausted")
 
             # Phase 1: Perceive
             perceive_out = await workflow.execute_activity(
@@ -112,7 +112,7 @@ class ArcPuzzleWorkflow:
                 vet = vet_out2["result"]["payload"]
 
                 if not vet.get("approved", True):
-                    return self._finish("SKIPPED", "second_veto")
+                    return self._finish("skipped", "second_veto")
 
             # Phase 5: Execute
             exec_out = await workflow.execute_activity(
@@ -136,20 +136,39 @@ class ArcPuzzleWorkflow:
             evaluation = eval_out["result"]["payload"]
             self._phase_results.append(eval_out["result"])
 
-            # Update state counters
+            # Update state counters (mirror WorkflowOrchestrator._record_*)
+            action_id = execution.get("action_id", "")
+            attempt_counts = self._state.setdefault("action_attempt_counts", {})
+            attempt_counts[action_id] = attempt_counts.get(action_id, 0) + 1
+
+            if evaluation.get("meaningful_progress"):
+                self._state["consecutive_no_progress_count"] = 0
+            else:
+                self._state["consecutive_no_progress_count"] = self._state.get("consecutive_no_progress_count", 0) + 1
+                falsification_counts = self._state.setdefault("action_falsification_counts", {})
+                delta = max(0, evaluation.get("falsification_delta", 0))
+                falsification_counts[action_id] = falsification_counts.get(action_id, 0) + delta
+
             self._state["step_index"] = step + 1
 
-            # Stall check
+            # Stall check — only stall after exhausting all actions
+            # AND completing multiple passes (actions may behave differently
+            # as game state evolves across cycles).
             no_progress = self._state.get("consecutive_no_progress_count", 0)
             if no_progress >= max_no_progress:
                 available = observation.get("available_actions", [])
+                num_available = len(available) or 1
                 tested = len(self._state.get("action_attempt_counts", {}))
-                if len(available) - tested <= 0:
-                    return self._finish("STALLED", "stall_detected")
+                untested_remaining = num_available - tested
+                if untested_remaining > 0:
+                    pass  # still have untested actions — keep exploring
+                elif no_progress >= num_available * 2:
+                    # Tried every action at least twice with no progress
+                    return self._finish("stalled", "stall_detected")
 
-            # Terminate check
-            if evaluation.get("decision") == "TERMINATE":
-                return self._finish("TERMINATED", evaluation.get("reason", "terminated"))
+            # Terminate check (WorkflowDecision is a StrEnum with lowercase values)
+            if str(evaluation.get("decision", "")).lower() == "terminate":
+                return self._finish("terminated", evaluation.get("reason", "terminated"))
 
             # Next cycle uses execution's observation
             observation = execution.get("observation", observation)
