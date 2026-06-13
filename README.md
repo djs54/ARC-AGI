@@ -13,25 +13,30 @@ For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE
 ## What Is In Here
 
 - `agents/arc3/`
-  ARC orchestration and solver logic
+  ARC v1 orchestration and solver logic
+- `agents/arc4/`
+  ARC v2 modular workflow prototype with injected contracts, ports, graph adapter, and telemetry
 - `benchmarks/arc3/`
   ARC harness, submission, packaging, and compliance tooling
+- `sidequest_mcp_client/`
+  ARC-owned MCP client seam for runtime access to the sibling `hippocampy` memory server
 - `tests/`
   ARC-specific test set copied from the main repo
 - `run_single_puzzle.py`
-  Single-puzzle runner for ARC smoke work
+  Single-puzzle runner with `--agent-version=v1|v2`
 
 ## Dependency Model
 
 This workspace is intentionally not a memory engine by itself.
 
-It still relies on HippoCampy for:
+Runtime ARC paths rely on HippoCampy for:
 
-- `mcp_engine`
-- graph schema and Kuzu setup
-- memory tools
-- observability helpers
-- shared config loading
+- the MCP stdio server adapter
+- graph-backed memory tools
+- persistent storage and retrieval
+- shared config and observability support exposed through the sibling repo
+
+Offline benchmark and submission tooling under `benchmarks/arc3/` is exempt from the runtime seam rule and still embeds brain internals directly where packaging constraints require it.
 
 That means the intended relationship is:
 
@@ -60,14 +65,25 @@ If `hippocampy` is published where you want to consume it from, you can install 
 
 ### Running a smoke
 
-Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke:
+Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke.
+
+ARC v1 remains the default:
 
 ```bash
 export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
 PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
 ```
 
+To exercise the landed ARC v2 prototype path, add `--agent-version=v2`:
+
+```bash
+export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
+PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10 --agent-version=v2
+```
+
 `--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.campy/brain.sock`).
+
+Current rollout caveat: ARC v2 is wired to ARC-specific MCP query tools from the sibling `hippocampy` repo. If the running MCP server does not yet expose those `arc_*` methods, the ARC v2 runtime degrades gracefully instead of crashing, but smoke quality is limited until the server side is updated.
 
 ## Current Status
 
@@ -79,6 +95,8 @@ What is already done:
 - ARC tests are copied into their own test tree
 - packaging metadata for a standalone ARC project is added
 - Production HippoCampy integration is concentrated behind MCP-facing modules in `sidequest_mcp_client/`, with any direct-import compatibility helpers isolated to `sidequest_mcp_client/test_compat/`
+- A modular ARC v2 runtime prototype now exists under `agents/arc4/` and can be selected with `run_single_puzzle.py --agent-version=v2`
+- ARC v2 integration tests cover the workflow slice, phase modules, MCP adapter mapping, CLI flag support, and telemetry emission
 
 What still remains if you want a fully independent git repo:
 
@@ -88,7 +106,8 @@ What still remains if you want a fully independent git repo:
 Current validation baseline:
 
 - `make test-a` is the required green-baseline signal for A-card work
-- `pytest -q` was restored to a full-suite green baseline through A029/A030-A037 (`723/723` passing as recorded on A037)
+- focused ARC v2 regression coverage lives under `tests/test_arc4_*.py` and `tests/test_arc4_integration.py`
+- full-suite triage and restoration history remains tracked through A029 and its follow-up sequence
 
 The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 moved all production paths behind the MCP stdio seam, and `BacklogRules.md` rule 4 forbids re-introducing direct imports. See [ARCHITECTURE.md](ARCHITECTURE.md) for the seam contract.
 
