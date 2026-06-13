@@ -1,4 +1,4 @@
-.PHONY: help smoke smoke-compare smoke-temporal test test-a install temporal-up temporal-down
+.PHONY: help smoke smoke-compare smoke-temporal test test-a test-all install temporal-up temporal-down
 
 PYTHON ?= .venv/bin/python
 CAMPY_REPO ?= ../hippocampy
@@ -29,6 +29,9 @@ test-a: ## run only the A022-A024 suites
 	  tests/test_plan_registration_idempotent.py \
 	  tests/test_exploration_probing.py \
 	  tests/test_trace_durability.py
+
+test-all: ## run full test suite baseline
+	$(PYTHON) -m pytest tests/ -q
 
 install: ## editable install of sibling brain + this repo
 	pip install -e $(CAMPY_REPO) && pip install -e .

@@ -2,7 +2,12 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from agents.arc3.hypothesis import ActionFact, Hypothesis, HypothesisManager
-from mcp_engine.schema import NODE_TABLES, REL_TABLES
+
+pytestmark = pytest.mark.requires_mcp
+
+_schema_mod = pytest.importorskip("mcp_engine.schema")
+NODE_TABLES = _schema_mod.NODE_TABLES
+REL_TABLES = _schema_mod.REL_TABLES
 
 
 def _make_manager(db=None):

@@ -6,7 +6,11 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from agents.arc3.entity_graph import EntityGraphBuilder, InferenceResult
 from agents.arc3.solver import RoleType
-from mcp_engine.graph.kuzu_client import KuzuClient
+
+pytestmark = pytest.mark.requires_mcp
+
+_kuzu_mod = pytest.importorskip("mcp_engine.graph.kuzu_client")
+KuzuClient = _kuzu_mod.KuzuClient
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

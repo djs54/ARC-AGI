@@ -100,8 +100,8 @@ class TestRaceSafeGuardrails:
         # With route evidence present, exhaustion shouldn't be immediate
         assert churn_evidence is not None
 
-    def test_recent_route_regression_allows_exhaustion_decision(self):
-        """Recent regressing route evidence should stop suppressing early-stop."""
+    def test_recent_route_regression_triggers_replan_decision(self):
+        """Recent regressing route evidence should trigger route replan before exhaustion."""
         graph = WorldModelGraph("test_task", "test_session")
 
         for step, distance in enumerate([50.0, 51.0, 52.0, 53.0], start=10):
@@ -156,9 +156,9 @@ class TestRaceSafeGuardrails:
             },
         )
 
-        assert decision.mode == ReasoningMode.EARLY_STOP
-        assert decision.trigger == "route_regression_exhausted"
-        assert decision.world_model_decision == "route_regression_exhausted"
+        assert decision.mode == ReasoningMode.LLM_REASON
+        assert decision.trigger == "route_follow_flat_replan"
+        assert decision.world_model_decision == "route_follow_flat_replan"
 
     def test_pure_churn_allows_exhaustion(self):
         """Pure churn still allows exhaustion."""

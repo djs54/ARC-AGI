@@ -165,12 +165,13 @@ async def test_continues_after_task_failure(tmp_path):
 @pytest.mark.asyncio
 async def test_loop_worker_survives_error(monkeypatch):
     from benchmarks.arc3.submission import SubmissionRunner
+    import types
     runner = SubmissionRunner()
     runner.db = MagicMock()
     runner.config = {"llm": {"provider": "ollama", "model": "test"}}
 
     fake_llm = MagicMock()
-    monkeypatch.setattr("mcp_engine.llm.provider.create_llm_client", MagicMock(return_value=fake_llm))
+    monkeypatch.setattr("arc_runtime.llm.create_llm_client", MagicMock(return_value=fake_llm))
 
     call_order = []
 
@@ -180,7 +181,12 @@ async def test_loop_worker_survives_error(monkeypatch):
             raise RuntimeError("boom")
         return True
 
-    monkeypatch.setattr("mcp_engine.loop.orchestrator.run_loop", _fake_run_loop)
+    def _fake_import_module(name):
+        if name == "mcp_engine.loop.orchestrator":
+            return types.SimpleNamespace(run_loop=_fake_run_loop)
+        raise ImportError(name)
+
+    monkeypatch.setattr("importlib.import_module", _fake_import_module)
 
     worker = asyncio.create_task(runner._loop_worker([]))
     await runner.loop_queue.put(("id1", "text", "user", "session"))
@@ -1072,6 +1078,7 @@ async def test_action_effect_guaranteed_on_win():
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_mcp
 async def test_upsert_lesson_round_trip():
     """B214: upsert_lesson must persist; recall_relevant_lessons must find it."""
     from mcp_engine.config import load_config

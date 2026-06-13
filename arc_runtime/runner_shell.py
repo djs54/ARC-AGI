@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Thin CLI entrypoint and compatibility re-exports for ARC single-puzzle runs."""
+"""Test submission runner for a small ARC puzzle batch."""
 
-from __future__ import annotations
 
 import argparse
 import asyncio
 import atexit
-import importlib.util
 import json
 import logging
 import os
@@ -17,115 +15,96 @@ from typing import Any
 
 from agents.arc3.runner import DurableARCRunner
 from agents.arc3.trace_names import normalize_artifact_payload, normalize_orchestration_status
-from arc_runtime import artifacts, dispatch as arc_dispatch, runner_shell as rs
+from arc_runtime import artifacts
 from arc_runtime.bundle import ArcV2Bundle, SyncLLMPortAdapter, build_arc_v2_bundle
 from arc_runtime.config import load_config
+from arc_runtime.dispatch import run_arc_v2_batch, run_arc_v2_task
 from arc_runtime.game_session import ArcV2GameSession, _compute_progress, _unwrap_arc_game_payload
 from arc_runtime.llm import LLMInitializationError, create_llm_client
+from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
+from benchmarks.harness import BenchmarkConfig
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from sidequest_mcp_client.observability import build_observability
+from sidequest_mcp_client.readiness import ReadinessError, check_mcp_readiness
 
-REPO_ROOT = rs.REPO_ROOT
-CONFIG_PATH = rs.CONFIG_PATH
-LEGACY_CONFIG_PATH = rs.LEGACY_CONFIG_PATH
-MANIFEST_PATH = rs.MANIFEST_PATH
-TASK_BATCH_SIZE = rs.TASK_BATCH_SIZE
-FINAL_OUTPUT_PATH = rs.FINAL_OUTPUT_PATH
-ARC_SERVER_OUTPUT_PATH = rs.ARC_SERVER_OUTPUT_PATH
-AGENT_EXECUTION_TRACE_PATH = rs.AGENT_EXECUTION_TRACE_PATH
-MASTER_TIMELINE_PATH = rs.MASTER_TIMELINE_PATH
-LIVE_OUTPUT_PATH = rs.LIVE_OUTPUT_PATH
-ARC_KEY_PATHS = rs.ARC_KEY_PATHS
+# Configuration paths
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = REPO_ROOT / "campy.toml"
+LEGACY_CONFIG_PATH = REPO_ROOT / "sidequests.toml"
+MANIFEST_PATH = REPO_ROOT / "benchmarks/arc3/tasks_manifest.json"
+TASK_BATCH_SIZE = 5
+FINAL_OUTPUT_PATH = REPO_ROOT / "submission_results_single.json"
+ARC_SERVER_OUTPUT_PATH = REPO_ROOT / "submission_results_arcServer.json"
+AGENT_EXECUTION_TRACE_PATH = REPO_ROOT / "agent_execution_trace.json"
+MASTER_TIMELINE_PATH = REPO_ROOT / "master_timeline.json"
+LIVE_OUTPUT_PATH = REPO_ROOT / "submission_results_single.live.jsonl"
+ARC_KEY_PATHS = (
+    REPO_ROOT / "benchmarks/.arc/arc.json",
+    REPO_ROOT / "benchmarks/arc3/.arc/arc.json",
+)
 
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Back-compat re-exports used by tests.
 _ArcV2GameSession = ArcV2GameSession
+_run_arc_v2_task = run_arc_v2_task
+_run_arc_v2_batch = run_arc_v2_batch
 _build_arc_v2_bundle = build_arc_v2_bundle
 _json_default = artifacts.json_default
 _json_dumps = artifacts.json_dumps
 _atomic_dump_json = artifacts.atomic_dump_json
-HAS_TEMPORAL = arc_dispatch.HAS_TEMPORAL
 
 
-_apply_llm_overrides = rs._apply_llm_overrides
-_remove_db_artifacts = rs._remove_db_artifacts
-_ensure_arc_api_key = rs._ensure_arc_api_key
+def _apply_llm_overrides(config: dict, overrides: dict | None = None) -> dict:
+    if not overrides:
+        return config
+    merged = dict(config)
+    llm_cfg = dict(config.get("llm", {}))
+    for key, value in overrides.items():
+        if value is not None:
+            llm_cfg[key] = value
+    merged["llm"] = llm_cfg
+    return merged
+
+
+def _remove_db_artifacts(db_path: Path) -> None:
+    import shutil
+
+    candidates = [db_path, Path(f"{db_path}.wal"), Path(f"{db_path}.shm"), Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+    for candidate in candidates:
+        if candidate.exists():
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+
+
+def _ensure_arc_api_key(arc_key_path: str | Path | None = None) -> str | None:
+    existing = (os.environ.get("ARC_API_KEY") or "").strip()
+    if existing:
+        return existing
+    candidate_paths = [Path(arc_key_path)] if arc_key_path else list(ARC_KEY_PATHS)
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            key = str(json.loads(path.read_text()).get("key", "")).strip()
+        except Exception as exc:
+            logger.warning("Could not read ARC key from %s: %s", path, exc)
+            continue
+        if key:
+            os.environ["ARC_API_KEY"] = key
+            logger.info("Loaded ARC_API_KEY from %s", path)
+            return key
+    return None
 
 
 def _enforce_observability_preflight(config: dict) -> None:
-    obs_cfg = config.get("observability", {}) if isinstance(config, dict) else {}
-    explicit_enabled = None
-    if isinstance(obs_cfg, dict) and "enabled" in obs_cfg:
-        explicit_enabled = bool(obs_cfg["enabled"])
-
-    if explicit_enabled is False:
-        return
-
-    auto_enabled = False
-
-    if explicit_enabled is None:
-        all_present = (
-            importlib.util.find_spec("opentelemetry") is not None
-            and importlib.util.find_spec("phoenix") is not None
-            and importlib.util.find_spec("phoenix.otel") is not None
-        )
-        if all_present:
-            os.environ["PHOENIX_ENABLE"] = "1"
-            os.environ["_A016_AUTO_ENABLED_PHOENIX"] = "1"
-            auto_enabled = True
-            if isinstance(config, dict):
-                config.setdefault("observability", {})["enabled"] = True
-            obs_cfg = config.get("observability", {})
-            logger.info(
-                "Phoenix observability auto-enabled (PHOENIX_ENABLE=1, project=%s, endpoint=%s)",
-                os.environ.get("PHOENIX_PROJECT", "arc-agi-campy"),
-                os.environ.get("PHOENIX_ENDPOINT", "http://127.0.0.1:6006/v1/traces"),
-            )
-        else:
-            return
-
-    backend = str(obs_cfg.get("backend", "phoenix")).lower()
-    if backend != "phoenix":
-        raise RuntimeError(
-            f"Observability preflight failed: unsupported backend '{backend}'. "
-            "Use backend='phoenix' or disable [observability].enabled."
-        )
-
-    missing = []
-    if importlib.util.find_spec("opentelemetry") is None:
-        missing.append("opentelemetry")
-    if importlib.util.find_spec("phoenix") is None:
-        missing.append("phoenix")
-    if importlib.util.find_spec("phoenix.otel") is None:
-        missing.append("phoenix.otel")
-    if missing:
-        raise RuntimeError(
-            "Observability preflight failed: required tracing packages are missing in this interpreter.\n"
-            f"python_executable={sys.executable}\n"
-            f"missing={', '.join(missing)}\n"
-            "Fix: run the smoke test with the HippoCampy/Campy interpreter or install tracing deps into the current interpreter."
-        )
-
-    try:
-        obs = build_observability(config)
-        if not getattr(obs, "enabled", False):
-            raise RuntimeError("Observability preflight failed: tracing could not be initialized.")
-    except Exception as exc:
-        if auto_enabled:
-            logger.warning(
-                "Phoenix auto-enable failed (%s); falling back to JSON-trace only. "
-                "Set PHOENIX_ENABLE=1 explicitly to make this fatal.",
-                exc,
-            )
-            os.environ.pop("PHOENIX_ENABLE", None)
-            if isinstance(config.get("observability"), dict):
-                config["observability"]["enabled"] = False
-            return
-        raise
-    finally:
-        if auto_enabled:
-            os.environ.pop("_A016_AUTO_ENABLED_PHOENIX", None)
+    obs = build_observability(config)
+    if config.get("observability", {}).get("enabled") and not getattr(obs, "enabled", False):
+        raise RuntimeError("Observability preflight failed: tracing could not be initialized.")
 
 
 def _enforce_llm_preflight(config: dict) -> None:
@@ -136,27 +115,26 @@ def _enforce_llm_preflight(config: dict) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    return rs.build_arg_parser()
+    parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
+    parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
+    parser.add_argument("--live-smoke", action="store_true", help="Convenience mode for one-puzzle live smoke")
+    parser.add_argument("--agent-version", choices=("v1", "v2"), default="v2", help="Select ARC agent implementation")
+    parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run")
+    parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle")
+    parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
+    parser.add_argument("--config", type=str, default=None, help="Explicit campy.toml path")
+    parser.add_argument("--model", type=str, default=None, help="Override llm.model")
+    parser.add_argument("--base-url", type=str, default=None, help="Override llm.base_url")
+    parser.add_argument("--timeout-seconds", type=float, default=None, help="Override llm.timeout_seconds")
+    parser.add_argument("--max-retries", type=int, default=None, help="Override llm.max_retries")
+    parser.add_argument("--arc-key-path", type=str, default=None, help="Load ARC_API_KEY from this JSON file")
+    parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
+    parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
+    parser.add_argument("--temporal", action="store_true", help="Enable Temporal workflow dispatch")
+    return parser
 
 
-def _run_arc_v2_task(task: Any, runner: Any, card_id: str, brain_client: Any, args: Any = None) -> dict[str, Any]:
-    previous_factory = arc_dispatch.create_llm_client
-    arc_dispatch.create_llm_client = create_llm_client
-    try:
-        return arc_dispatch.run_arc_v2_task(task, runner, card_id, brain_client, args)
-    finally:
-        arc_dispatch.create_llm_client = previous_factory
-
-
-async def _run_arc_v2_batch(runner: Any, brain_client: Any, card_id: str, args: Any = None) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for task in runner.tasks:
-        result = await asyncio.to_thread(_run_arc_v2_task, task, runner, card_id, brain_client, args)
-        results.append(result)
-    return results
-
-
-class SingleTaskRunner(rs.SingleTaskRunner):
+class SingleTaskRunner:
     def __init__(self, real_api=False, config_path: str | Path | None = None, llm_overrides: dict | None = None, max_steps: int | None = None, live_smoke: bool = False):
         resolved_config_path = Path(config_path) if config_path else (CONFIG_PATH if CONFIG_PATH.exists() else (LEGACY_CONFIG_PATH if LEGACY_CONFIG_PATH.exists() else None))
         self.config = _apply_llm_overrides(load_config(resolved_config_path), llm_overrides)
@@ -164,7 +142,6 @@ class SingleTaskRunner(rs.SingleTaskRunner):
             self.config.setdefault("benchmark", {})["max_attempts_per_puzzle"] = max_steps
         _enforce_llm_preflight(self.config)
         _enforce_observability_preflight(self.config)
-
         self.db = None
         self.harness = None
         self.tasks = []
@@ -179,6 +156,37 @@ class SingleTaskRunner(rs.SingleTaskRunner):
         self.world_model_eval = False
         self.world_model_live_output_path = Path("submission_results_single.world_model.live.jsonl")
         self.world_model_evaluator = WorldModelEvaluator()
+
+    async def initialize(self):
+        required_tools = ["notify_turn", "current_truth", "register_plan", "report_outcome", "recall_plans", "recall_relevant_lessons", "upsert_lesson"]
+        try:
+            check_mcp_readiness(required_tools=required_tools, require_brain_socket=True, probe_memory_backend=True, require_roundtrip_persistence=True, call_timeout=10.0)
+        except ReadinessError as exc:
+            raise RuntimeError(str(exc))
+
+        timeout_budget = 7200 if self.live_smoke else 3600
+        benchmark_config = BenchmarkConfig(
+            name="ARC-AGI-3",
+            description="Single puzzle test",
+            timeout=timeout_budget,
+            memory_limit_gb=8.0,
+            cpu_limit_percent=80.0,
+            parameters=self.config.get("benchmark", {}),
+        )
+        self.harness = ARC3Harness(benchmark_config, db=self.db, mock_api=not self.real_api)
+        await self.harness.setup()
+
+        if MANIFEST_PATH.exists():
+            self.tasks = load_tasks_from_manifest(str(MANIFEST_PATH))
+
+    def reset_live_output(self):
+        self.live_output_path.write_text("")
+        if self.world_model_eval:
+            self.world_model_evaluator.reset()
+            self.world_model_live_output_path.write_text("")
+
+    def append_live_snapshot(self, snapshot: dict):
+        artifacts.append_live_snapshot(self, snapshot)
 
     @staticmethod
     def _make_final_result_compact(result: dict) -> dict:
@@ -206,6 +214,15 @@ class SingleTaskRunner(rs.SingleTaskRunner):
             agent_execution_trace_path=AGENT_EXECUTION_TRACE_PATH,
             master_timeline_path=MASTER_TIMELINE_PATH,
         )
+
+    def export_results(self):
+        artifacts.export_results_from_runner(self)
+
+    async def shutdown(self):
+        build_observability(self.config).shutdown()
+        if self.harness is not None:
+            await self.harness.teardown()
+            self.harness = None
 
 
 def _emergency_shutdown(runner: DurableARCRunner):
@@ -256,7 +273,7 @@ async def main():
         brain_client = MCPBrainClient(runner.db, runner.config)
         runner.reset_live_output()
         if args.agent_version == "v2":
-            runner.results = await _run_arc_v2_batch(runner, brain_client, card_id, args)
+            runner.results = await run_arc_v2_batch(runner, brain_client, card_id, args)
         else:
             durable = DurableARCRunner(runner.harness, brain_client, runner.config, progress_callback=runner.append_live_snapshot)
             durable._emit_transition_snapshots = True

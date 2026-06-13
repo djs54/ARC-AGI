@@ -666,7 +666,7 @@ The repo split is clean at both the folder level and the interface level (A002-A
 
 ### Validation Baseline
 
-The A-series baseline (`make test-a`) remains the required regression signal for A-card work. The broader `pytest -q` suite was restored through the A029 follow-up sequence (A030-A037); A037 records the full suite at 723/723 passing while preserving the MCP seam import boundary.
+The full-suite baseline (`make test-all`) is the required regression signal for A-card work, with `make test-a` retained as a fast subset. The broader `pytest -q` suite was restored through the A029 follow-up sequence (A030-A037); A037 records the full suite at 723/723 passing while preserving the MCP seam import boundary.
 
 ## Recommended Next Steps
 

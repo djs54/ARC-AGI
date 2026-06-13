@@ -20,13 +20,7 @@ from benchmarks.arc3.adapter import LocalBrainClient
 from agents.arc3.runner import DurableARCRunner
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.harness import BenchmarkConfig
-from mcp_engine.config import load_config
-from mcp_engine.graph.kuzu_client import KuzuClient
-from mcp_engine.schema import init_schema
-from mcp_engine.graph import embeddings as emb
-from mcp_engine.tools import init_loop_queue
-from mcp_engine.loop.step2_gist import load_centroids
-from mcp_engine.loop.step3_schema_org import load_routing_table
+from arc_runtime.config import load_config
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +44,16 @@ class SubmissionRunner:
 
     async def initialize(self):
         logger.info("Initializing Submission Runner...")
+
+        # Lazy import legacy graph runtime dependencies so importing this module
+        # stays test-friendly when MCP internals are unavailable.
+        from sidequest_mcp_client.test_compat.runtime import KuzuClient, init_schema
+        import importlib
+
+        emb = importlib.import_module("mcp_engine.graph.embeddings")
+        init_loop_queue = getattr(importlib.import_module("mcp_engine.tools"), "init_loop_queue")
+        load_centroids = getattr(importlib.import_module("mcp_engine.loop.step2_gist"), "load_centroids")
+        load_routing_table = getattr(importlib.import_module("mcp_engine.loop.step3_schema_org"), "load_routing_table")
         
         # 1. Initialize Database
         DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -94,8 +98,10 @@ class SubmissionRunner:
 
     async def _loop_worker(self, centroids):
         """Minimal loop worker for submission."""
-        from mcp_engine.loop.orchestrator import run_loop
-        from mcp_engine.llm.provider import create_llm_client
+        import importlib
+
+        run_loop = getattr(importlib.import_module("mcp_engine.loop.orchestrator"), "run_loop")
+        from arc_runtime.llm import create_llm_client
         
         llm_client = create_llm_client(self.config)
         

@@ -33,3 +33,7 @@ include = ["agents*", "benchmarks*", "sidequest_mcp_client*", "arc_runtime*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "requires_mcp: test requires CAMPY_MCP_CMD and live MCP daemon",
+    "requires_arc_api: test requires ARC_API_KEY and live ARC API",
+]
