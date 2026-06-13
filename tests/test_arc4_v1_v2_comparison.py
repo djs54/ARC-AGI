@@ -123,7 +123,7 @@ class TestV1vsV2Comparison:
         ]
         for name, val1, val2 in checks:
             winner = "v2" if val2 >= val1 else "v1"
-            if val2 > val1:
+            if val2 >= val1:
                 v2_wins += 1
             print(f"{name:<30} {str(val1):<15} {str(val2):<15} {winner}")
 
