@@ -13,10 +13,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from agents.arc3.runner import DurableARCRunner
-from agents.arc3.trace_names import normalize_artifact_payload, normalize_orchestration_status
+from agents.common.trace_names import normalize_artifact_payload, normalize_orchestration_status
 from arc_runtime import artifacts, dispatch as arc_dispatch, runner_shell as rs
 from arc_runtime.bundle import ArcV2Bundle, SyncLLMPortAdapter, build_arc_v2_bundle
 from arc_runtime.config import load_config
@@ -25,6 +24,9 @@ from arc_runtime.llm import LLMInitializationError, create_llm_client
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from sidequest_mcp_client.observability import build_observability
+
+if TYPE_CHECKING:
+    from agents.arc3.runner import DurableARCRunner
 
 REPO_ROOT = rs.REPO_ROOT
 CONFIG_PATH = rs.CONFIG_PATH
@@ -208,7 +210,7 @@ class SingleTaskRunner(rs.SingleTaskRunner):
         )
 
 
-def _emergency_shutdown(runner: DurableARCRunner):
+def _emergency_shutdown(runner: Any):
     if not runner or not hasattr(runner, "_current_trace_snapshot") or not runner._current_trace_snapshot:
         return
     try:
@@ -258,6 +260,8 @@ async def main():
         if args.agent_version == "v2":
             runner.results = await _run_arc_v2_batch(runner, brain_client, card_id, args)
         else:
+            from agents.arc3.runner import DurableARCRunner
+
             durable = DurableARCRunner(runner.harness, brain_client, runner.config, progress_callback=runner.append_live_snapshot)
             durable._emit_transition_snapshots = True
             atexit.register(_emergency_shutdown, durable)

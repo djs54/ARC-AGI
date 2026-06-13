@@ -34,6 +34,11 @@ BAD_REGEXES = [
     r'importlib\.import_module\([^)]*cp_.*engine',
 ]
 
+ARC4_BAD_IMPORTS = [
+    r"\bfrom\s+agents\.arc3(?:\.|\s)",
+    r"\bimport\s+agents\.arc3(?:\.|\s)",
+]
+
 
 def _gather_files(paths):
     files = []
@@ -66,3 +71,20 @@ def test_no_direct_bootstrap_imports_in_production_paths():
                 offending.append((str(f.relative_to(ROOT)), pat.pattern))
 
     assert not offending, f"Found direct HippoCampy/Campy bootstrap imports in production files: {offending}"
+
+
+def test_arc4_has_no_arc3_imports():
+    files = _gather_files([ROOT / "agents" / "arc4"])
+    offending = []
+    compiled = [re.compile(p) for p in ARC4_BAD_IMPORTS]
+
+    for f in files:
+        try:
+            text = f.read_text()
+        except Exception:
+            continue
+        for pat in compiled:
+            if pat.search(text):
+                offending.append((str(f.relative_to(ROOT)), pat.pattern))
+
+    assert not offending, f"Found forbidden agents.arc3 imports in arc4 modules: {offending}"

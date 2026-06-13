@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from agents.arc3.failure_taxonomy import FailureTaxonomy
+from agents.common.failure_taxonomy import FailureTaxonomy, classify_failure
 from .ports import GraphQueryPort
 from .types import EvaluationResult, ExecutionResult, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowDecision, WorkflowPhase, WorkflowState
 
@@ -244,7 +244,6 @@ class Evaluator:
 def classify_v2_termination(status: str, reason: str, exception: BaseException | None = None) -> str:
     """Map v2 WorkflowStatus to v1 FailureTaxonomy values."""
     if exception is not None:
-        from agents.arc3.failure_taxonomy import classify_failure
         return classify_failure(exception).value
 
     mapping = {

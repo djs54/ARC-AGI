@@ -10,6 +10,7 @@ from collections import Counter, deque
 from contextlib import nullcontext
 from typing import Any, Callable, List, Mapping, Optional, Protocol, Sequence
 
+from agents.common.grid_hash import hash_grid
 from sidequest_mcp_client.observability import Observability, canonical_span_name
 from .schema import (
     ARC3Action,
@@ -1123,8 +1124,7 @@ class ARC3Adapter:
         energy_estimate = self._estimate_energy(grid)
 
         # B88: Add frame_hash and invariant_regions (populated later by orchestrator)
-        from agents.arc3.hypothesis import StateNode
-        frame_hash = StateNode.hash_grid(grid)
+        frame_hash = hash_grid(grid)
 
         return {
             "dataset_id": dataset_id,

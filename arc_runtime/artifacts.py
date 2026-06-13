@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from agents.arc3.trace_names import (
+from agents.common.trace_names import (
     canonical_phase,
     normalize_artifact_payload,
     normalize_failure_payload,
