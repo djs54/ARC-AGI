@@ -77,23 +77,25 @@ async def test_arc3_harness_baseline_vs_sidequests(arc_config):
     assert baseline_meta.total_tasks == 1
     assert sidequests_meta.total_tasks == 1
     
-    # In our mock logic, SIDEQUESTS succeeds in 2 steps, BASELINE in 5 steps
-    # Note: steps are 0-indexed in _execute_mock_action call, but incremented after
-    # SIDEQUESTS: step 0 (fail), step 1 (success) -> steps = 2
-    # BASELINE: step 0, 1, 2, 3 (fail), step 4 (success) -> steps = 5
+    # A141 scripted mock behavior:
+    # SIDEQUESTS executes a deterministic two-click ACTION6 sequence and wins.
+    # BASELINE explores low-information actions and does not auto-win by step count.
     
     assert len(harness.baseline_results) == 1
     assert harness.baseline_results[0].steps == 5
-    assert harness.baseline_results[0].correct is True
+    assert harness.baseline_results[0].correct is False
     
     assert len(harness.sidequests_results) == 1
     assert harness.sidequests_results[0].steps == 2
     assert harness.sidequests_results[0].correct is True
     
     # Check metrics
-    assert comparison.metrics["steps_to_solve"]["baseline"] == 5.0
+    # AB harness reports solved-only mean for steps_to_solve; unsolved baseline yields 0.0.
+    assert comparison.metrics["steps_to_solve"]["baseline"] == 0.0
     assert comparison.metrics["steps_to_solve"]["sidequests"] == 2.0
-    assert comparison.metrics["steps_to_solve"]["delta"] == "-60.0%"
+    assert comparison.metrics["steps_to_solve"]["delta"] == "+inf%"
+    assert comparison.metrics["solve_rate"]["baseline"] == 0.0
+    assert comparison.metrics["solve_rate"]["sidequests"] == 1.0
 
 def test_load_tasks_from_manifest(manifest_path):
     tasks = load_tasks_from_manifest(manifest_path)

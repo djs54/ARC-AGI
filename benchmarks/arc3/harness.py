@@ -42,6 +42,9 @@ class ARC3Harness(ABHarness):
         self.api_key = self._load_arc_api_key()
         self.api_base = "https://three.arcprize.org"
         self._session = None  # httpx.AsyncClient
+        # A141: deterministic scripted mock game state keyed by guid.
+        self._mock_games: Dict[str, Dict[str, Any]] = {}
+        self._mock_active_guid_by_game: Dict[str, str] = {}
 
     async def setup(self) -> None:
         """Initialize LLM client and other resources."""
@@ -216,42 +219,146 @@ class ARC3Harness(ABHarness):
 
     # --- Mock Methods for testing/demo ---
 
-    def _get_mock_initial_frame(self, game_id: str) -> Dict[str, Any]:
+    @staticmethod
+    def _new_mock_game_state(game_id: str, guid: str) -> Dict[str, Any]:
+        """A141 scripted mock game:
+
+        - 64x64 board
+        - block A (color 3) starts at rows 10-13, cols 10-13
+        - block B (color 5, toggles with ACTION4) at rows 10-13, cols 30-33
+        - block C (color 7, target for ACTION6 levels) at rows 40-43, cols 20-23
+        - win_levels=2, available_actions=[1,2,3,4,6]
+        """
         return {
             "game_id": game_id,
-            "guid": f"guid-{game_id}",
-            "frame": [[[0, 0], [0, 0]]],
-            "state": "NOT_FINISHED",
+            "guid": guid,
+            "rows": 64,
+            "cols": 64,
+            "step_num": 0,
             "episode_num": 1,
-            "step_num": 1
+            "state": "NOT_STARTED",
+            "levels_completed": 0,
+            "win_levels": 2,
+            "available_actions": [1, 2, 3, 4, 6],
+            "block_a_col": 10,
+            "block_b_color": 5,
+            "block_c_color": 7,
         }
 
+    @staticmethod
+    def _render_mock_grid(state: Dict[str, Any]) -> List[List[int]]:
+        rows = int(state.get("rows", 64))
+        cols = int(state.get("cols", 64))
+        grid = [[0 for _ in range(cols)] for _ in range(rows)]
+
+        block_a_col = int(state.get("block_a_col", 10))
+        block_b_color = int(state.get("block_b_color", 5))
+        block_c_color = int(state.get("block_c_color", 7))
+
+        for r in range(10, 14):
+            for c in range(block_a_col, block_a_col + 4):
+                if 0 <= r < rows and 0 <= c < cols:
+                    grid[r][c] = 3
+
+        for r in range(10, 14):
+            for c in range(30, 34):
+                if 0 <= r < rows and 0 <= c < cols:
+                    grid[r][c] = block_b_color
+
+        for r in range(40, 44):
+            for c in range(20, 24):
+                if 0 <= r < rows and 0 <= c < cols:
+                    grid[r][c] = block_c_color
+
+        return grid
+
+    def _mock_frame_response(self, state: Dict[str, Any], action_input: Dict[str, Any] | None) -> Dict[str, Any]:
+        return {
+            "game_id": state["game_id"],
+            "guid": state["guid"],
+            "frame": [self._render_mock_grid(state)],
+            "state": state["state"],
+            "levels_completed": int(state["levels_completed"]),
+            "win_levels": int(state["win_levels"]),
+            "available_actions": list(state["available_actions"]),
+            "action_input": action_input,
+            "episode_num": int(state.get("episode_num", 1)),
+            "step_num": int(state.get("step_num", 0)),
+        }
+
+    def _get_mock_initial_frame(self, game_id: str) -> Dict[str, Any]:
+        guid = f"guid-{game_id}"
+        state = self._new_mock_game_state(game_id, guid)
+        self._mock_games[guid] = state
+        self._mock_active_guid_by_game[game_id] = guid
+        return self._mock_frame_response(state, action_input=None)
+
     def _get_mock_action(self, obs: Dict[str, Any], variant: ABVariant, step: int) -> Dict[str, Any]:
-        # If SIDEQUESTS, choose a 'better' action
+        # A141: deterministic sidequests sequence for scripted mock (wins by two ACTION6 clicks on block C).
         if variant == ABVariant.SIDEQUESTS:
-            return {"action_id": "ACTION6", "x": 1, "y": 1, "value": 1, "rationale": "informed choice"}
+            if step <= 1:
+                return {"action_id": "ACTION6", "x": 21, "y": 41, "rationale": "target block C centroid"}
+            return {"action_id": "ACTION3", "rationale": "probe no-op"}
         else:
-            # Baseline chooses random or less effective actions
-            return {"action_id": f"ACTION{random.randint(1, 5)}", "rationale": "baseline choice"}
+            # Baseline chooses random low-information actions.
+            action_num = random.choice([1, 2, 3, 4])
+            return {"action_id": f"ACTION{action_num}", "rationale": "baseline choice"}
 
     def _execute_mock_action(self, game_id: str, action: Dict[str, Any], step: int) -> Tuple[Dict[str, Any], float, bool]:
-        # Simple mock logic: success on step 2 for SIDEQUESTS, step 5 for BASELINE
-        action_id = action.get("action_id", "")
-        
-        if action_id == "ACTION6" and step >= 1:
-            frame = self._get_mock_initial_frame(game_id)
-            frame["state"] = "WIN"  # Game won
-            return (frame, 1.0, True)
-        
-        if step >= 4:
-            frame = self._get_mock_initial_frame(game_id)
-            frame["state"] = "WIN"  # Game won
-            return (frame, 1.0, True)
-        
-        # Still in progress
-        frame = self._get_mock_initial_frame(game_id)
-        frame["state"] = "NOT_FINISHED"
-        return (frame, 0.0, False)
+        # A141: contract-faithful deterministic scripted game. No step-count auto-WIN.
+        action_id_raw = str(action.get("action_id", "ACTION3")).upper()
+        if action_id_raw.isdigit():
+            action_id = f"ACTION{action_id_raw}"
+        else:
+            action_id = action_id_raw
+
+        guid = str(action.get("guid") or self._mock_active_guid_by_game.get(game_id) or f"guid-{game_id}")
+        state = self._mock_games.get(guid)
+        if state is None:
+            state = self._new_mock_game_state(game_id, guid)
+            self._mock_games[guid] = state
+            self._mock_active_guid_by_game[game_id] = guid
+
+        level_before = int(state.get("levels_completed", 0))
+
+        if action_id == "ACTION1":
+            state["block_a_col"] = min(58, int(state.get("block_a_col", 10)) + 2)
+            state["state"] = "NOT_FINISHED"
+        elif action_id == "ACTION2":
+            state["block_a_col"] = max(0, int(state.get("block_a_col", 10)) - 2)
+            state["state"] = "NOT_FINISHED"
+        elif action_id == "ACTION3":
+            state["state"] = "NOT_FINISHED"
+        elif action_id == "ACTION4":
+            state["block_b_color"] = 9 if int(state.get("block_b_color", 5)) == 5 else 5
+            state["state"] = "NOT_FINISHED"
+        elif action_id == "ACTION6":
+            x = int(action.get("x", 0) or 0)
+            y = int(action.get("y", 0) or 0)
+            if 20 <= x <= 23 and 40 <= y <= 43:
+                state["levels_completed"] = min(int(state.get("win_levels", 2)), int(state.get("levels_completed", 0)) + 1)
+                # Recolor block C after each successful click to make level progression visible.
+                levels = int(state.get("levels_completed", 0))
+                state["block_c_color"] = 7 if levels == 0 else 8 if levels == 1 else 9
+                state["state"] = "WIN" if int(state.get("levels_completed", 0)) >= int(state.get("win_levels", 2)) else "NOT_FINISHED"
+            else:
+                state["state"] = "NOT_FINISHED"
+        else:
+            state["state"] = "NOT_FINISHED"
+
+        state["step_num"] = int(step) + 1
+        self._mock_games[guid] = state
+
+        level_after = int(state.get("levels_completed", 0))
+        level_gain = max(0, level_after - level_before)
+        done = str(state.get("state", "NOT_FINISHED")) in ("WIN", "GAME_OVER")
+        reward = 1.0 if state.get("state") == "WIN" else float(level_gain)
+
+        frame = self._mock_frame_response(state, action_input={
+            "action_id": action_id,
+            **({"x": int(action.get("x", 0) or 0), "y": int(action.get("y", 0) or 0)} if action_id == "ACTION6" else {}),
+        })
+        return (frame, reward, done)
 
     def _load_arc_api_key(self) -> Optional[str]:
         """Load ARC API key, preferring explicit ARC credentials over legacy Kaggle fallback."""
