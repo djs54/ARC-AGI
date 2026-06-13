@@ -154,6 +154,9 @@ class PlanCandidate:
     score: float = 0.0
     rationale: str = ""
     expected_effect: str | None = None
+    # Structured falsifiable prediction for evaluator checks.
+    # Schema: {"kind": "grid_change"|"no_change"|"level_gain"|"state_change", "confidence": float}
+    predicted_outcome: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -163,6 +166,7 @@ class PlanCandidate:
             "score": self.score,
             "rationale": self.rationale,
             "expected_effect": self.expected_effect,
+            "predicted_outcome": self.predicted_outcome,
             "metadata": self.metadata,
         }
 
@@ -174,6 +178,7 @@ class PlanCandidate:
             score=d.get("score", 0.0),
             rationale=d.get("rationale", ""),
             expected_effect=d.get("expected_effect"),
+            predicted_outcome=d.get("predicted_outcome", {}),
             metadata=d.get("metadata", {}),
         )
 

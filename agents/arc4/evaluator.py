@@ -45,7 +45,6 @@ class Evaluator:
         current_attempt_count = self._current_attempt_count(state, action_family, execution.action_id)
         predicted_effect = self._normalize_text(execution.predicted_effect)
         actual_effect = self._normalize_text(execution.actual_effect)
-        effect_match = predicted_effect is not None and actual_effect is not None and predicted_effect == actual_effect
         terminal_reason = self._terminal_reason(execution)
         action_space_exhausted = self._action_space_exhausted(execution, current_attempt_count)
         exec_meta = execution.metadata if isinstance(execution.metadata, Mapping) else {}
@@ -61,6 +60,32 @@ class Evaluator:
             grid_changed_flag = not grid_unchanged
         else:
             grid_changed_flag = bool(grid_changed_flag_raw)
+        observed_kind = (
+            "level_gain"
+            if level_gain > 0
+            else "state_change"
+            if str(exec_meta.get("state") or "") in ("WIN", "GAME_OVER")
+            else "grid_change"
+            if grid_changed_flag
+            else "no_change"
+        )
+
+        predicted_outcome = {}
+        if execution.candidate is not None and isinstance(getattr(execution.candidate, "predicted_outcome", None), Mapping):
+            predicted_outcome = dict(execution.candidate.predicted_outcome)
+        predicted_kind = predicted_outcome.get("kind") if predicted_outcome else None
+
+        if predicted_kind:
+            satisfies_map = {
+                "grid_change": {"grid_change", "level_gain", "state_change"},
+                "level_gain": {"level_gain"},
+                "state_change": {"state_change"},
+                "no_change": {"no_change"},
+            }
+            effect_match = observed_kind in satisfies_map.get(str(predicted_kind), set())
+        else:
+            # Legacy fallback for older tests/transports that only provide string predictions.
+            effect_match = predicted_effect is not None and actual_effect is not None and predicted_effect == actual_effect
         action_specific_attempts = state.action_attempt_counts.get(execution.action_id, 0)
         if meaningful_progress and terminal_reason is None:
             if action_specific_attempts >= self._limits.stale_repeat_threshold:
@@ -140,6 +165,8 @@ class Evaluator:
                 "grid_changed": grid_changed_flag,
                 "level_gain": level_gain,
                 "progress_tier": progress_tier,
+                "predicted_kind": predicted_kind,
+                "observed_kind": observed_kind,
                 "causal_override": causal_override,
                 "causal_path": causal_path,
             },

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, PlanCandidate, PlanningResult, ResolvedGoal, WorkflowPhase, WorkflowState
@@ -32,6 +35,7 @@ class _CandidateRecord:
     score: float
     rationale: str
     expected_effect: str | None
+    predicted_outcome: dict[str, Any]
     metadata: dict[str, Any]
 
 
@@ -175,7 +179,8 @@ class PlanGenerator:
                     action_id=action_id,
                     score=score,
                     rationale="; ".join(rationale_parts),
-                    expected_effect=self._expected_effect(graph_record, goal, action_id),
+                    expected_effect="",
+                    predicted_outcome=self._predicted_outcome(graph_record, graph_evidence, is_untested),
                     metadata={
                         "attempt_count": attempts,
                         "falsification_count": falsifications,
@@ -190,6 +195,8 @@ class PlanGenerator:
                     },
                 )
             )
+            predicted = candidates[-1].predicted_outcome
+            candidates[-1].expected_effect = f"{action_id}: expect {predicted.get('kind', 'grid_change')} (p={float(predicted.get('confidence', 0.0)):.2f})"
 
         if not candidates:
             candidates.append(self._fallback_candidate(state, goal, perception))
@@ -203,6 +210,7 @@ class PlanGenerator:
                         score=self._limits.replan_feedback_bonus,
                         rationale=f"replan feedback suggests {veto_action}",
                         expected_effect=state.latest_veto_alternative.expected_effect,
+                        predicted_outcome=dict(state.latest_veto_alternative.predicted_outcome or {}),
                         metadata={"replan_feedback": True, "source": "veto_alternative"},
                     )
                 )
@@ -216,6 +224,7 @@ class PlanGenerator:
             score=0.1,
             rationale=f"fallback probe for {goal.selected.goal_id}",
             expected_effect=goal.selected.description,
+            predicted_outcome={"kind": "grid_change", "confidence": 0.3},
             metadata={
                 "attempt_count": state.action_attempt_counts.get(action_id, 0),
                 "falsification_count": state.action_falsification_counts.get(action_id, 0),
@@ -271,8 +280,10 @@ class PlanGenerator:
         graph_port: GraphQueryPort | None = None,
     ) -> list[str]:
         candidates: list[str] = []
+        obs_actions = perception.observation.get("available_actions") if isinstance(perception.observation, Mapping) else None
+        logger.info("PLANNER obs_available_actions=%s", obs_actions)
         for source in (
-            perception.observation.get("available_actions") if isinstance(perception.observation, Mapping) else None,
+            obs_actions,
             perception.metadata.get("available_actions"),
             goal.selected.metadata.get("preferred_actions"),
             goal.selected.metadata.get("available_actions"),
@@ -285,9 +296,22 @@ class PlanGenerator:
                     if action_text and action_text not in candidates:
                         candidates.append(action_text)
 
+        # Build authoritative action mask from the API observation.
+        # When the API tells us which actions exist, use it to filter
+        # inferred sources (mechanic priors, graph) that may include
+        # phantom actions from similar but different games.
+        api_action_set: set[str] | None = None
+        if isinstance(obs_actions, Sequence) and obs_actions:
+            api_action_set = set(str(a) for a in obs_actions)
+
         # A136: Extract actions from mechanic prior action_set fields
-        for action_id in self._extract_mechanic_prior_actions(graph_records):
+        mechanic_prior_actions = self._extract_mechanic_prior_actions(graph_records)
+        for action_id in mechanic_prior_actions:
             if action_id not in candidates:
+                # Filter against API mask — don't inject phantom actions
+                if api_action_set is not None and action_id not in api_action_set:
+                    logger.debug("PLANNER filtered phantom mechanic action %s (not in API actions %s)", action_id, api_action_set)
+                    continue
                 candidates.append(action_id)
 
         # A135: Merge untested actions from the graph world model
@@ -297,12 +321,16 @@ class PlanGenerator:
                 for action_id in untested:
                     action_text = str(action_id)
                     if action_text and action_text not in candidates:
+                        # Filter against API mask
+                        if api_action_set is not None and action_text not in api_action_set:
+                            continue
                         candidates.append(action_text)
             except Exception:
                 pass  # graph unavailable — fall through to existing sources
 
         if not candidates:
             candidates.append(self._slugify(f"probe-{goal.selected.goal_id}"))
+        logger.info("PLANNER final candidates=%s (from obs=%s, mechanic=%s)", candidates, obs_actions, mechanic_prior_actions)
         return candidates
 
     def _query_llm(
@@ -352,6 +380,7 @@ class PlanGenerator:
                         score=max(candidate.score, bonus + self._limits.replan_feedback_bonus),
                         rationale="; ".join(part for part in [candidate.rationale, reason, "llm guidance"] if part),
                         expected_effect=patch.get("expected_effect") or candidate.expected_effect,
+                        predicted_outcome=dict(candidate.predicted_outcome or {}),
                         metadata={**candidate.metadata, "llm_guidance": True, "llm_reason": reason},
                     )
                 )
@@ -364,6 +393,7 @@ class PlanGenerator:
                     score=max(self._limits.replan_feedback_bonus, bonus),
                     rationale=reason or f"llm suggested {action_id}",
                     expected_effect=patch.get("expected_effect"),
+                    predicted_outcome={"kind": "grid_change", "confidence": float(bonus or 0.4)},
                     metadata={"llm_guidance": True, "llm_reason": reason},
                 )
             )
@@ -402,6 +432,21 @@ class PlanGenerator:
         return f"advance {goal.selected.goal_id} with {action_id}"
 
     @staticmethod
+    def _predicted_outcome(
+        graph_record: Mapping[str, Any],
+        graph_evidence: Mapping[str, Any],
+        is_untested: bool,
+    ) -> dict[str, Any]:
+        raw = (graph_evidence or {}).get("raw") or {}
+        recorded_kind = raw.get("effect_kind") or graph_record.get("effect_kind")
+        if recorded_kind in ("grid_change", "no_change", "level_gain", "state_change"):
+            confidence = float((graph_evidence or {}).get("confidence") or 0.5)
+            return {"kind": str(recorded_kind), "confidence": confidence}
+        if is_untested:
+            return {"kind": "grid_change", "confidence": 0.3}
+        return {"kind": "grid_change", "confidence": 0.4}
+
+    @staticmethod
     def _serialize_goal(goal: ResolvedGoal) -> dict[str, Any]:
         return {
             "selected": PlanGenerator._serialize_hypothesis(goal.selected),
@@ -427,6 +472,7 @@ class PlanGenerator:
             "score": candidate.score,
             "rationale": candidate.rationale,
             "expected_effect": candidate.expected_effect,
+            "predicted_outcome": dict(candidate.predicted_outcome or {}),
             "metadata": dict(candidate.metadata),
         }
 
@@ -442,6 +488,7 @@ class PlanGenerator:
             score=candidate.score,
             rationale=candidate.rationale,
             expected_effect=candidate.expected_effect,
+            predicted_outcome=dict(candidate.predicted_outcome or {}),
             metadata=metadata,
         )
 
