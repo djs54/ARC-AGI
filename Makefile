@@ -13,12 +13,12 @@ smoke: ## live smoke: 1 puzzle, 10 steps, real ARC API + local Ollama
 
 smoke-compare: ## Run v1 and v2 smoke on mock, compare
 	@echo "Running v1..."
-	@PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v1 2>/dev/null
-	@cp submission_results_single.json submission_results_single.v1.json
+	@ARC_ARTIFACTS_DIR=artifacts PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v1 2>/dev/null || true
+	@cp artifacts/submission_results_single.json artifacts/submission_results_single.v1.json
 	@echo "Running v2..."
-	@CAMPY_MCP_CMD="$(CAMPY_MCP_CMD)" PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v2 2>/dev/null
+	@ARC_ARTIFACTS_DIR=artifacts CAMPY_MCP_CMD="$(CAMPY_MCP_CMD)" PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v2 2>/dev/null
 	@echo "Comparing..."
-	@$(PYTHON) -m pytest tests/test_arc4_v1_v2_comparison.py::TestV1vsV2Comparison::test_comparison_summary -v -s
+	@ARC_ARTIFACTS_DIR=artifacts $(PYTHON) -m pytest tests/test_arc4_v1_v2_comparison.py::TestV1vsV2Comparison::test_comparison_summary -v -s
 
 test: ## run the full pytest suite
 	$(PYTHON) -m pytest -q

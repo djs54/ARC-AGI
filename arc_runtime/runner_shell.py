@@ -36,11 +36,13 @@ CONFIG_PATH = REPO_ROOT / "campy.toml"
 LEGACY_CONFIG_PATH = REPO_ROOT / "sidequests.toml"
 MANIFEST_PATH = REPO_ROOT / "benchmarks/arc3/tasks_manifest.json"
 TASK_BATCH_SIZE = 5
-FINAL_OUTPUT_PATH = REPO_ROOT / "submission_results_single.json"
-ARC_SERVER_OUTPUT_PATH = REPO_ROOT / "submission_results_arcServer.json"
-AGENT_EXECUTION_TRACE_PATH = REPO_ROOT / "agent_execution_trace.json"
-MASTER_TIMELINE_PATH = REPO_ROOT / "master_timeline.json"
-LIVE_OUTPUT_PATH = REPO_ROOT / "submission_results_single.live.jsonl"
+ARTIFACTS_DIR = Path(os.environ.get("ARC_ARTIFACTS_DIR", REPO_ROOT / "artifacts"))
+FINAL_OUTPUT_PATH = ARTIFACTS_DIR / "submission_results_single.json"
+ARC_SERVER_OUTPUT_PATH = ARTIFACTS_DIR / "submission_results_arcServer.json"
+AGENT_EXECUTION_TRACE_PATH = ARTIFACTS_DIR / "agent_execution_trace.json"
+MASTER_TIMELINE_PATH = ARTIFACTS_DIR / "master_timeline.json"
+LIVE_OUTPUT_PATH = ARTIFACTS_DIR / "submission_results_single.live.jsonl"
+DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH = ARTIFACTS_DIR / "submission_results_single.world_model.live.jsonl"
 ARC_KEY_PATHS = (
     REPO_ROOT / "benchmarks/.arc/arc.json",
     REPO_ROOT / "benchmarks/arc3/.arc/arc.json",
@@ -131,7 +133,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-retries", type=int, default=None, help="Override llm.max_retries")
     parser.add_argument("--arc-key-path", type=str, default=None, help="Load ARC_API_KEY from this JSON file")
     parser.add_argument("--world-model-eval", action="store_true", help="Enable World Model architecture evaluation")
-    parser.add_argument("--world-model-live-output", type=str, default="submission_results_single.world_model.live.jsonl", help="Path for live world model metrics")
+    parser.add_argument("--world-model-live-output", type=str, default=str(DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH), help="Path for live world model metrics")
     parser.add_argument("--temporal", action="store_true", help="Enable Temporal workflow dispatch")
     return parser
 
@@ -150,13 +152,15 @@ class SingleTaskRunner:
         self.results = []
         self.real_api = real_api
         self.live_smoke = live_smoke
+        self.artifacts_dir = ARTIFACTS_DIR
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.live_output_path = LIVE_OUTPUT_PATH
         self.final_output_path = FINAL_OUTPUT_PATH
         self.arc_server_output_path = ARC_SERVER_OUTPUT_PATH
         self.agent_execution_trace_path = AGENT_EXECUTION_TRACE_PATH
         self.master_timeline_path = MASTER_TIMELINE_PATH
         self.world_model_eval = False
-        self.world_model_live_output_path = Path("submission_results_single.world_model.live.jsonl")
+        self.world_model_live_output_path = DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH
         self.world_model_evaluator = WorldModelEvaluator()
 
     async def initialize(self):
@@ -196,7 +200,7 @@ class SingleTaskRunner:
             result,
             final_output_path=FINAL_OUTPUT_PATH,
             live_output_path=LIVE_OUTPUT_PATH,
-            world_model_live_output_path=REPO_ROOT / "submission_results_single.world_model.live.jsonl",
+            world_model_live_output_path=DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH,
             agent_execution_trace_path=AGENT_EXECUTION_TRACE_PATH,
             master_timeline_path=MASTER_TIMELINE_PATH,
         )
@@ -212,7 +216,7 @@ class SingleTaskRunner:
             results_path=results_path,
             final_output_path=FINAL_OUTPUT_PATH,
             live_output_path=LIVE_OUTPUT_PATH,
-            world_model_live_output_path=REPO_ROOT / "submission_results_single.world_model.live.jsonl",
+            world_model_live_output_path=DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH,
             agent_execution_trace_path=AGENT_EXECUTION_TRACE_PATH,
             master_timeline_path=MASTER_TIMELINE_PATH,
         )

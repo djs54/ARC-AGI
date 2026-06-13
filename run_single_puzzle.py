@@ -38,6 +38,8 @@ ARC_SERVER_OUTPUT_PATH = rs.ARC_SERVER_OUTPUT_PATH
 AGENT_EXECUTION_TRACE_PATH = rs.AGENT_EXECUTION_TRACE_PATH
 MASTER_TIMELINE_PATH = rs.MASTER_TIMELINE_PATH
 LIVE_OUTPUT_PATH = rs.LIVE_OUTPUT_PATH
+ARTIFACTS_DIR = rs.ARTIFACTS_DIR
+DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH = rs.DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH
 ARC_KEY_PATHS = rs.ARC_KEY_PATHS
 
 logger = logging.getLogger(__name__)
@@ -179,7 +181,7 @@ class SingleTaskRunner(rs.SingleTaskRunner):
         self.agent_execution_trace_path = AGENT_EXECUTION_TRACE_PATH
         self.master_timeline_path = MASTER_TIMELINE_PATH
         self.world_model_eval = False
-        self.world_model_live_output_path = Path("submission_results_single.world_model.live.jsonl")
+        self.world_model_live_output_path = DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH
         self.world_model_evaluator = WorldModelEvaluator()
 
     @staticmethod
@@ -188,7 +190,7 @@ class SingleTaskRunner(rs.SingleTaskRunner):
             result,
             final_output_path=FINAL_OUTPUT_PATH,
             live_output_path=LIVE_OUTPUT_PATH,
-            world_model_live_output_path=REPO_ROOT / "submission_results_single.world_model.live.jsonl",
+            world_model_live_output_path=DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH,
             agent_execution_trace_path=AGENT_EXECUTION_TRACE_PATH,
             master_timeline_path=MASTER_TIMELINE_PATH,
         )
@@ -204,7 +206,7 @@ class SingleTaskRunner(rs.SingleTaskRunner):
             results_path=results_path,
             final_output_path=FINAL_OUTPUT_PATH,
             live_output_path=LIVE_OUTPUT_PATH,
-            world_model_live_output_path=REPO_ROOT / "submission_results_single.world_model.live.jsonl",
+            world_model_live_output_path=DEFAULT_WORLD_MODEL_LIVE_OUTPUT_PATH,
             agent_execution_trace_path=AGENT_EXECUTION_TRACE_PATH,
             master_timeline_path=MASTER_TIMELINE_PATH,
         )

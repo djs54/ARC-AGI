@@ -3,11 +3,13 @@ __pycache__/
 .venv/
 *.pyc
 *.egg-info/
+artifacts/
 
-submission_results*.json
-submission_results*.jsonl
-agent_execution_trace.json
-master_timeline.json
+/submission_results*.json
+/submission_results*.jsonl
+/agent_execution_trace.json
+/master_timeline.json
+*.live.jsonl
 
 .arc/
 benchmarks/results/

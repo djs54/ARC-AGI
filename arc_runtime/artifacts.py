@@ -201,9 +201,9 @@ def make_final_result_compact(result: dict, *, final_output_path: Path, live_out
 
     artifacts = {}
     if result.get("has_execution_trace") or result.get("agent_execution_trace"):
-        artifacts["agent_execution_trace"] = "agent_execution_trace.json"
+        artifacts["agent_execution_trace"] = str(agent_execution_trace_path)
     if result.get("has_timeline") or result.get("arc_event_timeline") or result.get("chronological_log"):
-        artifacts["master_timeline"] = "master_timeline.json"
+        artifacts["master_timeline"] = str(master_timeline_path)
     artifacts["world_model_live"] = str(world_model_live_output_path)
     if artifacts:
         compact["artifacts"] = artifacts
@@ -222,11 +222,13 @@ def append_live_snapshot(runner: Any, snapshot: dict):
         datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
     )
     normalized = normalize_artifact_payload(normalized, normalized.get("task_id"))
+    Path(runner.live_output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(runner.live_output_path, "a") as f:
         f.write(json_dumps(normalized) + "\n")
 
     if runner.world_model_eval:
         try:
+            Path(runner.world_model_live_output_path).parent.mkdir(parents=True, exist_ok=True)
             task_id = normalized.get("task_id", "unknown")
             step = normalized.get("step", normalized.get("total_steps", 0))
             if normalized.get("snapshot_type") == "final_result":
