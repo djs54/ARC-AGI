@@ -267,7 +267,15 @@ class ArcGraphQueryPort:
                             "task_id": self.task_id,
                             "action_id": action_id,
                             "step": metadata.get("step") or metadata.get("execution_step") or 0,
-                            "reward_prediction_error": 0.0 if evaluation.meaningful_progress else 1.0,
+                            # B278's arc_record_reward_prediction_error derives the
+                            # error itself as (actual_reward - predicted_reward) and
+                            # bumps falsified_count when it is < -0.3. The planner
+                            # proposed this action expecting a productive effect
+                            # (predicted 1.0); a no-progress step realises 0.0, giving
+                            # error -1.0 → falsification. Sending the legacy
+                            # "reward_prediction_error" key is silently ignored.
+                            "predicted_reward": 1.0,
+                            "actual_reward": 1.0 if evaluation.meaningful_progress else 0.0,
                         },
                     ),
                     tool_key="record_reward_prediction_error",
