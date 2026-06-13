@@ -350,10 +350,14 @@ class WorldModelPlanner:
                 mode=PlanMode.EXPLOIT,
                 predicted_observation={
                     "effect_class": "distance_improving_move" if expected_delta < -0.01 else "state_transition",
-                    "meaningful_progress": False,
+                    "meaningful_progress": expected_delta < -0.01,
+                    "progress_class": "route_progress" if expected_delta < -0.01 else "state_transition",
                     "confidence": confidence,
                     "evidence_path": route.get("evidence_path", []),
                     "expected_distance_delta": expected_delta,
+                    "latest_distance_delta": route.get("latest_distance_delta"),
+                    "recent_regression_streak": int(route.get("recent_regression_streak", 0) or 0),
+                    "recent_non_improving_streak": int(route.get("recent_non_improving_streak", 0) or 0),
                 },
                 falsification_condition="Falsified if route action does not improve distance or reach a novel state",
                 expected_gain=max(0.2, confidence + max(0.0, -expected_delta / 10.0)),
@@ -376,13 +380,16 @@ class WorldModelPlanner:
                 continue
             evidence_ids = path.get("evidence_path_ids") or []
             confidence = float(path.get("confidence", 0.0) or 0.0)
+            effect_hist = path.get("effect_histogram") if isinstance(path.get("effect_histogram"), dict) else {}
+            route_backed = bool(effect_hist.get("distance_improving_move"))
             candidate = PlanCandidate(
                 action_id=aid,
                 args={"x": 0, "y": 0},
                 mode=PlanMode.EXPLOIT,
                 predicted_observation={
-                    "effect_class": "object_progress",
+                    "effect_class": "distance_improving_move" if route_backed else "object_progress",
                     "meaningful_progress": True,
+                    "progress_class": "route_progress" if route_backed else "object_progress",
                     "confidence": confidence,
                     "evidence_path": evidence_ids,
                     "support_count": int(path.get("support_count", 0) or 0),
