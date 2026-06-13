@@ -5,7 +5,23 @@ Temporal-sandbox-safe: stdlib only, deterministic, no I/O.
 
 from __future__ import annotations
 
-from typing import MutableMapping
+from typing import Iterable, MutableMapping
+
+
+def base_action(action_key: str) -> str:
+    """Collapse a coordinate-targeted action key to its base action.
+
+    ACTION6 click targets are bookkept per-coordinate as ``ACTION6@x,y`` so
+    different targets are scored independently. For action-space exhaustion the
+    family is what matters, so ``ACTION6@10,20`` and ``ACTION6@30,40`` both
+    count as the single base action ``ACTION6``.
+    """
+    return str(action_key).split("@", 1)[0]
+
+
+def count_base_actions(attempt_keys: Iterable[str]) -> int:
+    """Count distinct base actions among attempt keys (targets collapsed)."""
+    return len({base_action(key) for key in attempt_keys})
 
 
 def check_budget(step_index: int, max_cycles: int) -> str | None:
@@ -55,6 +71,8 @@ def termination_from_evaluation(decision: str | None, reason: str | None) -> tup
 
 
 __all__ = [
+    "base_action",
+    "count_base_actions",
     "check_budget",
     "check_stall",
     "record_evaluation_outcome",

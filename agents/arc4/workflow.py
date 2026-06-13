@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .cycle_policy import check_budget, check_stall, record_evaluation_outcome, termination_from_evaluation
+from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, termination_from_evaluation
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
@@ -145,7 +145,9 @@ class WorkflowOrchestrator:
 
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
-                num_attempted = len(state.action_attempt_counts)
+                # Count distinct base actions so ACTION6@x,y click targets don't
+                # inflate the attempted count past the available action space.
+                num_attempted = count_base_actions(state.action_attempt_counts)
                 untested_remaining = (num_available or 1) - num_attempted
                 import logging as _logging
                 _logging.getLogger(__name__).info(
