@@ -146,6 +146,9 @@ class ArcV2Telemetry:
         progress_reward = 0.0
         if execution is not None and isinstance(execution.metadata, Mapping):
             progress_reward = float(execution.metadata.get("progress_reward", execution.metadata.get("reward", 0.0)) or 0.0)
+        action_payload = {}
+        if execution is not None and execution.candidate is not None and isinstance(execution.candidate.payload, Mapping):
+            action_payload = dict(execution.candidate.payload)
 
         snapshot = {
             "snapshot_type": "step",
@@ -177,6 +180,8 @@ class ArcV2Telemetry:
             "meaningful_progress": bool(evaluation.meaningful_progress if evaluation else False),
             "progress_class": progress_class,
             "action_effect_class": getattr(execution, "actual_effect", None) or "unknown",
+            "action_x": action_payload.get("x"),
+            "action_y": action_payload.get("y"),
             "decision_source": "arc_v2",
             "state": self._latest_observation_state(),
         }

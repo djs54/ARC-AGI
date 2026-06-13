@@ -27,11 +27,14 @@ class PlanGeneratorLimits:
     # A131: Exponential decay for repeated actions
     repeat_decay_factor: float = 0.6  # score *= decay^attempts (0.6^3 ≈ 0.22)
     force_explore_after: int = 3  # force untested action after N consecutive same-action
+    click_target_limit: int = 3
 
 
 @dataclass(slots=True)
 class _CandidateRecord:
     action_id: str
+    book_id: str
+    payload: dict[str, Any]
     score: float
     rationale: str
     expected_effect: str | None
@@ -122,81 +125,104 @@ class PlanGenerator:
 
         for action_id in available_actions[: self._limits.max_candidates]:
             graph_record = records_by_action.get(action_id, {})
-            attempts = int(state.action_attempt_counts.get(action_id, 0))
-            falsifications = int(state.action_falsification_counts.get(action_id, 0))
-            is_untested = attempts == 0
-            repeated_falsified = falsifications >= 2
             goal_alignment = self._action_matches_goal(action_id, goal)
-            graph_score = float(graph_record.get("confidence", graph_record.get("score", 0.0)) or 0.0)
 
             # A135: Enrich graph_score with per-action evidence from the graph
             graph_evidence: dict[str, Any] = {}
+            graph_score = float(graph_record.get("confidence", graph_record.get("score", 0.0)) or 0.0)
             if graph_port is not None:
                 try:
                     graph_evidence = graph_port.fetch_per_action_evidence(action_id)
                     evidence_confidence = graph_evidence.get("confidence", 0.0)
                     evidence_contradictions = graph_evidence.get("contradictions", 0)
                     evidence_supports = graph_evidence.get("supports", 0)
-                    # Use graph evidence confidence if it's stronger than goal-level score
                     if evidence_confidence > graph_score:
                         graph_score = evidence_confidence
-                    # Deduct for accumulated contradictions from graph
                     if evidence_contradictions > evidence_supports:
                         graph_score -= self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
                 except Exception:
-                    pass  # graph unavailable — use existing score
+                    pass
 
-            score = graph_score
-            if goal_alignment:
-                score += self._limits.goal_alignment_bonus
-            if is_untested:
-                score += self._limits.untested_bonus
-            else:
-                # A131: Exponential decay for repeated actions instead of weak linear penalty
-                decay = self._limits.repeat_decay_factor ** attempts
-                score *= decay
-                score -= min(self._limits.repeat_attempt_penalty * attempts, 0.18)
-            if falsifications:
-                score -= min(self._limits.falsification_penalty * falsifications, 0.55)
-            if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
-                score += self._limits.replan_feedback_bonus
+            target_variants: list[tuple[str, dict[str, Any], dict[str, Any]]] = [(action_id, {}, {})]
+            if action_id == "ACTION6":
+                click_targets = self._click_targets(perception, limit=self._limits.click_target_limit)
+                if click_targets:
+                    target_variants = [
+                        (
+                            f"ACTION6@{target['x']},{target['y']}",
+                            {"x": int(target["x"]), "y": int(target["y"])},
+                            dict(target),
+                        )
+                        for target in click_targets
+                    ]
+                else:
+                    target_variants = [("ACTION6@32,32", {"x": 32, "y": 32}, {"entity_kind": "fallback", "entity_color": "unknown"})]
 
-            if graph_record.get("goal_id") == goal.selected.goal_id:
-                score += self._limits.graph_evidence_bonus
+            for book_id, payload, target_info in target_variants:
+                attempts = int(state.action_attempt_counts.get(book_id, 0))
+                falsifications = int(state.action_falsification_counts.get(book_id, 0))
+                is_untested = attempts == 0
+                repeated_falsified = falsifications >= 2
 
-            rationale_parts = [graph_record.get("rationale") or f"consider {action_id} for {goal.selected.goal_id}"]
-            if goal_alignment:
-                rationale_parts.append("matches goal contract")
-            if is_untested:
-                rationale_parts.append("untested")
-            if repeated_falsified:
-                rationale_parts.append(f"repeatedly falsified x{falsifications}")
-            if state.latest_veto_alternative is not None and action_id == state.latest_veto_alternative.action_id:
-                rationale_parts.append("veto feedback")
+                score = graph_score
+                if goal_alignment:
+                    score += self._limits.goal_alignment_bonus
+                if is_untested:
+                    score += self._limits.untested_bonus
+                else:
+                    decay = self._limits.repeat_decay_factor ** attempts
+                    score *= decay
+                    score -= min(self._limits.repeat_attempt_penalty * attempts, 0.18)
+                if falsifications:
+                    score -= min(self._limits.falsification_penalty * falsifications, 0.55)
+                if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
+                    score += self._limits.replan_feedback_bonus
 
-            candidates.append(
-                _CandidateRecord(
-                    action_id=action_id,
-                    score=score,
-                    rationale="; ".join(rationale_parts),
-                    expected_effect="",
-                    predicted_outcome=self._predicted_outcome(graph_record, graph_evidence, is_untested),
-                    metadata={
-                        "attempt_count": attempts,
-                        "falsification_count": falsifications,
-                        "goal_alignment": goal_alignment,
-                        "graph_record": dict(graph_record),
-                        "graph_evidence": graph_evidence,
-                        "perception_grid_hash": perception.grid_hash,
-                        "untested": is_untested,
-                        "repeated_falsified": repeated_falsified,
-                        "replan_passes": state.replan_passes,
-                        "mechanic_prior_source": action_id in mechanic_action_set,
-                    },
+                if graph_record.get("goal_id") == goal.selected.goal_id:
+                    score += self._limits.graph_evidence_bonus
+
+                rationale_parts = [graph_record.get("rationale") or f"consider {action_id} for {goal.selected.goal_id}"]
+                if action_id == "ACTION6":
+                    rationale_parts = [
+                        f"click {target_info.get('entity_kind', 'entity')} color={target_info.get('entity_color', 'unknown')} at ({payload.get('x', 32)},{payload.get('y', 32)})"
+                    ]
+                if goal_alignment:
+                    rationale_parts.append("matches goal contract")
+                if is_untested:
+                    rationale_parts.append("untested")
+                if repeated_falsified:
+                    rationale_parts.append(f"repeatedly falsified x{falsifications}")
+                if state.latest_veto_alternative is not None and action_id == state.latest_veto_alternative.action_id:
+                    rationale_parts.append("veto feedback")
+
+                predicted_outcome = self._predicted_outcome(graph_record, graph_evidence, is_untested)
+                expected_effect = f"{action_id}: expect {predicted_outcome.get('kind', 'grid_change')} (p={float(predicted_outcome.get('confidence', 0.0)):.2f})"
+
+                candidates.append(
+                    _CandidateRecord(
+                        action_id=action_id,
+                        book_id=book_id,
+                        payload=payload,
+                        score=score,
+                        rationale="; ".join(rationale_parts),
+                        expected_effect=expected_effect,
+                        predicted_outcome=predicted_outcome,
+                        metadata={
+                            "book_id": book_id,
+                            "attempt_count": attempts,
+                            "falsification_count": falsifications,
+                            "goal_alignment": goal_alignment,
+                            "graph_record": dict(graph_record),
+                            "graph_evidence": graph_evidence,
+                            "perception_grid_hash": perception.grid_hash,
+                            "untested": is_untested,
+                            "repeated_falsified": repeated_falsified,
+                            "replan_passes": state.replan_passes,
+                            "mechanic_prior_source": action_id in mechanic_action_set,
+                            **target_info,
+                        },
+                    )
                 )
-            )
-            predicted = candidates[-1].predicted_outcome
-            candidates[-1].expected_effect = f"{action_id}: expect {predicted.get('kind', 'grid_change')} (p={float(predicted.get('confidence', 0.0)):.2f})"
 
         if not candidates:
             candidates.append(self._fallback_candidate(state, goal, perception))
@@ -207,11 +233,17 @@ class PlanGenerator:
                 candidates.append(
                     _CandidateRecord(
                         action_id=veto_action,
+                        book_id=str((state.latest_veto_alternative.metadata or {}).get("book_id") or veto_action),
+                        payload=dict(state.latest_veto_alternative.payload or {}),
                         score=self._limits.replan_feedback_bonus,
                         rationale=f"replan feedback suggests {veto_action}",
                         expected_effect=state.latest_veto_alternative.expected_effect,
                         predicted_outcome=dict(state.latest_veto_alternative.predicted_outcome or {}),
-                        metadata={"replan_feedback": True, "source": "veto_alternative"},
+                        metadata={
+                            "book_id": str((state.latest_veto_alternative.metadata or {}).get("book_id") or veto_action),
+                            "replan_feedback": True,
+                            "source": "veto_alternative",
+                        },
                     )
                 )
 
@@ -221,11 +253,14 @@ class PlanGenerator:
         action_id = self._slugify(f"probe-{goal.selected.goal_id}")
         return _CandidateRecord(
             action_id=action_id,
+            book_id=action_id,
+            payload={},
             score=0.1,
             rationale=f"fallback probe for {goal.selected.goal_id}",
             expected_effect=goal.selected.description,
             predicted_outcome={"kind": "grid_change", "confidence": 0.3},
             metadata={
+                "book_id": action_id,
                 "attempt_count": state.action_attempt_counts.get(action_id, 0),
                 "falsification_count": state.action_falsification_counts.get(action_id, 0),
                 "goal_alignment": True,
@@ -377,6 +412,8 @@ class PlanGenerator:
                 updated.append(
                     _CandidateRecord(
                         action_id=candidate.action_id,
+                        book_id=candidate.book_id,
+                        payload=dict(candidate.payload),
                         score=max(candidate.score, bonus + self._limits.replan_feedback_bonus),
                         rationale="; ".join(part for part in [candidate.rationale, reason, "llm guidance"] if part),
                         expected_effect=patch.get("expected_effect") or candidate.expected_effect,
@@ -390,18 +427,20 @@ class PlanGenerator:
             updated.append(
                 _CandidateRecord(
                     action_id=action_id,
+                    book_id=action_id,
+                    payload={},
                     score=max(self._limits.replan_feedback_bonus, bonus),
                     rationale=reason or f"llm suggested {action_id}",
                     expected_effect=patch.get("expected_effect"),
                     predicted_outcome={"kind": "grid_change", "confidence": float(bonus or 0.4)},
-                    metadata={"llm_guidance": True, "llm_reason": reason},
+                    metadata={"book_id": action_id, "llm_guidance": True, "llm_reason": reason},
                 )
             )
         return updated
 
     def _should_force_explore(self, state: WorkflowState, top_candidate: _CandidateRecord) -> bool:
         """Force exploration when the top candidate has been used too many consecutive times."""
-        attempts = int(state.action_attempt_counts.get(top_candidate.action_id, 0))
+        attempts = int(state.action_attempt_counts.get(top_candidate.book_id, 0))
         return attempts >= self._limits.force_explore_after
 
     def _rank_candidates(self, candidates: Sequence[_CandidateRecord]) -> list[_CandidateRecord]:
@@ -447,6 +486,48 @@ class PlanGenerator:
         return {"kind": "grid_change", "confidence": 0.4}
 
     @staticmethod
+    def _click_targets(perception: PerceptionSnapshot, limit: int = 3) -> list[dict[str, Any]]:
+        """Rank click targets from perceived entities: small, distinct objects first."""
+        color_counts: dict[str, int] = {}
+        for entity in perception.entities:
+            color_counts[entity.value] = color_counts.get(entity.value, 0) + 1
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for entity in perception.entities:
+            attrs = entity.attributes or {}
+            coverage = float(attrs.get("coverage") or 0.0)
+            if coverage > 0.5:
+                continue
+            cell_count = int(attrs.get("cell_count") or 0)
+            if cell_count == 0:
+                continue
+            centroid = attrs.get("centroid") or (0, 0)
+            row = int(round(float(centroid[0])))
+            col = int(round(float(centroid[1])))
+            x = max(0, min(63, col))
+            y = max(0, min(63, row))
+
+            rarity = 1.0 / (1.0 + float(color_counts.get(entity.value, 0)))
+            salience = (1.0 / (1.0 + cell_count)) + rarity
+            if entity.kind in ("point", "block"):
+                salience += 0.2
+
+            scored.append(
+                (
+                    salience,
+                    {
+                        "x": x,
+                        "y": y,
+                        "entity_kind": entity.kind,
+                        "entity_color": entity.value,
+                    },
+                )
+            )
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [target for _, target in scored[:limit]]
+
+    @staticmethod
     def _serialize_goal(goal: ResolvedGoal) -> dict[str, Any]:
         return {
             "selected": PlanGenerator._serialize_hypothesis(goal.selected),
@@ -469,6 +550,8 @@ class PlanGenerator:
     def _serialize_candidate(candidate: _CandidateRecord) -> dict[str, Any]:
         return {
             "action_id": candidate.action_id,
+            "book_id": candidate.book_id,
+            "payload": dict(candidate.payload),
             "score": candidate.score,
             "rationale": candidate.rationale,
             "expected_effect": candidate.expected_effect,
@@ -488,6 +571,7 @@ class PlanGenerator:
             score=candidate.score,
             rationale=candidate.rationale,
             expected_effect=candidate.expected_effect,
+            payload=dict(candidate.payload),
             predicted_outcome=dict(candidate.predicted_outcome or {}),
             metadata=metadata,
         )

@@ -198,7 +198,7 @@ class Evaluator:
 
     @staticmethod
     def _action_family(action_id: str) -> str:
-        for separator in (":", "-", "_"):
+        for separator in ("@", ":", "-", "_"):
             if separator in action_id:
                 return action_id.split(separator, 1)[0]
         return action_id

@@ -6,6 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .cycle_policy import check_budget, check_stall, record_evaluation_outcome, termination_from_evaluation
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
@@ -40,8 +41,9 @@ class WorkflowOrchestrator:
         current_observation: Mapping[str, Any] = observation
 
         while True:
-            if state.step_index >= self._limits.max_cycles:
-                return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
+            budget_reason = check_budget(state.step_index, self._limits.max_cycles)
+            if budget_reason is not None:
+                return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, budget_reason, phase_results)
 
             cycle_vetoes = 0
             try:
@@ -141,27 +143,30 @@ class WorkflowOrchestrator:
                 self._record_evaluation_state(state, execution_payload, evaluation_payload)
                 state.step_index += 1
 
-                # Exploration-aware stall guard: only stall after exhausting
-                # all available actions AND completing multiple passes.
-                if state.consecutive_no_progress_count >= self._limits.max_consecutive_no_progress:
-                    available_actions = current_observation.get("available_actions", [])
-                    num_available = len(available_actions) or 1
-                    untested_remaining = num_available - len(state.action_attempt_counts)
-                    import logging as _logging
-                    _logging.getLogger(__name__).info(
-                        "STALL_CHECK no_progress=%d, available=%d, attempted=%d, untested=%d, threshold=%d",
-                        state.consecutive_no_progress_count, num_available,
-                        len(state.action_attempt_counts), untested_remaining, num_available * 2,
-                    )
-                    if untested_remaining > 0:
-                        pass  # still have untested actions — keep exploring
-                    elif state.consecutive_no_progress_count >= num_available * 2:
-                        # Tried every action at least twice with no progress — stall
-                        return self._finish(state, WorkflowStatus.STALLED, "stall_detected", phase_results)
-                    # Otherwise keep going — actions may behave differently
-                    # as game state evolves across cycles.
+                available_actions = current_observation.get("available_actions", [])
+                num_available = len(available_actions)
+                num_attempted = len(state.action_attempt_counts)
+                untested_remaining = (num_available or 1) - num_attempted
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "STALL_CHECK no_progress=%d, available=%d, attempted=%d, untested=%d, threshold=%d",
+                    state.consecutive_no_progress_count,
+                    num_available or 1,
+                    num_attempted,
+                    untested_remaining,
+                    (num_available or 1) * 2,
+                )
+                stall_reason = check_stall(
+                    state.consecutive_no_progress_count,
+                    self._limits.max_consecutive_no_progress,
+                    num_available,
+                    num_attempted,
+                )
+                if stall_reason is not None:
+                    return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
 
-                if evaluation.status == PhaseStatus.TERMINATE or evaluation_payload.decision == WorkflowDecision.TERMINATE:
+                termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
+                if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
                     return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
 
                 current_observation = execution_payload.observation
@@ -188,7 +193,9 @@ class WorkflowOrchestrator:
 
     @staticmethod
     def _record_execution_attempt(state: WorkflowState, execution: ExecutionResult) -> None:
-        state.action_attempt_counts[execution.action_id] = state.action_attempt_counts.get(execution.action_id, 0) + 1
+        metadata = execution.candidate.metadata if execution.candidate is not None else {}
+        action_key = str((metadata or {}).get("book_id") or execution.action_id)
+        state.action_attempt_counts[action_key] = state.action_attempt_counts.get(action_key, 0) + 1
 
     @staticmethod
     def _record_evaluation_state(
@@ -196,11 +203,15 @@ class WorkflowOrchestrator:
         execution: ExecutionResult,
         evaluation: EvaluationResult,
     ) -> None:
-        if evaluation.meaningful_progress:
-            state.consecutive_no_progress_count = 0
-        else:
-            state.consecutive_no_progress_count += 1
-            state.action_falsification_counts[execution.action_id] = state.action_falsification_counts.get(execution.action_id, 0) + max(0, evaluation.falsification_delta)
+        metadata = execution.candidate.metadata if execution.candidate is not None else {}
+        action_key = str((metadata or {}).get("book_id") or execution.action_id)
+        state.consecutive_no_progress_count = record_evaluation_outcome(
+            no_progress_count=state.consecutive_no_progress_count,
+            falsification_counts=state.action_falsification_counts,
+            action_key=action_key,
+            meaningful_progress=evaluation.meaningful_progress,
+            falsification_delta=evaluation.falsification_delta,
+        )
 
     @staticmethod
     def _finish(

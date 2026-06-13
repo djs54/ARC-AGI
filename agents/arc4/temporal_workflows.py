@@ -8,6 +8,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from .cycle_policy import check_budget, check_stall, record_evaluation_outcome, termination_from_evaluation
     from .types import WorkflowPhase, WorkflowStatus, PhaseStatus, WorkflowDecision
 
 
@@ -34,8 +35,9 @@ class ArcPuzzleWorkflow:
 
         while True:
             step = self._state.get("step_index", 0)
-            if step >= max_cycles:
-                return self._finish("budget_exhausted", "budget_exhausted")
+            budget_reason = check_budget(step, max_cycles)
+            if budget_reason is not None:
+                return self._finish("budget_exhausted", budget_reason)
 
             # Phase 1: Perceive
             perceive_out = await workflow.execute_activity(
@@ -137,38 +139,33 @@ class ArcPuzzleWorkflow:
             self._phase_results.append(eval_out["result"])
 
             # Update state counters (mirror WorkflowOrchestrator._record_*)
+            candidate = execution.get("candidate") if isinstance(execution, dict) else None
+            candidate_meta = candidate.get("metadata") if isinstance(candidate, dict) else {}
             action_id = execution.get("action_id", "")
+            action_key = str((candidate_meta or {}).get("book_id") or action_id)
             attempt_counts = self._state.setdefault("action_attempt_counts", {})
-            attempt_counts[action_id] = attempt_counts.get(action_id, 0) + 1
+            attempt_counts[action_key] = attempt_counts.get(action_key, 0) + 1
 
-            if evaluation.get("meaningful_progress"):
-                self._state["consecutive_no_progress_count"] = 0
-            else:
-                self._state["consecutive_no_progress_count"] = self._state.get("consecutive_no_progress_count", 0) + 1
-                falsification_counts = self._state.setdefault("action_falsification_counts", {})
-                delta = max(0, evaluation.get("falsification_delta", 0))
-                falsification_counts[action_id] = falsification_counts.get(action_id, 0) + delta
+            falsification_counts = self._state.setdefault("action_falsification_counts", {})
+            self._state["consecutive_no_progress_count"] = record_evaluation_outcome(
+                no_progress_count=int(self._state.get("consecutive_no_progress_count", 0) or 0),
+                falsification_counts=falsification_counts,
+                action_key=action_key,
+                meaningful_progress=bool(evaluation.get("meaningful_progress")),
+                falsification_delta=int(evaluation.get("falsification_delta", 0) or 0),
+            )
 
             self._state["step_index"] = step + 1
 
-            # Stall check — only stall after exhausting all actions
-            # AND completing multiple passes (actions may behave differently
-            # as game state evolves across cycles).
             no_progress = self._state.get("consecutive_no_progress_count", 0)
-            if no_progress >= max_no_progress:
-                available = observation.get("available_actions", [])
-                num_available = len(available) or 1
-                tested = len(self._state.get("action_attempt_counts", {}))
-                untested_remaining = num_available - tested
-                if untested_remaining > 0:
-                    pass  # still have untested actions — keep exploring
-                elif no_progress >= num_available * 2:
-                    # Tried every action at least twice with no progress
-                    return self._finish("stalled", "stall_detected")
+            available = observation.get("available_actions", [])
+            stall_reason = check_stall(no_progress, max_no_progress, len(available), len(self._state.get("action_attempt_counts", {})))
+            if stall_reason is not None:
+                return self._finish("stalled", stall_reason)
 
-            # Terminate check (WorkflowDecision is a StrEnum with lowercase values)
-            if str(evaluation.get("decision", "")).lower() == "terminate":
-                return self._finish("terminated", evaluation.get("reason", "terminated"))
+            termination = termination_from_evaluation(evaluation.get("decision"), evaluation.get("reason"))
+            if termination is not None:
+                return self._finish(termination[0], termination[1])
 
             # Next cycle uses execution's observation
             observation = execution.get("observation", observation)
