@@ -20,6 +20,7 @@ from arc_runtime.config import load_config
 from arc_runtime.dispatch import run_arc_v2_batch, run_arc_v2_task
 from arc_runtime.game_session import ArcV2GameSession, _compute_progress, _unwrap_arc_game_payload
 from arc_runtime.llm import LLMInitializationError, create_llm_client
+from benchmarks.ab_harness import ABTask
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
 from benchmarks.harness import BenchmarkConfig
@@ -184,6 +185,61 @@ class SingleTaskRunner:
 
         if MANIFEST_PATH.exists():
             self.tasks = load_tasks_from_manifest(str(MANIFEST_PATH))
+
+        if self.real_api:
+            await self._sync_tasks_with_live_catalog()
+
+    async def _sync_tasks_with_live_catalog(self) -> None:
+        if self.harness is None:
+            return
+        try:
+            games = await self.harness.list_games()
+        except Exception as exc:
+            logger.warning("Could not fetch live game catalog; using manifest task ids as-is: %s", exc)
+            return
+
+        live_games = [game for game in games if isinstance(game, dict) and str(game.get("game_id") or "").strip()]
+        if not live_games:
+            logger.warning("Live API returned no games; using manifest task ids as-is.")
+            return
+
+        games_by_id = {str(game["game_id"]): game for game in live_games}
+
+        if not self.tasks:
+            generated_tasks: list[ABTask] = []
+            for idx, game in enumerate(live_games, start=1):
+                game_id = str(game["game_id"])
+                task = ABTask(task_id=f"arc_live_{idx:03d}", category="core", prompt=f"Solve ARC game {game_id}")
+                setattr(task, "game_id", game_id)
+                if game.get("title") is not None:
+                    setattr(task, "arc_game_title", str(game.get("title") or ""))
+                if isinstance(game.get("tags"), list):
+                    setattr(task, "arc_game_tags", [str(tag) for tag in game["tags"]])
+                generated_tasks.append(task)
+            self.tasks = generated_tasks
+            logger.info("No manifest tasks found; generated %d tasks from live game catalog.", len(self.tasks))
+            return
+
+        invalid_count = 0
+        for idx, task in enumerate(self.tasks):
+            current_game_id = str(getattr(task, "game_id", "") or "")
+            game = games_by_id.get(current_game_id)
+
+            if game is None:
+                invalid_count += 1
+                game = live_games[idx % len(live_games)]
+                setattr(task, "game_id", str(game["game_id"]))
+
+            if game.get("title") is not None:
+                setattr(task, "arc_game_title", str(game.get("title") or ""))
+            if isinstance(game.get("tags"), list):
+                setattr(task, "arc_game_tags", [str(tag) for tag in game["tags"]])
+
+        if invalid_count:
+            logger.warning(
+                "Remapped %d manifest task game_id values that were not found in live ARC catalog.",
+                invalid_count,
+            )
 
     def reset_live_output(self):
         self.live_output_path.write_text("")
