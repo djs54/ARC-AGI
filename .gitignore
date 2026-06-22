@@ -13,3 +13,6 @@ artifacts/
 
 .arc/
 benchmarks/results/
+
+# Tool caches
+.serena/
