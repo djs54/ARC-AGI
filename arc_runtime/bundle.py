@@ -5,6 +5,7 @@ import dataclasses
 import enum
 import inspect
 import json
+import logging
 from typing import Any, Callable, Mapping
 
 from agents.arc4.evaluator import Evaluator
@@ -19,6 +20,8 @@ from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import PhaseResult, PhaseStatus, WorkflowPhase
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
 from arc_runtime.game_session import ArcV2GameSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(slots=True)
@@ -59,25 +62,25 @@ class SyncLLMPortAdapter:
         achat = getattr(self._llm_client, "achat", None)
         if achat is not None:
             try:
-                result = asyncio.get_event_loop().run_until_complete(achat(message_dicts))
+                try:
+                    result = asyncio.get_event_loop().run_until_complete(achat(message_dicts))
+                except RuntimeError:
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, achat(message_dicts))
+                        result = future.result(timeout=60)
                 prompt_text = " ".join(m.get("content", "") for m in message_dicts)
                 self.total_tokens_in += len(prompt_text) // 4
                 response_str = str(result.content if hasattr(result, "content") else result)
                 self.total_tokens_out += len(response_str) // 4
                 return str(result.content) if hasattr(result, "content") else str(result)
-            except RuntimeError:
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, achat(message_dicts))
-                    result = future.result(timeout=60)
-                    prompt_text = " ".join(m.get("content", "") for m in message_dicts)
-                    self.total_tokens_in += len(prompt_text) // 4
-                    response_str = str(result.content if hasattr(result, "content") else result)
-                    self.total_tokens_out += len(response_str) // 4
-                    return str(result.content) if hasattr(result, "content") else str(result)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Covers failures from either the direct get_event_loop() path or the
+                # RuntimeError/ThreadPoolExecutor fallback above (e.g. the underlying
+                # achat() call itself raising inside the thread pool) — any of these
+                # must fall through to the sync-method loop below, not propagate.
+                logger.warning("SyncLLMPortAdapter: achat call failed, falling back to sync methods: %s", exc)
 
         prompt = "\n".join(f"{m.role}: {m.content}" for m in messages)
         for method_name in ("generate", "complete", "chat"):
@@ -92,13 +95,12 @@ class SyncLLMPortAdapter:
                 response_str = str(result)
                 self.total_tokens_out += len(response_str) // 4
                 return response_str
-            except Exception:
-                return "{}"
+            except Exception as exc:
+                logger.warning("SyncLLMPortAdapter: %s() call failed: %s", method_name, exc)
+                return ""
 
-        try:
-            return json.dumps({}, default=self._json_default)
-        except Exception:
-            return "{}"
+        logger.warning("SyncLLMPortAdapter: llm_client %r has no achat/generate/complete/chat method", self._llm_client)
+        return ""
 
 
 def build_arc_v2_bundle(

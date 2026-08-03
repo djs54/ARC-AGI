@@ -442,7 +442,7 @@ class GoalResolver:
         except json.JSONDecodeError:
             parsed = None
 
-        if isinstance(parsed, Mapping):
+        if isinstance(parsed, Mapping) and parsed.get("goal_id"):
             return dict(parsed)
 
         goal_match = re.search(r"goal[_\s-]*id\s*[:=]\s*([A-Za-z0-9_.-]+)", response, re.IGNORECASE)
