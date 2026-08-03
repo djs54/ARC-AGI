@@ -358,6 +358,7 @@ class WorkflowState:
     consecutive_no_progress_count: int = 0
     action_attempt_counts: dict[str, int] = field(default_factory=dict)
     action_falsification_counts: dict[str, int] = field(default_factory=dict)
+    goal_failure_counts: dict[str, int] = field(default_factory=dict)
     latest_veto_reason: str | None = None
     latest_veto_alternative: PlanCandidate | None = None
     replan_passes: int = 0
@@ -376,6 +377,7 @@ class WorkflowState:
             "consecutive_no_progress_count": self.consecutive_no_progress_count,
             "action_attempt_counts": self.action_attempt_counts,
             "action_falsification_counts": self.action_falsification_counts,
+            "goal_failure_counts": self.goal_failure_counts,
             "latest_veto_reason": self.latest_veto_reason,
             "latest_veto_alternative": self.latest_veto_alternative.to_dict() if self.latest_veto_alternative else None,
             "replan_passes": self.replan_passes,
@@ -396,6 +398,7 @@ class WorkflowState:
             consecutive_no_progress_count=d.get("consecutive_no_progress_count", 0),
             action_attempt_counts=d.get("action_attempt_counts", {}),
             action_falsification_counts=d.get("action_falsification_counts", {}),
+            goal_failure_counts=d.get("goal_failure_counts", {}),
             latest_veto_reason=d.get("latest_veto_reason"),
             latest_veto_alternative=PlanCandidate.from_dict(d["latest_veto_alternative"]) if d.get("latest_veto_alternative") else None,
             replan_passes=d.get("replan_passes", 0),

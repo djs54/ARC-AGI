@@ -214,6 +214,12 @@ class WorkflowOrchestrator:
             meaningful_progress=evaluation.meaningful_progress,
             falsification_delta=evaluation.falsification_delta,
         )
+        if state.active_goal is not None:
+            goal_id = state.active_goal.selected.goal_id
+            if evaluation.meaningful_progress:
+                state.goal_failure_counts[goal_id] = 0
+            else:
+                state.goal_failure_counts[goal_id] = state.goal_failure_counts.get(goal_id, 0) + 1
 
     @staticmethod
     def _finish(

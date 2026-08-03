@@ -155,6 +155,18 @@ class ArcPuzzleWorkflow:
                 falsification_delta=int(evaluation.get("falsification_delta", 0) or 0),
             )
 
+            # Mirror WorkflowOrchestrator._record_evaluation_state's goal_failure_counts
+            # bookkeeping (A152): reset to 0 on progress, increment otherwise, keyed by
+            # the goal_id that was active for this cycle.
+            goal_failure_counts = self._state.setdefault("goal_failure_counts", {})
+            active_goal_selected = goal.get("selected") if isinstance(goal, dict) else None
+            active_goal_id = active_goal_selected.get("goal_id") if isinstance(active_goal_selected, dict) else None
+            if active_goal_id:
+                if bool(evaluation.get("meaningful_progress")):
+                    goal_failure_counts[active_goal_id] = 0
+                else:
+                    goal_failure_counts[active_goal_id] = goal_failure_counts.get(active_goal_id, 0) + 1
+
             self._state["step_index"] = step + 1
 
             no_progress = self._state.get("consecutive_no_progress_count", 0)

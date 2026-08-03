@@ -243,9 +243,20 @@ class SingleTaskRunner:
 
     def reset_live_output(self):
         self.live_output_path.write_text("")
+        self.world_model_live_output_path.parent.mkdir(parents=True, exist_ok=True)
         if self.world_model_eval:
             self.world_model_evaluator.reset()
             self.world_model_live_output_path.write_text("")
+        else:
+            self.world_model_live_output_path.write_text(
+                json.dumps(
+                    {
+                        "world_model_eval": False,
+                        "note": "world-model telemetry disabled for this run; pass --world-model-eval to enable",
+                    }
+                )
+                + "\n"
+            )
 
     def append_live_snapshot(self, snapshot: dict):
         artifacts.append_live_snapshot(self, snapshot)

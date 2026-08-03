@@ -9,6 +9,12 @@ from agents.common.failure_taxonomy import FailureTaxonomy, classify_failure
 from .ports import GraphQueryPort
 from .types import EvaluationResult, ExecutionResult, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowDecision, WorkflowPhase, WorkflowState
 
+# A150: predicted-outcome kinds that are too weak to count as a confirming
+# prediction on their own — e.g. "grid_change" matches nearly any action in a
+# click-based game, so treating it as confirmed-without-progress means
+# falsification never accumulates for the most common candidate shape.
+WEAK_PREDICTION_KINDS = frozenset({"grid_change"})
+
 
 @dataclass(slots=True)
 class EvaluationLimits:
@@ -107,6 +113,15 @@ class Evaluator:
             except Exception:
                 pass  # graph unavailable — don't override
 
+        # A150: "grid_change" is the weakest possible predicted-outcome kind — nearly
+        # any action in a click-based game changes at least one pixel, so treating it
+        # as confirmed-without-progress means falsification never accumulates for the
+        # most common candidate shape. Force it into the falsification path instead.
+        weak_prediction_override = False
+        if predicted_kind in WEAK_PREDICTION_KINDS and effect_match and not meaningful_progress:
+            effect_match = False
+            weak_prediction_override = True
+
         decision = WorkflowDecision.CONTINUE
         falsification_delta = 0
         reason = ""
@@ -122,9 +137,16 @@ class Evaluator:
         elif effect_match:
             reason = "prediction_confirmed_without_progress"
         else:
-            if grid_changed_flag:
+            if grid_changed_flag and not weak_prediction_override:
                 falsification_delta = 0
                 reason = "effect_without_progress"
+            elif weak_prediction_override:
+                falsification_delta = 1
+                reason = "weak_prediction_falsified"
+                projected_count = current_falsification_count + falsification_delta
+                if projected_count >= self._limits.repeated_falsification_threshold:
+                    decision = WorkflowDecision.PIVOT
+                    reason = "repeated_falsification"
             else:
                 falsification_delta = 1
                 projected_count = current_falsification_count + falsification_delta
@@ -169,6 +191,7 @@ class Evaluator:
                 "observed_kind": observed_kind,
                 "causal_override": causal_override,
                 "causal_path": causal_path,
+                "weak_prediction_override": weak_prediction_override,
             },
         )
 

@@ -19,6 +19,8 @@ class GoalResolverLimits:
     low_confidence_threshold: float = 0.7
     llm_patience_steps: int = 2
     max_hypotheses: int = 5
+    goal_failure_threshold: int = 2
+    goal_failure_decay_factor: float = 0.7
 
 
 class GoalResolver:
@@ -50,6 +52,8 @@ class GoalResolver:
                 llm_applied = True
                 llm_reason = llm_patch.get("reason")
 
+        hypotheses = self._order_hypotheses(hypotheses)
+        hypotheses = self._apply_failure_decay(state, hypotheses)
         hypotheses = self._order_hypotheses(hypotheses)
         hypotheses, grounding_gate_passed = self._apply_grounding_gate(state, perception, hypotheses)
         selected = hypotheses[0]
@@ -264,6 +268,37 @@ class GoalResolver:
 
         return updated
 
+    def _apply_failure_decay(
+        self,
+        state: WorkflowState,
+        hypotheses: list[GoalHypothesis],
+    ) -> list[GoalHypothesis]:
+        """Decay confidence for hypotheses whose goal has repeatedly failed to progress.
+
+        Mirrors plan_generator.py's repeat_decay_factor pattern (A131): a goal that has
+        been active for `goal_failure_threshold` or more consecutive no-progress
+        evaluations loses ranking priority relative to untested alternatives, so a
+        persistently-failing goal doesn't stay pinned at the top of the hypothesis list
+        forever (A152).
+        """
+        decayed: list[GoalHypothesis] = []
+        for hypothesis in hypotheses:
+            failures = state.goal_failure_counts.get(hypothesis.goal_id, 0)
+            if failures < self._limits.goal_failure_threshold:
+                decayed.append(hypothesis)
+                continue
+            decay = self._limits.goal_failure_decay_factor ** (failures - self._limits.goal_failure_threshold + 1)
+            decayed.append(
+                GoalHypothesis(
+                    goal_id=hypothesis.goal_id,
+                    description=hypothesis.description,
+                    confidence=hypothesis.confidence * decay,
+                    evidence=hypothesis.evidence,
+                    metadata=self._merge_metadata(hypothesis.metadata, {"failure_decay_applied": True, "failure_count": failures}),
+                )
+            )
+        return decayed
+
     def _apply_grounding_gate(
         self,
         state: WorkflowState,
@@ -277,11 +312,17 @@ class GoalResolver:
         if progress_made:
             return hypotheses, True
 
+        active_goal_id = state.active_goal.selected.goal_id
         ceiling = state.active_goal.selected.confidence
         clamped: list[GoalHypothesis] = []
         applied = False
         for hypothesis in hypotheses:
-            if hypothesis.confidence > ceiling:
+            # Only clamp upward drift on the *same* goal that was already active — a
+            # fresh alternative hypothesis (including one promoted by failure decay
+            # elsewhere in this cycle) must not be suppressed down to the stalled
+            # goal's ceiling, or a persistently-failing goal could never be displaced
+            # (A152 death-spiral risk called out in the plan's Step 4).
+            if hypothesis.goal_id == active_goal_id and hypothesis.confidence > ceiling:
                 applied = True
                 clamped.append(
                     GoalHypothesis(

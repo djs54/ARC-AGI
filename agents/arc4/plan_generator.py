@@ -123,6 +123,18 @@ class PlanGenerator:
         records_by_action = {record["action_id"]: record for record in graph_records if record.get("action_id")}
         candidates: list[_CandidateRecord] = []
 
+        # A151: build (x, y) -> attempt_count map from ACTION6@x,y book_ids so click
+        # target generation is aware of coordinates already attempted this run.
+        attempted_click_coords: dict[tuple[int, int], int] = {}
+        for book_id, count in state.action_attempt_counts.items():
+            if book_id.startswith("ACTION6@") and count > 0:
+                coord_part = book_id[len("ACTION6@") :]
+                try:
+                    x_str, y_str = coord_part.split(",", 1)
+                    attempted_click_coords[(int(x_str), int(y_str))] = count
+                except ValueError:
+                    continue
+
         for action_id in available_actions[: self._limits.max_candidates]:
             graph_record = records_by_action.get(action_id, {})
             goal_alignment = self._action_matches_goal(action_id, goal)
@@ -145,7 +157,11 @@ class PlanGenerator:
 
             target_variants: list[tuple[str, dict[str, Any], dict[str, Any]]] = [(action_id, {}, {})]
             if action_id == "ACTION6":
-                click_targets = self._click_targets(perception, limit=self._limits.click_target_limit)
+                click_targets = self._click_targets(
+                    perception,
+                    limit=self._limits.click_target_limit,
+                    attempted_coords=attempted_click_coords,
+                )
                 if click_targets:
                     target_variants = [
                         (
@@ -486,8 +502,18 @@ class PlanGenerator:
         return {"kind": "grid_change", "confidence": 0.4}
 
     @staticmethod
-    def _click_targets(perception: PerceptionSnapshot, limit: int = 3) -> list[dict[str, Any]]:
-        """Rank click targets from perceived entities: small, distinct objects first."""
+    def _click_targets(
+        perception: PerceptionSnapshot,
+        limit: int = 3,
+        *,
+        attempted_coords: Mapping[tuple[int, int], int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Rank click targets from perceived entities: small, distinct objects first.
+
+        A151: `attempted_coords` maps (x, y) -> attempt_count for coordinates already
+        proposed via `ACTION6@x,y` in this workflow, so repeated clicks on the same
+        spot are penalized (not excluded) and rank behind fresh, unexplored targets.
+        """
         color_counts: dict[str, int] = {}
         for entity in perception.entities:
             color_counts[entity.value] = color_counts.get(entity.value, 0) + 1
@@ -511,6 +537,12 @@ class PlanGenerator:
             salience = (1.0 / (1.0 + cell_count)) + rarity
             if entity.kind in ("point", "block"):
                 salience += 0.2
+
+            attempts_here = (attempted_coords or {}).get((x, y), 0)
+            if attempts_here:
+                # A151: push repeats behind fresh targets; does not floor at 0 so
+                # relative ranking among repeats (fewest attempts first) is preserved.
+                salience -= 0.5 * attempts_here
 
             scored.append(
                 (
