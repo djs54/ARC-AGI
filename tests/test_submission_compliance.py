@@ -43,11 +43,3 @@ def test_output_format_validation(tmp_path):
         json.dump(invalid_results, f)
         
     assert verify_output_format(invalid_file) is False
-
-def test_submission_runner_initialization():
-    """Smoke test for submission runner initialization."""
-    from benchmarks.arc3.submission import SubmissionRunner
-    runner = SubmissionRunner()
-    # We won't fully initialize in tests to avoid DB/LLM side effects
-    assert runner.config is not None
-    assert runner.tasks == []

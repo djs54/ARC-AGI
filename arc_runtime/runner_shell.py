@@ -4,14 +4,13 @@
 
 import argparse
 import asyncio
-import atexit
 import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from agents.common.trace_names import normalize_artifact_payload, normalize_orchestration_status
 from arc_runtime import artifacts
@@ -27,9 +26,6 @@ from benchmarks.harness import BenchmarkConfig
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from sidequest_mcp_client.observability import build_observability
 from sidequest_mcp_client.readiness import ReadinessError, check_mcp_readiness
-
-if TYPE_CHECKING:
-    from agents.arc3.runner import DurableARCRunner
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,7 +119,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
     parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
     parser.add_argument("--live-smoke", action="store_true", help="Convenience mode for one-puzzle live smoke")
-    parser.add_argument("--agent-version", choices=("v1", "v2"), default="v2", help="Select ARC agent implementation")
+    parser.add_argument("--agent-version", choices=("v2",), default="v2", help="Select ARC agent implementation (v1 retired, see A148)")
     parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run")
     parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle")
     parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
@@ -298,20 +294,6 @@ class SingleTaskRunner:
             self.harness = None
 
 
-def _emergency_shutdown(runner: Any):
-    if not runner or not hasattr(runner, "_current_trace_snapshot") or not runner._current_trace_snapshot:
-        return
-    try:
-        path = Path(AGENT_EXECUTION_TRACE_PATH)
-        temp_path = path.with_suffix(f"{path.suffix}.tmp")
-        with open(temp_path, "w") as f:
-            json.dump(runner._current_trace_snapshot, f, indent=2, default=_json_default)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(temp_path, path)
-    except Exception:
-        logger.exception("Emergency shutdown failed to save trace data.")
-
-
 async def main():
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -345,15 +327,7 @@ async def main():
         card_id = args.card_id or (f"real_test_{int(time.time())}" if real_api else f"local_test_{int(time.time())}")
         brain_client = MCPBrainClient(runner.db, runner.config)
         runner.reset_live_output()
-        if args.agent_version == "v2":
-            runner.results = await run_arc_v2_batch(runner, brain_client, card_id, args)
-        else:
-            from agents.arc3.runner import DurableARCRunner
-
-            durable = DurableARCRunner(runner.harness, brain_client, runner.config, progress_callback=runner.append_live_snapshot)
-            durable._emit_transition_snapshots = True
-            atexit.register(_emergency_shutdown, durable)
-            runner.results = await durable.run(runner.tasks, card_id)
+        runner.results = await run_arc_v2_batch(runner, brain_client, card_id, args)
 
         for result in runner.results:
             run_review = SingleTaskRunner._build_run_review(result, runner.final_output_path)

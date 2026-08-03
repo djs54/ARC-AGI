@@ -1,5 +1,21 @@
 # Plan: A148 — Isolate and Archive agents/arc3 (v1 Agent)
 
+## Executed 2026-08-02 — deviations from plan
+
+Branch A was executed; see `backlog/A148.md`'s Resolution section for the full account. Two things
+this plan didn't anticipate, sized correctly here for future reference:
+
+1. **Test file count.** Step A3 said "update `tests/` that import `agents.arc3.*`" without sizing it.
+   The actual count was 128 files (the full pre-A130 v1-era test suite), moved as a block into
+   `archive/agents-arc3/tests/` rather than individually skip-marked — mechanical `git mv`, no
+   per-file editing, since none of them are consumed by anything outside the archived set (verified:
+   no cross-imports either direction between the moved files and what stayed in `tests/`).
+2. **`benchmarks/arc3/submission.py` coupling.** Step 2's grep (`grep -rn "agents\.arc3\|..." arc_runtime run_single_puzzle.py`) only checked `arc_runtime`/`run_single_puzzle.py`, not `benchmarks/`.
+   `submission.py` turned out to import `DurableARCRunner` directly and is otherwise unreferenced by
+   any Makefile target — moved into the archive alongside the source rather than left as a dangling
+   import in a directory the card says must stay untouched. Confirmed (grep) it's the *only* file
+   under `benchmarks/arc3/` with any `agents.arc3` coupling.
+
 ## Context
 
 Post-A144 the runtime → `agents.arc3` surface is a single symbol:

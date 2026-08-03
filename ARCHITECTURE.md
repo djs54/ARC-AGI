@@ -205,7 +205,7 @@ The currently landed executable prototype for that direction is the ARC v2 runti
 
 The repo contains a modular ARC v2 runtime under `agents/arc4/`. This is the current production implementation path, promoting the v2 prototype to default agent.
 
-**Phase 4 (A127): Promotion complete.** v2 is now the default agent. Use `--agent-version=v1` to run the archived v1 orchestrator for regression testing.
+**Phase 4 (A127): Promotion complete.** v2 is now the default agent. **A148 (2026-08-02): v1 retired.** `agents/arc3/` was moved to `archive/agents-arc3/`; `--agent-version=v1` no longer exists (v2 is the only supported agent). See `backlog/A148.md` for the decision rationale.
 
 The ARC v2 slice is organized around shared contracts and injected ports:
 
@@ -227,7 +227,7 @@ The ARC v2 slice is organized around shared contracts and injected ports:
 | **2. Plan Vet** | `agents/arc4/plan_vetter.py` | Basal Ganglia | Go/No-Go advisory gate (deterministic) |
 | **2. Execute** | `agents/arc4/executor.py` | Motor Cortex | Action execution (no LLM, no graph) |
 | **2. Evaluate** | `agents/arc4/evaluator.py` | Temporal Lobe | Adversarial post-action review (deterministic) |
-| **3. Tools** | `agents/arc3/solver.py`, `grid_analysis.py` | — | Deterministic scoring, grid analysis |
+| **3. Tools** | inline within `plan_generator.py`/`evaluator.py` | — | Deterministic scoring, candidate ranking (no arc3 dependency since A144) |
 | **4. Memory** | HippoCampy via MCP | Hippocampus + Basal Ganglia | 15 `arc_*` query tools (B278) |
 
 **Design principles:**
@@ -236,7 +236,7 @@ The ARC v2 slice is organized around shared contracts and injected ports:
 3. No module grades its own work — PlanVetter and Evaluator are independent
 4. Deterministic where possible, LLM where needed
 
-**v1 archival:** The v1 `agents/arc3/orchestrator.py` is archived (see module docstring for notice) and remains available only via `--agent-version=v1` for regression testing.
+**v1 retirement (A148, 2026-08-02):** The v1 agent (`agents/arc3/`, including `orchestrator.py`) was moved to `archive/agents-arc3/` along with its dedicated test suite and the v1-vs-v2 comparison harness. It is not runnable via the CLI anymore — kept for git history/reference only. See `archive/agents-arc3/README.md`.
 
 ### ARC v2 MCP Rollout Status
 
@@ -295,7 +295,7 @@ The desired end state is:
 
 ### MCP v1 — stdio-only production seam (runtime scope)
 
-The MCP stdio seam policy applies to the interactive runtime path — `agents/arc3/`, `run_single_puzzle.py`, and `sidequest_mcp_client/`. Offline scoring and submission packaging under `benchmarks/arc3/` embed the brain directly (Kuzu client, schema init, loop queue, centroids) and are exempt from the seam policy, because submission packages cannot depend on a running MCP subprocess. The import-boundary test (`tests/test_import_boundary.py`) enforces the runtime scope; `benchmarks/` is not in its `PROD_PATHS` list (A030).
+The MCP stdio seam policy applies to the interactive runtime path — `agents/` (now just `agents/arc4/` since A148 retired `agents/arc3/`), `arc_runtime/`, `run_single_puzzle.py`, and `sidequest_mcp_client/`. Offline scoring and submission packaging under `benchmarks/arc3/` embed the brain directly (Kuzu client, schema init, loop queue, centroids) and are exempt from the seam policy, because submission packages cannot depend on a running MCP subprocess. The import-boundary test (`tests/test_import_boundary.py`) enforces the runtime scope; `benchmarks/` is not in its `PROD_PATHS` list (A030).
 
 
 
@@ -395,38 +395,13 @@ ARC environment / task source
 
 ## Major Components
 
-### `agents/arc3/`
+### `archive/agents-arc3/` (formerly `agents/arc3/`, retired A148)
 
-ARC-specific cognition and orchestration.
-
-- `orchestrator.py`
-  Main control loop: perceive, hypothesize, solve, plan, act, evaluate
-- `solver.py`
-  Solve engine, rule hypotheses, object roles, chunking, strategy logic
-- `runner.py`
-  Durable run driver across tasks/puzzles
-- `phase.py`
-  Durable phase-state machine with explicit `REPLAN` handling
-- `hypothesis.py`
-  Hypothesis management and transition/state modeling
-- `grid_analysis.py`
-  Grid diffing and structural pattern analysis
-- `repl_verification.py`
-  Replay/refinement verification loops
-- `entity_graph.py`
-  Graph-style exploration support for puzzle structure
-- `supervisor.py`
-  Meta-supervision over trajectory quality
-- `circuit_breaker.py`
-  Failure containment around LLM/tool instability
-- `cost_tracker.py`
-  Token and cost budget enforcement
-- `scheduler.py`
-  Puzzle ordering and runtime health logic
-- `strategy_racer.py`
-  Parallel strategy-variant evaluation
-- `checkpoint.py`
-  Crash-safe durable checkpointing
+The v1 ARC agent — orchestrator, solver, hypothesis management, and supporting modules
+(`grid_analysis.py`, `entity_graph.py`, `supervisor.py`, `circuit_breaker.py`, `cost_tracker.py`,
+`scheduler.py`, `strategy_racer.py`, `checkpoint.py`, and others). Not part of the active runtime —
+see `archive/agents-arc3/README.md` for what moved and why. `agents/arc4/` is the current agent;
+it has no dependency on this archive (enforced by `tests/test_import_boundary.py`).
 
 ### `benchmarks/arc3/`
 
@@ -440,8 +415,9 @@ ARC-specific execution, evaluation, and packaging.
   ARC observation/action data contracts
 - `state_serializer.py`
   state-to-text conversion for memory and prompting
-- `submission.py`
-  submission/evaluation runner
+- `submission.py` — **moved to `archive/agents-arc3/submission.py` (A148).** It was a v1-only
+  submission runner (hardcoded to `DurableARCRunner`), not referenced by any Makefile target or
+  used by v2. Everything else in this directory is unrelated to `agents/arc3` and stays active.
 - `model_eval.py`
   prompt/model comparison tooling
 - `outcome_judge.py`
@@ -626,12 +602,14 @@ ARC_AGI/
 │   ├── config.py
 │   └── llm.py
 ├── agents/
-│   └── arc3/
+│   └── arc4/
 ├── benchmarks/
 │   ├── __init__.py
 │   ├── ab_harness.py
 │   ├── harness.py
 │   └── arc3/
+├── archive/
+│   └── agents-arc3/       # retired v1 agent (A148); not part of the runtime
 └── tests/
 ```
 

@@ -11,24 +11,20 @@ smoke: ## live smoke: 1 puzzle, 10 steps, real ARC API + local Ollama
 	@CAMPY_MCP_CMD="$(CAMPY_MCP_CMD)" \
 	 PYTHONPATH=. $(PYTHON) run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
 
-smoke-compare: ## Run v1 and v2 smoke on mock, compare
-	@echo "Running v1..."
-	@ARC_ARTIFACTS_DIR=artifacts PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v1 2>/dev/null || true
-	@cp artifacts/submission_results_single.json artifacts/submission_results_single.v1.json
-	@echo "Running v2..."
-	@ARC_ARTIFACTS_DIR=artifacts CAMPY_MCP_CMD="$(CAMPY_MCP_CMD)" PYTHONPATH=. $(PYTHON) run_single_puzzle.py --max-steps 5 --agent-version=v2 2>/dev/null
-	@echo "Comparing..."
-	@ARC_ARTIFACTS_DIR=artifacts $(PYTHON) -m pytest tests/test_arc4_v1_v2_comparison.py::TestV1vsV2Comparison::test_comparison_summary -v -s
+smoke-compare: ## RETIRED (A148): v1 was archived to archive/agents-arc3/; see that dir for the old comparison harness
+	@echo "smoke-compare is retired (A148) — agents/arc3 (v1) was archived to archive/agents-arc3/."
+	@echo "There is no live v1 to compare against; v2 (agents/arc4) is the only supported agent."
+	@echo "The old comparison test lives at archive/agents-arc3/tests/test_arc4_v1_v2_comparison.py for reference."
 
 test: ## run the full pytest suite
 	$(PYTHON) -m pytest -q
 
-test-a: ## run only the A022-A024 suites
+test-a: ## fast pre-commit subset: observability, trace durability, import boundary, cycle policy
 	$(PYTHON) -m pytest -q \
 	  tests/test_observability.py \
-	  tests/test_plan_registration_idempotent.py \
-	  tests/test_exploration_probing.py \
-	  tests/test_trace_durability.py
+	  tests/test_trace_durability.py \
+	  tests/test_import_boundary.py \
+	  tests/test_a140_cycle_policy.py
 
 test-all: ## run full test suite baseline
 	$(PYTHON) -m pytest tests/ -q

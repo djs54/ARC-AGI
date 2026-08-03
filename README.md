@@ -12,18 +12,18 @@ For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE
 
 ## What Is In Here
 
-- `agents/arc3/`
-  ARC v1 orchestration and solver logic
 - `agents/arc4/`
-  ARC v2 modular workflow prototype with injected contracts, ports, graph adapter, and telemetry
+  ARC v2 modular workflow — the only supported agent (v1 was retired to `archive/agents-arc3/`, see A148)
 - `benchmarks/arc3/`
-  ARC harness, submission, packaging, and compliance tooling
+  ARC harness, packaging, and compliance tooling
 - `sidequest_mcp_client/`
   ARC-owned MCP client seam for runtime access to the sibling `hippocampy` memory server
 - `tests/`
   ARC-specific test set copied from the main repo
 - `run_single_puzzle.py`
-  Single-puzzle runner with `--agent-version=v1|v2`
+  Single-puzzle runner (`--agent-version=v2`, currently the only supported value)
+- `archive/agents-arc3/`
+  Retired v1 agent, its test suite, and the v1-vs-v2 comparison harness — kept for reference only, not part of the runtime
 
 ## Dependency Model
 
@@ -65,20 +65,12 @@ If `hippocampy` is published where you want to consume it from, you can install 
 
 ### Running a smoke
 
-Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke.
-
-ARC v1 remains the default:
+Point `CAMPY_MCP_CMD` at the sibling repo's adapter, then run the live smoke. v2 (`agents/arc4/`) is
+the only supported agent — v1 was retired in A148.
 
 ```bash
 export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
 PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10
-```
-
-To exercise the landed ARC v2 prototype path, add `--agent-version=v2`:
-
-```bash
-export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
-PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 --max-steps 10 --agent-version=v2
 ```
 
 `--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.campy/brain.sock`).
