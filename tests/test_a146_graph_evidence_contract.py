@@ -17,6 +17,14 @@ We use the raw session rather than MCPBrainClient on purpose — the brain clien
 applies a phase-gated write firewall (writes deferred unless a turn phase is
 active), which is orthogonal to the B278 storage contract under test here.
 
+Previously xfailed: the increment reported success but didn't persist. Closed
+2026-08-03 (hippocampy commit 15afb06) after a systematic-debugging pass found
+the persistence bug no longer reproduces — most likely fixed incidentally by
+B295's write-serialization-lock hardening (2026-07-12/13, after this defect was
+first reported) — confirmed by running this exact test against a scratch
+hippocampy daemon, where it now passes. See hippocampy's backlog/B278.md for
+the full investigation. Now a plain regression test.
+
 Requires a live MCP daemon (CAMPY_MCP_CMD); skipped by default via the A142
 conftest gate. Run with:
 
@@ -34,13 +42,6 @@ import pytest
 
 pytestmark = [
     pytest.mark.requires_mcp,
-    # Upstream B278 defect: arc_record_reward_prediction_error acknowledges the
-    # negative RPE (returns direction="negative") but the persisted
-    # ActionFact.falsified_count stays 0, so arc_get_action_evidence reports no
-    # contradictions. Tracked in A146; flip to XPASS when hippocampy fixes the
-    # increment write. strict=False so a fixed upstream reports XPASS, not a hard
-    # failure, and the regression is still visible when run locally.
-    pytest.mark.xfail(reason="B278 falsified_count increment not persisting (hippocampy)", strict=False),
 ]
 
 # Names ArcGraphQueryPort maps to (see agents/arc4/graph_queries.ARC_V2_TOOL_NAMES).
