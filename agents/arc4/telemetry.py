@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from .types import EvaluationResult, ExecutionResult, GoalHypothesis, PlanningResult, ResolvedGoal, VetDecision, WorkflowDecision, WorkflowRunResult, WorkflowState, WorkflowStatus
+from .types import EvaluationResult, ExecutionResult, GoalHypothesis, PlanningResult, ResolvedGoal, VetDecision, WorkflowRunResult, WorkflowState, WorkflowStatus
 from .evaluator import classify_v2_termination
 
 
@@ -191,7 +191,6 @@ class ArcV2Telemetry:
                 {
                     "decision": evaluation.decision.value,
                     "falsification_delta": evaluation.falsification_delta,
-                    "failure_class": self._failure_class_from_decision(evaluation.decision),
                     "failure_reason": evaluation.reason,
                 }
             )
@@ -307,14 +306,6 @@ class ArcV2Telemetry:
             return "veto"
         if final_state and final_state.upper() == "WIN":
             return None
-        return None
-
-    @staticmethod
-    def _failure_class_from_decision(decision: WorkflowDecision) -> str | None:
-        if decision == WorkflowDecision.PIVOT:
-            return "pivot"
-        if decision == WorkflowDecision.TERMINATE:
-            return "terminate"
         return None
 
     @staticmethod
