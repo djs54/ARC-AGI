@@ -31,6 +31,19 @@ def check_budget(step_index: int, max_cycles: int) -> str | None:
     return None
 
 
+def stall_threshold(max_consecutive_no_progress: int, num_available_actions: int) -> int:
+    """Effective consecutive-no-progress threshold check_stall gates on.
+
+    Both max_consecutive_no_progress (a fixed floor) and num_available*2 (a
+    coverage-scaled ceiling) must be satisfied for a stall to fire -- the
+    real threshold is whichever is larger. Exists as its own function so
+    diagnostic logging (workflow.py's STALL_CHECK line) can report the same
+    number check_stall actually gates on, instead of duplicating half the
+    formula and drifting out of sync with it.
+    """
+    return max(max_consecutive_no_progress, (num_available_actions or 1) * 2)
+
+
 def check_stall(
     consecutive_no_progress: int,
     max_consecutive_no_progress: int,
@@ -38,12 +51,10 @@ def check_stall(
     num_attempted_actions: int,
 ) -> str | None:
     """Return stall_detected once all actions are repeatedly non-productive."""
-    if consecutive_no_progress < max_consecutive_no_progress:
-        return None
     num_available = num_available_actions or 1
     if num_available_actions > 0 and num_available - num_attempted_actions > 0:
         return None
-    if consecutive_no_progress >= num_available * 2:
+    if consecutive_no_progress >= stall_threshold(max_consecutive_no_progress, num_available_actions):
         return "stall_detected"
     return None
 
@@ -75,6 +86,7 @@ __all__ = [
     "count_base_actions",
     "check_budget",
     "check_stall",
+    "stall_threshold",
     "record_evaluation_outcome",
     "termination_from_evaluation",
 ]

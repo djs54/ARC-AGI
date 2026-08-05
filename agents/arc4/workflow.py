@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, termination_from_evaluation
+from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, stall_threshold, termination_from_evaluation
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
@@ -156,7 +156,7 @@ class WorkflowOrchestrator:
                     num_available or 1,
                     num_attempted,
                     untested_remaining,
-                    (num_available or 1) * 2,
+                    stall_threshold(self._limits.max_consecutive_no_progress, num_available),
                 )
                 stall_reason = check_stall(
                     state.consecutive_no_progress_count,
