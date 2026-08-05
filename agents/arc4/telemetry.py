@@ -161,7 +161,7 @@ class ArcV2Telemetry:
             "goal_id": self._goal_id(),
             "world_model_node_count": self._world_model_node_count(perception, goal, plan),
             "world_model_edge_count": self._world_model_edge_count(goal, plan, execution),
-            "world_model_contradiction_count": int(getattr(state, "action_falsification_counts", {}).get(self._action_id() or "", 0)) if state is not None else 0,
+            "world_model_contradiction_count": int(getattr(state, "action_falsification_counts", {}).get(self._contradiction_lookup_key() or "", 0)) if state is not None else 0,
             "world_model_demotion_count": 0,
             "reasoning_skip_count": 0,
             "reasoning_escalation_count": int(bool(goal.metadata.get("llm_escalated"))) if goal is not None else 0,
@@ -235,6 +235,18 @@ class ArcV2Telemetry:
         if self._latest_vet is not None and self._latest_vet.candidate is not None:
             return self._latest_vet.candidate.action_id
         return None
+
+    def _contradiction_lookup_key(self) -> str | None:
+        # action_attempt_counts/action_falsification_counts are bookkept by
+        # book_id (e.g. "ACTION6@x,y") for coordinate-targeted actions, not
+        # the base action_id _action_id() returns — prefer book_id so this
+        # actually matches an entry in those dicts for ACTION6.
+        execution = self._latest_execution
+        if execution is not None and execution.candidate is not None and isinstance(execution.candidate.metadata, Mapping):
+            book_id = execution.candidate.metadata.get("book_id")
+            if book_id:
+                return str(book_id)
+        return self._action_id()
 
     def _mechanic_prior_status(self, plan: PlanningResult | None, goal: ResolvedGoal | None) -> str:
         if plan is None and goal is None:
