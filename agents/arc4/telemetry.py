@@ -164,7 +164,7 @@ class ArcV2Telemetry:
             "world_model_contradiction_count": int(getattr(state, "action_falsification_counts", {}).get(self._action_id() or "", 0)) if state is not None else 0,
             "world_model_demotion_count": 0,
             "reasoning_skip_count": 0,
-            "reasoning_escalation_count": 0,
+            "reasoning_escalation_count": int(bool(goal.metadata.get("llm_escalated"))) if goal is not None else 0,
             "mechanic_prior_recall_status": self._mechanic_prior_status(plan, goal),
             "mechanic_prior_count": self._mechanic_prior_count(plan),
             "mechanic_priors_used_count": self._mechanic_priors_used_count(plan),
