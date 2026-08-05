@@ -255,10 +255,10 @@ class GoalResolver:
                 continue
             updated.append(hypothesis)
 
-        if not matched:
+        if not matched and goal_id:
             updated.append(
                 GoalHypothesis(
-                    goal_id=goal_id or self._slugify(reason or "llm-goal"),
+                    goal_id=goal_id,
                     description=patch.get("description") or reason or "LLM-backed goal hypothesis",
                     confidence=confidence,
                     evidence=evidence,
@@ -447,7 +447,7 @@ class GoalResolver:
 
         goal_match = re.search(r"goal[_\s-]*id\s*[:=]\s*([A-Za-z0-9_.-]+)", response, re.IGNORECASE)
         confidence_match = re.search(r"confidence\s*[:=]\s*([0-9]*\.?[0-9]+)", response, re.IGNORECASE)
-        reason_match = re.search(r"reason\s*[:=]\s*(.+)", response, re.IGNORECASE)
+        reason_match = re.search(r"reason\s*[:=]\s*(.{1,200})", response, re.IGNORECASE)
         if goal_match or confidence_match or reason_match:
             return {
                 "goal_id": goal_match.group(1) if goal_match else None,
