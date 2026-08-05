@@ -199,7 +199,7 @@ The currently landed executable prototype for that direction is the ARC v2 runti
 - A121: ARC v2 plan generator and plan vetter
 - A122: ARC v2 evaluator
 - A123: `run_single_puzzle.py` integration, telemetry, and smoke path
-- B278: ARC-specific MCP query tool surface in the sibling `hippocampy` repo. Campy owns these brain internals (ecosystem-rules.md:47); ARC consumes them across the MCP seam via `agents/arc4/graph_queries.py`. A146 is the consumer-side verification that the A135/A138 evidence loop closes against B278 — see `docs/handoff/B278-graph-evidence.md` for an open upstream `falsified_count` persistence bug it surfaced.
+- B278: ARC-specific MCP query tool surface in the sibling `hippocampy` repo. Campy owns these brain internals (ecosystem-rules.md:47); ARC consumes them across the MCP seam via `agents/arc4/graph_queries.py`. A146 is the consumer-side verification that the A135/A138 evidence loop closes against B278 — closed 2026-08-04: hippocampy's `falsified_count` persistence bug (`docs/handoff/B278-graph-evidence.md`) no longer reproduces after a systematic-debugging pass (2026-08-03), re-verified from ARC's side against a live daemon.
 
 ### ARC v2 Runtime (Production Default — A127)
 
