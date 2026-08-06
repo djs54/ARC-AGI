@@ -62,3 +62,15 @@ class TestFetchPerActionEvidenceFieldMismatch:
         port = _port({"status": "capability_missing"})
         evidence = port.fetch_per_action_evidence("ACTION1")
         assert evidence == {"supports": 0, "contradictions": 0, "confidence": 0.0, "attempts": 0}
+
+    def test_steps_used_fallback_populates_attempts_when_evidence_count_absent(self):
+        """A165: evidence_count is never written server-side, but observation_count is,
+        surfaced under the key steps_used -- attempts should fall back to it."""
+        port = _port({"falsified_count": 2, "steps_used": 5})
+        assert port.fetch_per_action_evidence("ACTION1")["attempts"] == 5
+
+    def test_evidence_count_still_takes_priority_over_steps_used(self):
+        """Regression guard: if hippocampy ever wires a real evidence_count, it must
+        keep taking priority over the steps_used fallback."""
+        port = _port({"evidence_count": 3, "steps_used": 5})
+        assert port.fetch_per_action_evidence("ACTION1")["attempts"] == 3
