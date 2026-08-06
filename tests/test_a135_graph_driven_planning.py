@@ -183,6 +183,17 @@ class TestA135PlannerGraphIntegration:
             f"Expected action-b to win over contradicted action-a, got {result.candidate.action_id}"
         )
 
+    def test_candidate_metadata_no_longer_includes_dead_graph_record_field(self):
+        """A166: graph_record was sourced from fetch_goal_evidence's VictoryCondition-keyed
+        records, which never carry action_id -- it was always {} and has been removed."""
+        planner = PlanGenerator(PlanGeneratorLimits())
+        state = _state()
+        perception = _perception()
+        goal = _goal()
+
+        result = planner.generate(state, perception, goal, graph_port=MockGraphPort()).payload
+        assert "graph_record" not in (result.candidate.metadata or {})
+
     def test_planner_works_without_graph_port(self):
         """Planner should work fine when graph_port is None."""
         planner = PlanGenerator(PlanGeneratorLimits())
