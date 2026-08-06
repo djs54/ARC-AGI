@@ -125,7 +125,7 @@ class ArcGraphQueryPort:
             if result.get("status") == "capability_missing":
                 return {"allowed": True, "reason": "no_gate_data"}
             return {
-                "allowed": bool(result.get("allowed", result.get("approved", True))),
+                "allowed": bool(result.get("allowed", result.get("approved", result.get("go", True)))),
                 "reason": str(result.get("reason", result.get("explanation", "")) or ""),
                 "evidence_summary": dict(result.get("evidence_summary", result.get("evidence", {})) or {}),
                 "raw": dict(result),
