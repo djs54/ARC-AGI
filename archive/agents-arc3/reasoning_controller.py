@@ -135,6 +135,8 @@ class ReasoningController:
                  has_progress = True
             elif effect_class in ("object_progress", "meaningful_progress"):
                  has_progress = terminal_alignment in ("", "terminal_aligned", "delayed_effect_pending")
+            elif effect_class == "distance_improving_move" or distance_trend == "improving":
+                 has_progress = True
         else:
             effect_class = "unknown"
             distance_trend = ""
@@ -277,10 +279,11 @@ class ReasoningController:
             except (TypeError, ValueError):
                 best_route_delta = None
             improving_route_count = int(route_transition_evidence.get("improving_transition_count", 0) or 0)
+            recent_non_improving_streak = int(route_transition_evidence.get("recent_non_improving_streak", 0) or 0)
             route_follow_ready = bool(
                 has_route_evidence
-                and not graph_configuration_goal_active
                 and not route_regression_exhausted
+                and recent_non_improving_streak < 2
                 and improving_route_count > 0
                 and (best_route_delta is None or best_route_delta < -0.01)
                 and actions_tested >= min(2, max(1, len(available_actions)))
@@ -296,6 +299,12 @@ class ReasoningController:
                 decision.trigger = "graph_route_follow"
                 decision.stall_policy = "route_follow"
                 decision.world_model_decision = "follow_graph_route"
+                self._consecutive_multi_action_churn_probes = 0
+            elif has_route_evidence and recent_non_improving_streak >= 2:
+                decision.mode = ReasoningMode.LLM_REASON
+                decision.trigger = "route_follow_flat_replan"
+                decision.stall_policy = "switch_route_after_flat"
+                decision.world_model_decision = "route_follow_flat_replan"
                 self._consecutive_multi_action_churn_probes = 0
             elif route_regression_exhausted and actions_tested >= max(1, len(available_actions)):
                 if graph_configuration_goal_active:
@@ -423,7 +432,7 @@ class ReasoningController:
                 actions_tested += 1
             
             # Count productive vs churn effects
-            productive = sum(1 for e in effect_classes if e in ("object_progress", "terminal_progress", "meaningful_progress"))
+            productive = sum(1 for e in effect_classes if e in ("object_progress", "terminal_progress", "meaningful_progress", "distance_improving_move"))
             churn = sum(1 for e in effect_classes if e in ("pixel_churn", "none", "no_op", "local_object_progress"))
             
             if productive > 0:

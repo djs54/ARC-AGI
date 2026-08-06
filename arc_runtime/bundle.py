@@ -5,6 +5,7 @@ import dataclasses
 import enum
 import inspect
 import json
+import logging
 from typing import Any, Callable, Mapping
 
 from agents.arc4.evaluator import Evaluator
@@ -19,6 +20,8 @@ from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import PhaseResult, PhaseStatus, WorkflowPhase
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
 from arc_runtime.game_session import ArcV2GameSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(slots=True)
@@ -59,25 +62,25 @@ class SyncLLMPortAdapter:
         achat = getattr(self._llm_client, "achat", None)
         if achat is not None:
             try:
-                result = asyncio.get_event_loop().run_until_complete(achat(message_dicts))
+                try:
+                    result = asyncio.get_event_loop().run_until_complete(achat(message_dicts))
+                except RuntimeError:
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, achat(message_dicts))
+                        result = future.result(timeout=60)
                 prompt_text = " ".join(m.get("content", "") for m in message_dicts)
                 self.total_tokens_in += len(prompt_text) // 4
                 response_str = str(result.content if hasattr(result, "content") else result)
                 self.total_tokens_out += len(response_str) // 4
                 return str(result.content) if hasattr(result, "content") else str(result)
-            except RuntimeError:
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, achat(message_dicts))
-                    result = future.result(timeout=60)
-                    prompt_text = " ".join(m.get("content", "") for m in message_dicts)
-                    self.total_tokens_in += len(prompt_text) // 4
-                    response_str = str(result.content if hasattr(result, "content") else result)
-                    self.total_tokens_out += len(response_str) // 4
-                    return str(result.content) if hasattr(result, "content") else str(result)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Covers failures from either the direct get_event_loop() path or the
+                # RuntimeError/ThreadPoolExecutor fallback above (e.g. the underlying
+                # achat() call itself raising inside the thread pool) — any of these
+                # must fall through to the sync-method loop below, not propagate.
+                logger.warning("SyncLLMPortAdapter: achat call failed, falling back to sync methods: %s", exc)
 
         prompt = "\n".join(f"{m.role}: {m.content}" for m in messages)
         for method_name in ("generate", "complete", "chat"):
@@ -92,13 +95,12 @@ class SyncLLMPortAdapter:
                 response_str = str(result)
                 self.total_tokens_out += len(response_str) // 4
                 return response_str
-            except Exception:
-                return "{}"
+            except Exception as exc:
+                logger.warning("SyncLLMPortAdapter: %s() call failed: %s", method_name, exc)
+                return ""
 
-        try:
-            return json.dumps({}, default=self._json_default)
-        except Exception:
-            return "{}"
+        logger.warning("SyncLLMPortAdapter: llm_client %r has no achat/generate/complete/chat method", self._llm_client)
+        return ""
 
 
 def build_arc_v2_bundle(
@@ -115,7 +117,18 @@ def build_arc_v2_bundle(
     max_cycles: int,
     llm_client: Any | None = None,
 ) -> ArcV2Bundle:
-    graph_port = ArcGraphQueryPort(brain_client, task_id=task_id, session_id=session_id, strict=False)
+    # A164: scope graph evidence by game_id, not the manifest's static per-slot
+    # task_id. tasks_manifest.json assigns a fixed task_id per slot (e.g.
+    # "arc_eval_001") and A149's live-catalog sync only remaps game_id, never
+    # task_id -- so every --live-smoke run landing in the same manifest slot
+    # (the default for --num-puzzles 1) shared one graph identity regardless
+    # of which actual ARC game was played, pooling falsification/confidence
+    # evidence across semantically unrelated games. game_id is unique per
+    # game variant (ARC rotates hash-suffixed ids) and stable across replays
+    # of the same game, which is the identity graph evidence should actually
+    # be scoped by. Falls back to task_id if game_id is ever unset.
+    graph_task_id = game_id or task_id
+    graph_port = ArcGraphQueryPort(brain_client, task_id=graph_task_id, session_id=session_id, strict=False)
     telemetry = ArcV2Telemetry(
         task_id=task_id,
         game_id=game_id,

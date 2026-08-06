@@ -104,9 +104,16 @@ def test_evaluator_confirms_grid_change_prediction():
         _execution(candidate=candidate, did_progress=False, metadata={"grid_changed": True, "level_gain": 0}),
     )
 
+    # A150: "grid_change" is the weakest predicted-outcome kind — the raw
+    # satisfies_map lookup still matches (observed_kind == "grid_change"), but
+    # with no meaningful progress this is now forced to falsify rather than
+    # confirm, so the system can learn that this click didn't work. See
+    # tests/test_a150_weak_prediction_falsification.py for the full behavior.
     assert result.payload is not None
-    assert result.payload.metadata["effect_match"] is True
     assert result.payload.metadata["observed_kind"] == "grid_change"
+    assert result.payload.metadata["effect_match"] is False
+    assert result.payload.metadata["weak_prediction_override"] is True
+    assert result.payload.falsification_delta == 1
 
 
 def test_evaluator_falsifies_grid_change_prediction_on_no_change():

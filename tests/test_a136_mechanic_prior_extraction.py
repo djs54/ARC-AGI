@@ -188,12 +188,12 @@ def test_planner_candidate_metadata_tags_mechanic_source():
 def test_planner_deduplicates_mechanic_and_observation_actions():
     planner = PlanGenerator(PlanGeneratorLimits())
     state = WorkflowState()
-    # observation already has ACTION1
-    perception = _make_perception(available_actions=["ACTION1"])
+    # observation has both ACTION1 and ACTION2 (API-provided)
+    perception = _make_perception(available_actions=["ACTION1", "ACTION2"])
     goal = _make_goal()
 
     graph_port = MagicMock()
-    # mechanic prior also has ACTION1 plus ACTION2
+    # mechanic prior also has ACTION1 plus ACTION2 — should deduplicate
     graph_port.fetch_goal_evidence.return_value = [
         _make_mechanic_record("ACTION1,ACTION2")
     ]
@@ -206,9 +206,37 @@ def test_planner_deduplicates_mechanic_and_observation_actions():
     all_action_ids = [plan.candidate.action_id] if plan.candidate else []
     all_action_ids += [c.action_id for c in plan.alternatives]
 
-    # ACTION1 must appear exactly once
+    # ACTION1 must appear exactly once (deduplicated across API + mechanic prior)
     assert all_action_ids.count("ACTION1") == 1, (
         f"ACTION1 appears {all_action_ids.count('ACTION1')} times: {all_action_ids}"
     )
     # ACTION2 must appear at least once
     assert "ACTION2" in all_action_ids
+
+
+def test_planner_filters_phantom_mechanic_actions_against_api():
+    """Mechanic prior actions NOT in API available_actions should be filtered out."""
+    planner = PlanGenerator(PlanGeneratorLimits())
+    state = WorkflowState()
+    # API says only ACTION1 exists
+    perception = _make_perception(available_actions=["ACTION1"])
+    goal = _make_goal()
+
+    graph_port = MagicMock()
+    # mechanic prior claims ACTION1,ACTION2,ACTION3 — but API only has ACTION1
+    graph_port.fetch_goal_evidence.return_value = [
+        _make_mechanic_record("ACTION1,ACTION2,ACTION3")
+    ]
+    graph_port.fetch_untested_actions.return_value = []
+    graph_port.fetch_per_action_evidence.return_value = {}
+
+    result = planner.generate(state, perception, goal, graph_port=graph_port)
+    plan = result.payload
+
+    all_action_ids = [plan.candidate.action_id] if plan.candidate else []
+    all_action_ids += [c.action_id for c in plan.alternatives]
+
+    # Only ACTION1 should survive — ACTION2, ACTION3 are phantom
+    assert "ACTION1" in all_action_ids
+    assert "ACTION2" not in all_action_ids, f"Phantom ACTION2 should be filtered: {all_action_ids}"
+    assert "ACTION3" not in all_action_ids, f"Phantom ACTION3 should be filtered: {all_action_ids}"

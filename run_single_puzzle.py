@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import atexit
 import importlib.util
 import json
 import logging
@@ -13,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from agents.common.trace_names import normalize_artifact_payload, normalize_orchestration_status
 from arc_runtime import artifacts, dispatch as arc_dispatch, runner_shell as rs
@@ -24,9 +23,6 @@ from arc_runtime.llm import LLMInitializationError, create_llm_client
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from sidequest_mcp_client.observability import build_observability
-
-if TYPE_CHECKING:
-    from agents.arc3.runner import DurableARCRunner
 
 REPO_ROOT = rs.REPO_ROOT
 CONFIG_PATH = rs.CONFIG_PATH
@@ -212,20 +208,6 @@ class SingleTaskRunner(rs.SingleTaskRunner):
         )
 
 
-def _emergency_shutdown(runner: Any):
-    if not runner or not hasattr(runner, "_current_trace_snapshot") or not runner._current_trace_snapshot:
-        return
-    try:
-        path = Path(AGENT_EXECUTION_TRACE_PATH)
-        temp_path = path.with_suffix(f"{path.suffix}.tmp")
-        with open(temp_path, "w") as f:
-            json.dump(runner._current_trace_snapshot, f, indent=2, default=_json_default)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(temp_path, path)
-    except Exception:
-        logger.exception("Emergency shutdown failed to save trace data.")
-
-
 async def main():
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -259,15 +241,7 @@ async def main():
         card_id = args.card_id or (f"real_test_{int(time.time())}" if real_api else f"local_test_{int(time.time())}")
         brain_client = MCPBrainClient(runner.db, runner.config)
         runner.reset_live_output()
-        if args.agent_version == "v2":
-            runner.results = await _run_arc_v2_batch(runner, brain_client, card_id, args)
-        else:
-            from agents.arc3.runner import DurableARCRunner
-
-            durable = DurableARCRunner(runner.harness, brain_client, runner.config, progress_callback=runner.append_live_snapshot)
-            durable._emit_transition_snapshots = True
-            atexit.register(_emergency_shutdown, durable)
-            runner.results = await durable.run(runner.tasks, card_id)
+        runner.results = await _run_arc_v2_batch(runner, brain_client, card_id, args)
 
         for result in runner.results:
             run_review = SingleTaskRunner._build_run_review(result, runner.final_output_path)

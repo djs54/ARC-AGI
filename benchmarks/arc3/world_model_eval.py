@@ -355,7 +355,11 @@ class WorldModelEvaluator:
             click_candidate_count=int(snapshot.get("click_candidate_count", 0) or 0),
             selected_click_candidate_id=snapshot.get("selected_click_candidate_id") or snapshot.get("click_candidate_id"),
             selected_click_candidate_role=snapshot.get("selected_click_candidate_role") or snapshot.get("click_candidate_role"),
-            selected_click_candidate_rank=int(snapshot.get("selected_click_candidate_rank", snapshot.get("click_candidate_rank", -1)) or -1),
+            selected_click_candidate_rank=int(
+                snapshot["selected_click_candidate_rank"]
+                if snapshot.get("selected_click_candidate_rank") is not None
+                else snapshot.get("click_candidate_rank", -1)
+            ),
             clicked_x=snapshot.get("clicked_x"),
             clicked_y=snapshot.get("clicked_y"),
             clicked_color=snapshot.get("clicked_color"),

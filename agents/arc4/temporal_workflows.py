@@ -8,7 +8,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from .cycle_policy import check_budget, check_stall, record_evaluation_outcome, termination_from_evaluation
+    from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, termination_from_evaluation
     from .types import WorkflowPhase, WorkflowStatus, PhaseStatus, WorkflowDecision
 
 
@@ -155,11 +155,26 @@ class ArcPuzzleWorkflow:
                 falsification_delta=int(evaluation.get("falsification_delta", 0) or 0),
             )
 
+            # Mirror WorkflowOrchestrator._record_evaluation_state's goal_failure_counts
+            # bookkeeping (A152): reset to 0 on progress, increment otherwise, keyed by
+            # the goal_id that was active for this cycle.
+            goal_failure_counts = self._state.setdefault("goal_failure_counts", {})
+            active_goal_selected = goal.get("selected") if isinstance(goal, dict) else None
+            active_goal_id = active_goal_selected.get("goal_id") if isinstance(active_goal_selected, dict) else None
+            if active_goal_id:
+                if bool(evaluation.get("meaningful_progress")):
+                    goal_failure_counts[active_goal_id] = 0
+                else:
+                    goal_failure_counts[active_goal_id] = goal_failure_counts.get(active_goal_id, 0) + 1
+
             self._state["step_index"] = step + 1
 
             no_progress = self._state.get("consecutive_no_progress_count", 0)
             available = observation.get("available_actions", [])
-            stall_reason = check_stall(no_progress, max_no_progress, len(available), len(self._state.get("action_attempt_counts", {})))
+            # Count distinct base actions so ACTION6@x,y click targets don't
+            # inflate the attempted count past the available action space.
+            num_attempted = count_base_actions(self._state.get("action_attempt_counts", {}))
+            stall_reason = check_stall(no_progress, max_no_progress, len(available), num_attempted)
             if stall_reason is not None:
                 return self._finish("stalled", stall_reason)
 

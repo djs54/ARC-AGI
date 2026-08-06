@@ -12,6 +12,7 @@ import uuid
 import hashlib
 import subprocess
 import asyncio
+import traceback
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, List, Mapping, Optional, Sequence
@@ -475,6 +476,9 @@ class DurableARCRunner:
 
                             return result_payload
                         except Exception as exc:
+                            # A112: Capture full traceback instead of generic "UnknownCrash"
+                            tb_str = traceback.format_exc()
+                            
                             # A014: Ensure we have real lists, not mocks/coroutines
                             if orchestrator is not None:
                                 h_attr = getattr(orchestrator, "_step_history", [])
@@ -507,7 +511,14 @@ class DurableARCRunner:
                                 plateau_escalation_required=bool(self._solve_context_get(getattr(orchestrator, "_solve_context", None), "plateau_escalation_required", False)),
                             )
                             mgr.mark_failed(checkpoint, task.task_id, str(exc), failure_class.value)
-                            logger.error("Task %s failed [%s]: %s", task.task_id, failure_class.value, exc)
+                            
+                            # A112: Log full traceback for debugging
+                            logger.error("Task %s failed [%s]: %s\nFull traceback:\n%s", task.task_id, failure_class.value, exc, tb_str)
+                            
+                            # A112: Capture actual exception details instead of generic "UnknownCrash"
+                            failure_reason = f"{type(exc).__name__}: {exc}\n{tb_str}"
+                            exception_type = type(exc).__name__
+                            exception_message = str(exc)
                             
                             result_payload = {
                                 "task_id": task.task_id,
@@ -518,6 +529,9 @@ class DurableARCRunner:
                                 "steps": int(getattr(orchestrator, "_current_step", 0) if orchestrator is not None and hasattr(orchestrator, "_current_step") else 0),
                                 "runtime_seconds": round(time.time() - (puzzle_start_time if 'puzzle_start_time' in locals() else time.time()), 2),
                                 "failure_class": failure_class.value,
+                                "failure_reason": failure_reason,
+                                "exception_type": exception_type,
+                                "exception_message": exception_message,
                                 "final_state": final_s if final_s != "unknown" else "error",
                                 "final_observation": None,
                                 "final_reward": None,
@@ -4099,13 +4113,18 @@ class DurableARCRunner:
             "budget_exhausted": bool(token_cost.get("budget_exhausted") is True),
             "model": token_cost.get("model") or (((self.config.get("llm") or {}).get("model") if isinstance(self.config, dict) else "unknown") or "unknown"),
         }
+        failure_class = result.get("failure_class")
+        # A111: Normalize orchestration_status based on failure_class
+        from agents.arc3.trace_names import normalize_orchestration_status
+        normalized_status = normalize_orchestration_status(failure_class, orchestration_status or "pending")
+        
         component_eval = {
             "status": "available",
             "entity_gate_status": ((result.get("entity_gate_status") or {}).get("status") if isinstance(result.get("entity_gate_status"), dict) else None),
             "invalid_action_count": invalid_action_count,
             "dissonance_triggered": result.get("dissonance_triggered"),
-            "failure_class": result.get("failure_class"),
-            "orchestration_status": orchestration_status or "pending",
+            "failure_class": failure_class,
+            "orchestration_status": normalized_status,
         }
         trajectory_eval = result.get("trajectory_score") or {
             "status": "unavailable",

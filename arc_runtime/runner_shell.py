@@ -4,14 +4,13 @@
 
 import argparse
 import asyncio
-import atexit
 import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from agents.common.trace_names import normalize_artifact_payload, normalize_orchestration_status
 from arc_runtime import artifacts
@@ -20,15 +19,13 @@ from arc_runtime.config import load_config
 from arc_runtime.dispatch import run_arc_v2_batch, run_arc_v2_task
 from arc_runtime.game_session import ArcV2GameSession, _compute_progress, _unwrap_arc_game_payload
 from arc_runtime.llm import LLMInitializationError, create_llm_client
+from benchmarks.ab_harness import ABTask
 from benchmarks.arc3.harness import ARC3Harness, load_tasks_from_manifest
 from benchmarks.arc3.world_model_eval import WorldModelEvaluator
 from benchmarks.harness import BenchmarkConfig
 from sidequest_mcp_client.mcp_brain_client import MCPBrainClient
 from sidequest_mcp_client.observability import build_observability
 from sidequest_mcp_client.readiness import ReadinessError, check_mcp_readiness
-
-if TYPE_CHECKING:
-    from agents.arc3.runner import DurableARCRunner
 
 # Configuration paths
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +119,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run ARC puzzles (optionally real API)")
     parser.add_argument("--real-api", action="store_true", help="Run against the real ARC-AGI-3 API")
     parser.add_argument("--live-smoke", action="store_true", help="Convenience mode for one-puzzle live smoke")
-    parser.add_argument("--agent-version", choices=("v1", "v2"), default="v2", help="Select ARC agent implementation")
+    parser.add_argument("--agent-version", choices=("v2",), default="v2", help="Select ARC agent implementation (v1 retired, see A148)")
     parser.add_argument("--num-puzzles", type=int, default=None, help="Number of puzzles to run")
     parser.add_argument("--max-steps", type=int, default=None, help="Maximum steps per puzzle")
     parser.add_argument("--card-id", type=str, default=None, help="Override ARC checkpoint card id")
@@ -185,11 +182,77 @@ class SingleTaskRunner:
         if MANIFEST_PATH.exists():
             self.tasks = load_tasks_from_manifest(str(MANIFEST_PATH))
 
+        if self.real_api:
+            await self._sync_tasks_with_live_catalog()
+
+    async def _sync_tasks_with_live_catalog(self) -> None:
+        if self.harness is None:
+            return
+        try:
+            games = await self.harness.list_games()
+        except Exception as exc:
+            logger.warning("Could not fetch live game catalog; using manifest task ids as-is: %s", exc)
+            return
+
+        live_games = [game for game in games if isinstance(game, dict) and str(game.get("game_id") or "").strip()]
+        if not live_games:
+            logger.warning("Live API returned no games; using manifest task ids as-is.")
+            return
+
+        games_by_id = {str(game["game_id"]): game for game in live_games}
+
+        if not self.tasks:
+            generated_tasks: list[ABTask] = []
+            for idx, game in enumerate(live_games, start=1):
+                game_id = str(game["game_id"])
+                task = ABTask(task_id=f"arc_live_{idx:03d}", category="core", prompt=f"Solve ARC game {game_id}")
+                setattr(task, "game_id", game_id)
+                if game.get("title") is not None:
+                    setattr(task, "arc_game_title", str(game.get("title") or ""))
+                if isinstance(game.get("tags"), list):
+                    setattr(task, "arc_game_tags", [str(tag) for tag in game["tags"]])
+                generated_tasks.append(task)
+            self.tasks = generated_tasks
+            logger.info("No manifest tasks found; generated %d tasks from live game catalog.", len(self.tasks))
+            return
+
+        invalid_count = 0
+        for idx, task in enumerate(self.tasks):
+            current_game_id = str(getattr(task, "game_id", "") or "")
+            game = games_by_id.get(current_game_id)
+
+            if game is None:
+                invalid_count += 1
+                game = live_games[idx % len(live_games)]
+                setattr(task, "game_id", str(game["game_id"]))
+
+            if game.get("title") is not None:
+                setattr(task, "arc_game_title", str(game.get("title") or ""))
+            if isinstance(game.get("tags"), list):
+                setattr(task, "arc_game_tags", [str(tag) for tag in game["tags"]])
+
+        if invalid_count:
+            logger.warning(
+                "Remapped %d manifest task game_id values that were not found in live ARC catalog.",
+                invalid_count,
+            )
+
     def reset_live_output(self):
         self.live_output_path.write_text("")
+        self.world_model_live_output_path.parent.mkdir(parents=True, exist_ok=True)
         if self.world_model_eval:
             self.world_model_evaluator.reset()
             self.world_model_live_output_path.write_text("")
+        else:
+            self.world_model_live_output_path.write_text(
+                json.dumps(
+                    {
+                        "world_model_eval": False,
+                        "note": "world-model telemetry disabled for this run; pass --world-model-eval to enable",
+                    }
+                )
+                + "\n"
+            )
 
     def append_live_snapshot(self, snapshot: dict):
         artifacts.append_live_snapshot(self, snapshot)
@@ -231,20 +294,6 @@ class SingleTaskRunner:
             self.harness = None
 
 
-def _emergency_shutdown(runner: Any):
-    if not runner or not hasattr(runner, "_current_trace_snapshot") or not runner._current_trace_snapshot:
-        return
-    try:
-        path = Path(AGENT_EXECUTION_TRACE_PATH)
-        temp_path = path.with_suffix(f"{path.suffix}.tmp")
-        with open(temp_path, "w") as f:
-            json.dump(runner._current_trace_snapshot, f, indent=2, default=_json_default)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(temp_path, path)
-    except Exception:
-        logger.exception("Emergency shutdown failed to save trace data.")
-
-
 async def main():
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -278,15 +327,7 @@ async def main():
         card_id = args.card_id or (f"real_test_{int(time.time())}" if real_api else f"local_test_{int(time.time())}")
         brain_client = MCPBrainClient(runner.db, runner.config)
         runner.reset_live_output()
-        if args.agent_version == "v2":
-            runner.results = await run_arc_v2_batch(runner, brain_client, card_id, args)
-        else:
-            from agents.arc3.runner import DurableARCRunner
-
-            durable = DurableARCRunner(runner.harness, brain_client, runner.config, progress_callback=runner.append_live_snapshot)
-            durable._emit_transition_snapshots = True
-            atexit.register(_emergency_shutdown, durable)
-            runner.results = await durable.run(runner.tasks, card_id)
+        runner.results = await run_arc_v2_batch(runner, brain_client, card_id, args)
 
         for result in runner.results:
             run_review = SingleTaskRunner._build_run_review(result, runner.final_output_path)

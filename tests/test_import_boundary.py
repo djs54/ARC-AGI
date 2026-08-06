@@ -39,6 +39,22 @@ ARC4_BAD_IMPORTS = [
     r"\bimport\s+agents\.arc3(?:\.|\s)",
 ]
 
+# A148: agents/arc3 (v1) was retired and moved to archive/agents-arc3/. Runtime
+# code must never import from the archive path (or the old agents.arc3 path,
+# which no longer exists but is kept as a regression guard) — v1 is dead code
+# kept only for git history / manual inspection, not a live dependency.
+ARCHIVE_BAD_IMPORTS = [
+    r"\bfrom\s+agents\.arc3(?:\.|\s)",
+    r"\bimport\s+agents\.arc3(?:\.|\s)",
+    r"\bfrom\s+archive(?:\.|\s)",
+    r"\bimport\s+archive(?:\.|\s)",
+]
+ARCHIVE_GUARDED_PATHS = [
+    ROOT / "agents" / "arc4",
+    ROOT / "arc_runtime",
+    ROOT / "run_single_puzzle.py",
+]
+
 
 def _gather_files(paths):
     files = []
@@ -88,3 +104,20 @@ def test_arc4_has_no_arc3_imports():
                 offending.append((str(f.relative_to(ROOT)), pat.pattern))
 
     assert not offending, f"Found forbidden agents.arc3 imports in arc4 modules: {offending}"
+
+
+def test_runtime_has_no_archived_arc3_imports():
+    files = _gather_files(ARCHIVE_GUARDED_PATHS)
+    offending = []
+    compiled = [re.compile(p) for p in ARCHIVE_BAD_IMPORTS]
+
+    for f in files:
+        try:
+            text = f.read_text()
+        except Exception:
+            continue
+        for pat in compiled:
+            if pat.search(text):
+                offending.append((str(f.relative_to(ROOT)), pat.pattern))
+
+    assert not offending, f"Found forbidden agents.arc3/archive imports in runtime modules: {offending}"

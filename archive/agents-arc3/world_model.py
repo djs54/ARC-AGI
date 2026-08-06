@@ -171,6 +171,18 @@ class WorldModelGraph:
             return False
 
     @staticmethod
+    def _is_route_productive_effect(kind: str, props: Dict[str, Any]) -> bool:
+        """Return true for local route evidence that should steer policy."""
+        if kind == "distance_improving_move":
+            return True
+        if kind in {"distance_regressing_move", "harmful"}:
+            return False
+        try:
+            return float(props.get("goal_distance_delta", 0.0) or 0.0) < -0.01
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _is_terminal_productive_effect(kind: str, props: Dict[str, Any]) -> bool:
         """Return true only for progress evidence aligned with the terminal objective."""
         if kind == "terminal_progress":
@@ -315,7 +327,7 @@ class WorldModelGraph:
                             effect_kind = "local_object_progress"
                         result["effect_histogram"][effect_kind] = result["effect_histogram"].get(effect_kind, 0) + 1
                         total_effects += 1
-                        if self._is_terminal_productive_effect(effect_kind, eff.props):
+                        if self._is_terminal_productive_effect(effect_kind, eff.props) or self._is_route_productive_effect(effect_kind, eff.props):
                             meaningful_effects += 1
                         evidence_ids.add(eff.id)
         
@@ -402,7 +414,7 @@ class WorldModelGraph:
                     kind = "local_object_progress"
                 summary["recent_effects"].append(kind)
                 summary["effect_histogram"][kind] = summary["effect_histogram"].get(kind, 0) + 1
-                if self._is_terminal_productive_effect(raw_kind, eff.props):
+                if self._is_terminal_productive_effect(raw_kind, eff.props) or self._is_route_productive_effect(raw_kind, eff.props):
                     summary["support_count"] += 1
                     summary["last_progress_step"] = max(summary["last_progress_step"], int(act.props.get("step", -1) or -1))
                     if len(summary["evidence_path_ids"]) < limit:
@@ -424,7 +436,7 @@ class WorldModelGraph:
             recent_effects = list(summary.get("recent_effects") or [])
             misses_after_progress = 0
             for effect in recent_effects:
-                if effect in {"object_progress", "terminal_progress", "meaningful_progress"}:
+                if effect in {"object_progress", "terminal_progress", "meaningful_progress", "distance_improving_move"}:
                     break
                 misses_after_progress += 1
             summary["consecutive_misses_after_progress"] = misses_after_progress
@@ -638,6 +650,17 @@ class WorldModelGraph:
         ))
         improving_count = sum(1 for t in transitions if (t.get("goal_distance_delta") is not None and float(t["goal_distance_delta"]) < -0.01) or t.get("effect_class") == "distance_improving_move")
         regressing_count = sum(1 for t in transitions if (t.get("goal_distance_delta") is not None and float(t["goal_distance_delta"]) > 0.01) or t.get("effect_class") == "distance_regressing_move")
+        recent_non_improving_streak = 0
+        for transition in recent_transitions:
+            delta = transition.get("goal_distance_delta")
+            is_improving = (
+                transition.get("effect_class") == "distance_improving_move"
+                or transition.get("distance_trend") == "improving"
+                or (delta is not None and float(delta) < -0.01)
+            )
+            if is_improving:
+                break
+            recent_non_improving_streak += 1
         recent_regressing_count = sum(
             1
             for t in recent_transitions
@@ -657,6 +680,7 @@ class WorldModelGraph:
             "regressing_transition_count": regressing_count,
             "recent_regressing_count": recent_regressing_count,
             "recent_regression_streak": recent_regression_streak,
+            "recent_non_improving_streak": recent_non_improving_streak,
             "net_distance_delta": net_distance_delta,
             "has_recent_route_regression": bool(
                 recent_regression_streak >= 3
@@ -692,15 +716,41 @@ class WorldModelGraph:
                 "route_confidence": 0.25,
                 "evidence_path": [],
                 "transition_count": 0,
+                "latest_step": -1,
+                "latest_distance_delta": None,
+                "latest_effect_class": None,
+                "recent_regression_streak": 0,
+                "recent_non_improving_streak": 0,
+                "latest_step_is_improving": False,
             })
             delta = transition.get("goal_distance_delta")
             if delta is not None:
                 candidate["expected_distance_delta"] += float(delta)
             candidate["transition_count"] += 1
+            step = int(transition.get("step", 0) or 0)
+            if step > int(candidate.get("latest_step", -1) or -1):
+                candidate["latest_step"] = step
+                candidate["latest_distance_delta"] = float(delta) if delta is not None else None
+                candidate["latest_effect_class"] = transition.get("effect_class")
+                candidate["latest_step_is_improving"] = (
+                    transition.get("effect_class") == "distance_improving_move"
+                    or transition.get("distance_trend") == "improving"
+                    or (delta is not None and float(delta) < -0.01)
+                )
             candidate["route_confidence"] = min(0.95, 0.35 + (0.15 * candidate["transition_count"]))
             candidate["evidence_path"].extend(transition.get("evidence_path_ids") or [])
         for candidate in candidates.values():
             candidate["evidence_path"] = list(dict.fromkeys(candidate["evidence_path"]))[:6]
+            latest_delta = candidate.get("latest_distance_delta")
+            latest_effect = str(candidate.get("latest_effect_class") or "")
+            if latest_effect == "distance_regressing_move" or (
+                latest_delta is not None and float(latest_delta) > 0.01
+            ):
+                candidate["recent_regression_streak"] = 1
+                candidate["route_confidence"] = max(0.05, float(candidate.get("route_confidence", 0.0) or 0.0) - 0.35)
+            elif not bool(candidate.get("latest_step_is_improving", False)):
+                candidate["recent_non_improving_streak"] = 1
+                candidate["route_confidence"] = max(0.05, float(candidate.get("route_confidence", 0.0) or 0.0) - 0.25)
         ranked = sorted(
             candidates.values(),
             key=lambda c: (
@@ -713,6 +763,8 @@ class WorldModelGraph:
             candidate
             for candidate in ranked
             if float(candidate.get("expected_distance_delta", 0.0) or 0.0) <= 0.0
+            and int(candidate.get("recent_regression_streak", 0) or 0) == 0
+            and int(candidate.get("recent_non_improving_streak", 0) or 0) == 0
         ]
         return non_regressing[:limit]
 

@@ -94,6 +94,11 @@ class ClickCandidateGenerator:
         
         # Rank and return bounded list
         ranked = sorted(candidates.values(), key=lambda c: (-c.confidence, c.rank))
+        
+        # Set rank field based on position
+        for i, cand in enumerate(ranked[:limit]):
+            cand.rank = i
+        
         return ranked[:limit]
 
     def _normalize_snapshot(self, snapshot: Any) -> Dict[str, Any]:

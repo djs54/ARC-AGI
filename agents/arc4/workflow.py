@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .cycle_policy import check_budget, check_stall, record_evaluation_outcome, termination_from_evaluation
+from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, stall_threshold, termination_from_evaluation
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
@@ -145,7 +145,9 @@ class WorkflowOrchestrator:
 
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
-                num_attempted = len(state.action_attempt_counts)
+                # Count distinct base actions so ACTION6@x,y click targets don't
+                # inflate the attempted count past the available action space.
+                num_attempted = count_base_actions(state.action_attempt_counts)
                 untested_remaining = (num_available or 1) - num_attempted
                 import logging as _logging
                 _logging.getLogger(__name__).info(
@@ -154,7 +156,7 @@ class WorkflowOrchestrator:
                     num_available or 1,
                     num_attempted,
                     untested_remaining,
-                    (num_available or 1) * 2,
+                    stall_threshold(self._limits.max_consecutive_no_progress, num_available),
                 )
                 stall_reason = check_stall(
                     state.consecutive_no_progress_count,
@@ -212,6 +214,12 @@ class WorkflowOrchestrator:
             meaningful_progress=evaluation.meaningful_progress,
             falsification_delta=evaluation.falsification_delta,
         )
+        if state.active_goal is not None:
+            goal_id = state.active_goal.selected.goal_id
+            if evaluation.meaningful_progress:
+                state.goal_failure_counts[goal_id] = 0
+            else:
+                state.goal_failure_counts[goal_id] = state.goal_failure_counts.get(goal_id, 0) + 1
 
     @staticmethod
     def _finish(
