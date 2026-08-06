@@ -193,6 +193,46 @@ class TestA135PlannerGraphIntegration:
         result = planner.generate(state, perception, goal, graph_port=None).payload
         assert result.candidate is not None
 
+    def test_falsification_penalty_applies_with_real_server_field_names(self):
+        """A162: ArcGraphQueryPort's field mapping (not the MockGraphPort test double)
+        must actually surface falsified_count as contradictions, so the planner's
+        falsification_penalty measurably lowers a heavily-falsified action's score."""
+        from agents.arc4.graph_queries import ArcGraphQueryPort
+
+        class _StubBrainClient:
+            def __init__(self, results_by_action: dict[str, dict[str, Any]]):
+                self._results = results_by_action
+
+            def call_tool(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+                if tool_name == "arc_get_action_evidence":
+                    return self._results.get(payload["action_id"], {})
+                return {"status": "capability_missing"}
+
+        falsified_client = _StubBrainClient(
+            {"action-a": {"confidence": 0.0, "falsified_count": 5, "evidence_count": 5}}
+        )
+        clean_client = _StubBrainClient(
+            {"action-a": {"confidence": 0.0, "falsified_count": 0, "evidence_count": 0}}
+        )
+        falsified_port = ArcGraphQueryPort(falsified_client, task_id="t", session_id="s", strict=False)
+        clean_port = ArcGraphQueryPort(clean_client, task_id="t", session_id="s", strict=False)
+
+        planner = PlanGenerator(PlanGeneratorLimits())
+        state = _state()
+        perception = PerceptionSnapshot(
+            observation={"grid": "hash-1", "available_actions": ["action-a"]},
+            grid_hash="hash-1",
+        )
+        goal = _goal()
+
+        falsified_result = planner.generate(state, perception, goal, graph_port=falsified_port).payload
+        clean_result = planner.generate(state, perception, goal, graph_port=clean_port).payload
+
+        assert falsified_result.candidate.score < clean_result.candidate.score, (
+            f"falsified_count=5 should score lower than falsified_count=0, "
+            f"got {falsified_result.candidate.score} vs {clean_result.candidate.score}"
+        )
+
 
 # ── Vet: graph gate blocks action ─────────────────────────────────────
 
