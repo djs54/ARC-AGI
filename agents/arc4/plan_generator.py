@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -386,7 +387,12 @@ class PlanGenerator:
         messages = [
             LLMMessage(
                 role="system",
-                content="Pick the best ARC action_id and explain why it should be tried next.",
+                content=(
+                    "Pick the best ARC action_id and explain why it should be tried next. "
+                    "Respond with ONLY a JSON object with exactly these keys: "
+                    '"action_id" (string, must match one of the candidate action_ids exactly) '
+                    'and "reason" (string, brief explanation).'
+                ),
             ),
             LLMMessage(
                 role="user",
@@ -402,11 +408,42 @@ class PlanGenerator:
             ),
         ]
         response = llm_port.chat(messages)
+        return self._parse_llm_response(response, candidates)
+
+    @staticmethod
+    def _parse_llm_response(response: str, candidates: Sequence[_CandidateRecord]) -> dict[str, Any] | None:
+        if not response:
+            return None
         try:
             parsed = json.loads(response)
         except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, Mapping) and parsed.get("action_id"):
+            return dict(parsed)
+
+        action_match = re.search(r"action[_\s-]*id\s*[:=]\s*\"?([A-Za-z0-9_.,@-]+)\"?", response, re.IGNORECASE)
+        action_id = action_match.group(1) if action_match else None
+
+        if action_id is None:
+            # Prose responses (e.g. `The best ARC action_id to try next would be
+            # "ACTION7".`) mention a real candidate's action_id without a key:value
+            # shape a pure regex would catch -- scan for a literal, word-bounded
+            # mention instead. Longest-id-first avoids a short id false-matching
+            # inside a longer one (e.g. "ACTION1" inside "ACTION10").
+            candidate_ids = sorted({c.action_id for c in candidates}, key=len, reverse=True)
+            for candidate_id in candidate_ids:
+                if re.search(rf"\b{re.escape(candidate_id)}\b", response):
+                    action_id = candidate_id
+                    break
+
+        if action_id is None:
             return None
-        return parsed if isinstance(parsed, dict) and parsed.get("action_id") else None
+
+        reason_match = re.search(r"reason\s*[:=]\s*(.{1,200})", response, re.IGNORECASE)
+        return {
+            "action_id": action_id,
+            "reason": reason_match.group(1).strip() if reason_match else response.strip()[:200],
+        }
 
     def _apply_llm_patch(self, candidates: Sequence[_CandidateRecord], patch: dict[str, Any]) -> list[_CandidateRecord]:
         action_id = str(patch.get("action_id"))
