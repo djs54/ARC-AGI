@@ -157,7 +157,7 @@ class ArcGraphQueryPort:
             if result.get("status") == "capability_missing":
                 return []
             # Try common container keys
-            for key in ("actions", "untested_actions", "action_ids", "results", "items"):
+            for key in ("untested", "actions", "untested_actions", "action_ids", "results", "items"):
                 value = result.get(key)
                 if isinstance(value, (list, tuple)):
                     return [str(item.get("action_id") if isinstance(item, Mapping) else item) for item in value if item]
