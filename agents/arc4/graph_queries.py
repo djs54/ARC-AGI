@@ -113,7 +113,7 @@ class ArcGraphQueryPort:
                 "supports": int(result.get("supports", result.get("support_count", 0)) or 0),
                 "contradictions": int(result.get("contradictions", result.get("contradiction_count", result.get("falsified_count", 0))) or 0),
                 "confidence": float(result.get("confidence", result.get("score", 0.0)) or 0.0),
-                "attempts": int(result.get("attempts", result.get("attempt_count", result.get("evidence_count", result.get("steps_used", 0)))) or 0),
+                "attempts": int(result.get("attempts") or result.get("attempt_count") or result.get("evidence_count") or result.get("steps_used") or 0),
                 "raw": dict(result),
             }
         return {"supports": 0, "contradictions": 0, "confidence": 0.0, "attempts": 0}

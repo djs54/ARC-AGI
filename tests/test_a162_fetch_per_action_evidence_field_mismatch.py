@@ -74,3 +74,11 @@ class TestFetchPerActionEvidenceFieldMismatch:
         keep taking priority over the steps_used fallback."""
         port = _port({"evidence_count": 3, "steps_used": 5})
         assert port.fetch_per_action_evidence("ACTION1")["attempts"] == 3
+
+    def test_evidence_count_present_but_zero_still_falls_through_to_steps_used(self):
+        """A167: the real server always includes evidence_count:0 explicitly (A165) --
+        a nested .get(key, default) chain stops there and never reaches steps_used.
+        This is the exact live-observed shape; A165's own test used a fixture without
+        evidence_count present at all, which didn't reproduce the bug."""
+        port = _port({"evidence_count": 0, "falsified_count": 3, "steps_used": 3})
+        assert port.fetch_per_action_evidence("ACTION1")["attempts"] == 3
