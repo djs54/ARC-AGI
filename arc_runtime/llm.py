@@ -52,7 +52,10 @@ class LLMClient:
     async def achat(self, messages: list[dict]) -> str:
         import asyncio
 
-        return await asyncio.to_thread(self.chat, messages)
+        try:
+            return await asyncio.to_thread(self.chat, messages, response_format={"type": "json_object"})
+        except Exception:
+            return await asyncio.to_thread(self.chat, messages)
 
 
 class LLMInitializationError(Exception):
