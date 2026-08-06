@@ -21,6 +21,7 @@ class EvaluationLimits:
     repeated_falsification_threshold: int = 2
     exhausted_action_attempt_threshold: int = 4
     stale_repeat_threshold: int = 2  # override progress after N prior attempts of the same action
+    causal_override_confidence_threshold: float = 0.3  # A163: below this, a "supported" causal path is too weak to trust
 
 
 class Evaluator:
@@ -107,7 +108,10 @@ class Evaluator:
         if meaningful_progress and terminal_reason is None and self._graph_query_port is not None:
             try:
                 causal_path = self._graph_query_port.fetch_causal_path(execution.action_id)
-                if causal_path.get("path_exists") and not causal_path.get("supports") and causal_path.get("contradicts"):
+                # A163: the server only ever returns an aggregate path_confidence, never
+                # itemized supports/contradicts lists — a confidence-threshold check is
+                # the closest honest substitute for the originally-designed itemized check.
+                if causal_path.get("path_exists") and float(causal_path.get("path_confidence", 1.0) or 0.0) < self._limits.causal_override_confidence_threshold:
                     meaningful_progress = False
                     causal_override = True
             except Exception:

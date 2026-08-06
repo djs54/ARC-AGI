@@ -305,9 +305,9 @@ class TestA135EvaluatorCausalPath:
     """Evaluator should use causal path to override progress when only contradictions exist."""
 
     def test_causal_contradiction_overrides_progress(self):
-        """When causal path exists with only contradictions, override meaningful_progress."""
+        """A163: when causal path exists with low confidence, override meaningful_progress."""
         graph = MockGraphPort(
-            causal_paths={"action-a": {"path_exists": True, "supports": False, "contradicts": True}},
+            causal_paths={"action-a": {"path_exists": True, "path_confidence": 0.1}},
         )
         evaluator = Evaluator(graph_query_port=graph)
         state = _state()
@@ -320,9 +320,9 @@ class TestA135EvaluatorCausalPath:
         assert result.payload.metadata["causal_override"] is True
 
     def test_causal_support_does_not_override(self):
-        """When causal path has support, don't override progress."""
+        """A163: when causal path has high confidence, don't override progress."""
         graph = MockGraphPort(
-            causal_paths={"action-a": {"path_exists": True, "supports": True, "contradicts": False}},
+            causal_paths={"action-a": {"path_exists": True, "path_confidence": 0.9}},
         )
         evaluator = Evaluator(graph_query_port=graph)
         state = _state()
@@ -335,9 +335,9 @@ class TestA135EvaluatorCausalPath:
         assert result.payload.metadata["causal_override"] is False
 
     def test_no_causal_path_does_not_override(self):
-        """When no causal path exists, don't override progress."""
+        """When no causal path exists, don't override progress regardless of confidence."""
         graph = MockGraphPort(
-            causal_paths={"action-a": {"path_exists": False, "supports": False, "contradicts": False}},
+            causal_paths={"action-a": {"path_exists": False, "path_confidence": 0.0}},
         )
         evaluator = Evaluator(graph_query_port=graph)
         state = _state()
