@@ -144,6 +144,7 @@ class ArcGraphQueryPort:
                 "path_exists": bool(supports or contradicts or result.get("path_exists")),
                 "supports": list(supports) if isinstance(supports, (list, tuple)) else [],
                 "contradicts": list(contradicts) if isinstance(contradicts, (list, tuple)) else [],
+                "path_confidence": float(result.get("path_confidence", 0.0) or 0.0),
                 "raw": dict(result),
             }
         return {"path_exists": False, "supports": [], "contradicts": []}
