@@ -1,5 +1,15 @@
 # Plan: A164 — Graph Evidence Cross-Contaminated Across Unrelated Games (Static `task_id`)
 
+## Executed 2026-08-06 — simpler fix location than originally planned
+
+Decision: derive from `game_id` (option 1 below). Implementation landed entirely in
+`arc_runtime/bundle.py::build_arc_v2_bundle` rather than `arc_runtime/dispatch.py` as originally
+sketched — `build_arc_v2_bundle` already receives `game_id` as its own parameter, so scoping
+`ArcGraphQueryPort` by it required no changes to any caller (`dispatch.py`, `session_id`
+construction, the Temporal workflow id, or `ArcV2Telemetry`'s own `task_id`, which intentionally
+stays as the manifest label for artifact continuity). See `backlog/A164.md`'s Resolution section
+for the full account.
+
 ## Context
 
 `benchmarks/arc3/tasks_manifest.json` assigns a fixed `task_id` per manifest slot (`arc_eval_001`, ...). A149's `_sync_tasks_with_live_catalog()` (`arc_runtime/runner_shell.py`) remaps the stale `game_id` on each run but never touches `task_id`. `arc_runtime/dispatch.py` (current lines ~27-39) reads `task.task_id` directly and passes it into both `session_id` construction (`f"arc-v2-{task.task_id}-{int(time.time())}"` — already timestamp-uniqued) and `build_arc_v2_bundle(..., task_id=task.task_id, ...)` (unchanged, static). `arc_runtime/bundle.py` (current line 120) passes that same static `task_id` straight into `ArcGraphQueryPort`, which scopes every graph read/write by it.

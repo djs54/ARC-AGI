@@ -117,7 +117,18 @@ def build_arc_v2_bundle(
     max_cycles: int,
     llm_client: Any | None = None,
 ) -> ArcV2Bundle:
-    graph_port = ArcGraphQueryPort(brain_client, task_id=task_id, session_id=session_id, strict=False)
+    # A164: scope graph evidence by game_id, not the manifest's static per-slot
+    # task_id. tasks_manifest.json assigns a fixed task_id per slot (e.g.
+    # "arc_eval_001") and A149's live-catalog sync only remaps game_id, never
+    # task_id -- so every --live-smoke run landing in the same manifest slot
+    # (the default for --num-puzzles 1) shared one graph identity regardless
+    # of which actual ARC game was played, pooling falsification/confidence
+    # evidence across semantically unrelated games. game_id is unique per
+    # game variant (ARC rotates hash-suffixed ids) and stable across replays
+    # of the same game, which is the identity graph evidence should actually
+    # be scoped by. Falls back to task_id if game_id is ever unset.
+    graph_task_id = game_id or task_id
+    graph_port = ArcGraphQueryPort(brain_client, task_id=graph_task_id, session_id=session_id, strict=False)
     telemetry = ArcV2Telemetry(
         task_id=task_id,
         game_id=game_id,
