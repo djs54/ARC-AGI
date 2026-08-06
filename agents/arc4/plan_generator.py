@@ -17,7 +17,6 @@ from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus,
 class PlanGeneratorLimits:
     untested_bonus: float = 0.22
     goal_alignment_bonus: float = 0.18
-    graph_evidence_bonus: float = 0.12
     repeat_attempt_penalty: float = 0.04
     falsification_penalty: float = 0.16
     replan_feedback_bonus: float = 0.3
@@ -120,7 +119,6 @@ class PlanGenerator:
     ) -> list[_CandidateRecord]:
         if mechanic_action_set is None:
             mechanic_action_set = set()
-        records_by_action = {record["action_id"]: record for record in graph_records if record.get("action_id")}
         candidates: list[_CandidateRecord] = []
 
         # A151: build (x, y) -> attempt_count map from ACTION6@x,y book_ids so click
@@ -136,12 +134,11 @@ class PlanGenerator:
                     continue
 
         for action_id in available_actions[: self._limits.max_candidates]:
-            graph_record = records_by_action.get(action_id, {})
             goal_alignment = self._action_matches_goal(action_id, goal)
 
             # A135: Enrich graph_score with per-action evidence from the graph
             graph_evidence: dict[str, Any] = {}
-            graph_score = float(graph_record.get("confidence", graph_record.get("score", 0.0)) or 0.0)
+            graph_score = 0.0
             if graph_port is not None:
                 try:
                     graph_evidence = graph_port.fetch_per_action_evidence(action_id)
@@ -194,10 +191,7 @@ class PlanGenerator:
                 if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
                     score += self._limits.replan_feedback_bonus
 
-                if graph_record.get("goal_id") == goal.selected.goal_id:
-                    score += self._limits.graph_evidence_bonus
-
-                rationale_parts = [graph_record.get("rationale") or f"consider {action_id} for {goal.selected.goal_id}"]
+                rationale_parts = [f"consider {action_id} for {goal.selected.goal_id}"]
                 if action_id == "ACTION6":
                     rationale_parts = [
                         f"click {target_info.get('entity_kind', 'entity')} color={target_info.get('entity_color', 'unknown')} at ({payload.get('x', 32)},{payload.get('y', 32)})"
@@ -211,7 +205,7 @@ class PlanGenerator:
                 if state.latest_veto_alternative is not None and action_id == state.latest_veto_alternative.action_id:
                     rationale_parts.append("veto feedback")
 
-                predicted_outcome = self._predicted_outcome(graph_record, graph_evidence, is_untested)
+                predicted_outcome = self._predicted_outcome(graph_evidence, is_untested)
                 expected_effect = f"{action_id}: expect {predicted_outcome.get('kind', 'grid_change')} (p={float(predicted_outcome.get('confidence', 0.0)):.2f})"
 
                 candidates.append(
@@ -228,7 +222,6 @@ class PlanGenerator:
                             "attempt_count": attempts,
                             "falsification_count": falsifications,
                             "goal_alignment": goal_alignment,
-                            "graph_record": dict(graph_record),
                             "graph_evidence": graph_evidence,
                             "perception_grid_hash": perception.grid_hash,
                             "untested": is_untested,
@@ -280,7 +273,6 @@ class PlanGenerator:
                 "attempt_count": state.action_attempt_counts.get(action_id, 0),
                 "falsification_count": state.action_falsification_counts.get(action_id, 0),
                 "goal_alignment": True,
-                "graph_record": {},
                 "perception_grid_hash": perception.grid_hash,
                 "untested": True,
                 "repeated_falsified": False,
@@ -488,12 +480,11 @@ class PlanGenerator:
 
     @staticmethod
     def _predicted_outcome(
-        graph_record: Mapping[str, Any],
         graph_evidence: Mapping[str, Any],
         is_untested: bool,
     ) -> dict[str, Any]:
         raw = (graph_evidence or {}).get("raw") or {}
-        recorded_kind = raw.get("effect_kind") or graph_record.get("effect_kind")
+        recorded_kind = raw.get("effect_kind")
         if recorded_kind in ("grid_change", "no_change", "level_gain", "state_change"):
             confidence = float((graph_evidence or {}).get("confidence") or 0.5)
             return {"kind": str(recorded_kind), "confidence": confidence}
