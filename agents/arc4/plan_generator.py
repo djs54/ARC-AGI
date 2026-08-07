@@ -429,12 +429,24 @@ class PlanGenerator:
             # "ACTION7".`) mention a real candidate's action_id without a key:value
             # shape a pure regex would catch -- scan for a literal, word-bounded
             # mention instead. Longest-id-first avoids a short id false-matching
-            # inside a longer one (e.g. "ACTION1" inside "ACTION10").
-            candidate_ids = sorted({c.action_id for c in candidates}, key=len, reverse=True)
-            for candidate_id in candidate_ids:
-                if re.search(rf"\b{re.escape(candidate_id)}\b", response):
-                    action_id = candidate_id
-                    break
+            # inside a longer one (e.g. "ACTION1" inside "ACTION10"). A173: dedupe
+            # via an ordered list (not a set) and tie-break equal-length candidates
+            # by occurrence count, not set-iteration order -- string hashing is
+            # randomized per process, so a set-derived order is not deterministic.
+            seen_ids: list[str] = []
+            for candidate in candidates:
+                if candidate.action_id not in seen_ids:
+                    seen_ids.append(candidate.action_id)
+            seen_ids.sort(key=len, reverse=True)
+
+            best_id: str | None = None
+            best_count = 0
+            for candidate_id in seen_ids:
+                count = len(re.findall(rf"\b{re.escape(candidate_id)}\b", response))
+                if count > best_count:
+                    best_count = count
+                    best_id = candidate_id
+            action_id = best_id
 
         if action_id is None:
             return None
