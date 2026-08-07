@@ -88,7 +88,11 @@ class SyncLLMPortAdapter:
             if method is None:
                 continue
             try:
-                result = method(prompt)
+                # A174: "chat" mirrors achat's structured-messages contract (same
+                # client, same signature convention) -- generate/complete take a
+                # single joined string prompt instead.
+                call_arg = message_dicts if method_name == "chat" else prompt
+                result = method(call_arg)
                 if inspect.isawaitable(result):
                     result = asyncio.run(result)
                 self.total_tokens_in += len(prompt) // 4
