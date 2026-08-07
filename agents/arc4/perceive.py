@@ -28,6 +28,7 @@ class PerceiveAgent:
         grid_hash = self._hash_grid(normalized_grid)
         grid_shape = self._grid_shape(normalized_grid)
         entities = self._extract_entities(normalized_grid)
+        grid_text = self._encode_grid_text(normalized_grid)
 
         state.previous_grid_hash = grid_hash
         state.loop_history.append(grid_hash)
@@ -51,6 +52,7 @@ class PerceiveAgent:
                 "entity_count": len(entities),
                 "observation_keys": tuple(sorted(normalized_observation.keys())),
                 "grid_source": self._grid_source_key(normalized_observation),
+                "grid_text": grid_text,
             },
         )
 
@@ -128,6 +130,22 @@ class PerceiveAgent:
         row_count = len(grid)
         col_count = max((len(row) for row in grid), default=0)
         return row_count, col_count
+
+    @staticmethod
+    def _encode_grid_text(grid: Sequence[Sequence[Any]], *, max_cells: int = 4096) -> str:
+        """A169: compact one-char-per-cell text encoding of the grid for LLM prompts.
+
+        Previously the LLM never saw the grid at all, only a hash plus
+        abstracted blob statistics. ARC's palette is single digits, so a
+        digit-per-cell, newline-per-row encoding is natural and compact.
+        """
+        if not grid:
+            return ""
+        rows = len(grid)
+        cols = max((len(row) for row in grid), default=0)
+        if rows * cols > max_cells:
+            return f"grid omitted: {rows}x{cols} exceeds {max_cells}-cell encoding limit"
+        return "\n".join("".join(str(cell) for cell in row) for row in grid)
 
     def _extract_entities(self, grid: Sequence[Sequence[Any]]) -> tuple[PerceivedEntity, ...]:
         if not grid:
