@@ -218,6 +218,7 @@ class GoalResolver:
                     {
                         "grid_hash": perception.grid_hash,
                         "grid_shape": perception.grid_shape,
+                        "grid_text": perception.metadata.get("grid_text", "") if isinstance(perception.metadata, Mapping) else "",
                         "candidates": [self._serialize_hypothesis(hypothesis) for hypothesis in self._order_hypotheses(hypotheses)],
                         "required_fields": ["goal_id", "confidence", "reason"],
                     },
