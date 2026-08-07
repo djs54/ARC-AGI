@@ -352,6 +352,10 @@ class WorkflowState:
     terminated: bool = False
     termination_state: WorkflowStatus = WorkflowStatus.RUNNING
     previous_grid_hash: str | None = None
+    # A170: ephemeral cache of the actual prior grid (not just its hash) so
+    # perception can diff before/after cell changes. Deliberately excluded
+    # from to_dict()/from_dict() -- runtime-only, not persisted state.
+    previous_grid: list[list[Any]] | None = None
     loop_history: list[str] = field(default_factory=list)
     loop_history_pointer: int = -1
     active_goal: ResolvedGoal | None = None
