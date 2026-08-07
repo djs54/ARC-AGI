@@ -66,6 +66,16 @@ class TestParseLlmResponseFallback:
         assert parsed is not None
         assert parsed["action_id"] == "ACTION10"
 
+    def test_more_frequently_mentioned_candidate_wins_length_tie(self):
+        """A173: equal-length candidates must tie-break deterministically by
+        occurrence count, not by set-iteration order (which is randomized
+        per process via PYTHONHASHSEED)."""
+        candidates = [_StubCandidate("ACTION6"), _StubCandidate("ACTION7")]
+        response = "ACTION7 seems good. ACTION7 again. Consider ACTION6 too."
+        parsed = PlanGenerator._parse_llm_response(response, candidates)
+        assert parsed is not None
+        assert parsed["action_id"] == "ACTION7"
+
 
 class TestApplyLlmPatchEndToEnd:
     def test_apply_llm_patch_actually_invoked_end_to_end(self):
