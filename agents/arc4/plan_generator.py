@@ -400,6 +400,7 @@ class PlanGenerator:
                     {
                         "grid_hash": perception.grid_hash,
                         "grid_text": perception.metadata.get("grid_text", "") if isinstance(perception.metadata, Mapping) else "",
+                        "last_action_grid_diff": perception.metadata.get("grid_diff", {}) if isinstance(perception.metadata, Mapping) else {},
                         "goal": self._serialize_goal(goal),
                         "candidates": [self._serialize_candidate(candidate) for candidate in candidates],
                         "required_fields": ["action_id", "reason"],

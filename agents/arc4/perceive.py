@@ -29,8 +29,10 @@ class PerceiveAgent:
         grid_shape = self._grid_shape(normalized_grid)
         entities = self._extract_entities(normalized_grid)
         grid_text = self._encode_grid_text(normalized_grid)
+        grid_diff = self._diff_grids(state.previous_grid, normalized_grid)
 
         state.previous_grid_hash = grid_hash
+        state.previous_grid = normalized_grid
         state.loop_history.append(grid_hash)
         state.loop_history_pointer = len(state.loop_history) - 1
         if len(state.loop_history) > self._loop_window:
@@ -53,6 +55,7 @@ class PerceiveAgent:
                 "observation_keys": tuple(sorted(normalized_observation.keys())),
                 "grid_source": self._grid_source_key(normalized_observation),
                 "grid_text": grid_text,
+                "grid_diff": grid_diff,
             },
         )
 
@@ -146,6 +149,33 @@ class PerceiveAgent:
         if rows * cols > max_cells:
             return f"grid omitted: {rows}x{cols} exceeds {max_cells}-cell encoding limit"
         return "\n".join("".join(str(cell) for cell in row) for row in grid)
+
+    @staticmethod
+    def _diff_grids(
+        previous: Sequence[Sequence[Any]] | None,
+        current: Sequence[Sequence[Any]],
+        *,
+        max_entries: int = 50,
+    ) -> dict[str, Any]:
+        """A170: structured before/after cell diff, since every action's effect
+        previously collapsed to a boolean grid_changed -- no way to represent
+        "clicking here turned 3 cells from color 2 to 5", which is exactly the
+        evidence shape ARC-style causal reasoning needs.
+        """
+        if previous is None or len(previous) != len(current):
+            return {"changed_cells": [], "changed_count": 0, "truncated": False}
+        changes: list[dict[str, Any]] = []
+        for row_index, (prev_row, cur_row) in enumerate(zip(previous, current)):
+            if len(prev_row) != len(cur_row):
+                continue
+            for col_index, (prev_val, cur_val) in enumerate(zip(prev_row, cur_row)):
+                if prev_val != cur_val:
+                    changes.append({"row": row_index, "col": col_index, "from": prev_val, "to": cur_val})
+        return {
+            "changed_cells": changes[:max_entries],
+            "changed_count": len(changes),
+            "truncated": len(changes) > max_entries,
+        }
 
     def _extract_entities(self, grid: Sequence[Sequence[Any]]) -> tuple[PerceivedEntity, ...]:
         if not grid:

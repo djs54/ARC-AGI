@@ -189,6 +189,7 @@ class Evaluator:
                 "stale_override": stale_override,
                 "grid_unchanged": grid_unchanged,
                 "grid_changed": grid_changed_flag,
+                "grid_diff": perception.metadata.get("grid_diff", {}) if isinstance(getattr(perception, "metadata", None), Mapping) else {},
                 "level_gain": level_gain,
                 "progress_tier": progress_tier,
                 "predicted_kind": predicted_kind,
