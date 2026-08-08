@@ -7,6 +7,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
+from .rule_extraction import extract_candidate_signatures
 from .types import ExecutionResult, GoalHypothesis, PerceivedEntity, PerceptionSnapshot, PlanningResult, ResolvedGoal, VetDecision
 
 
@@ -33,6 +34,11 @@ ARC_V2_TOOL_NAMES = {
     # lands.
     "record_transition": "arc_record_transition",
     "fetch_entity_history": "arc_get_entity_history",
+    # A177: causal rules as first-class graph objects (PREDICTS/FALSIFIED_BY),
+    # replacing per-action tally counters. Server side not yet implemented --
+    # see docs/handoff/B278-rules-as-nodes.md.
+    "record_rule_evidence": "arc_record_rule",
+    "fetch_rules_for_action": "arc_get_rules_for_action",
 }
 
 
@@ -170,6 +176,29 @@ class ArcGraphQueryPort:
             }
         return {"transitions": [], "changed_count_total": 0}
 
+    def fetch_rules_for_action(self, action_id: str) -> list[dict[str, Any]]:
+        """A177: live (unfalsified) rules relevant to an action -- the
+        consumer query for A177's Rule/PREDICTS/FALSIFIED_BY graph objects,
+        replacing the flat falsification_penalty counter with real causal
+        claims plan_generator.py can weigh."""
+        result = self._call_tool("fetch_rules_for_action", {"task_id": self.task_id, "action_id": action_id})
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return []
+        rules = result.get("rules", [])
+        if not isinstance(rules, (list, tuple)):
+            return []
+        return [
+            {
+                "rule_id": rule.get("rule_id"),
+                "from_color": rule.get("from_color"),
+                "to_color": rule.get("to_color"),
+                "confidence": float(rule.get("confidence", 0.0) or 0.0),
+                "falsified": bool(rule.get("falsified", False)),
+            }
+            for rule in rules
+            if isinstance(rule, Mapping)
+        ]
+
     @staticmethod
     def _extract_action_ids(result: Any) -> list[str]:
         """Extract a list of action ID strings from a tool result."""
@@ -246,11 +275,7 @@ class ArcGraphQueryPort:
         if not changed_cells:
             return {"status": "no_changes", "recorded": False}
 
-        histogram: dict[tuple[Any, Any], int] = {}
-        for cell in changed_cells:
-            key = (cell.get("from"), cell.get("to"))
-            histogram[key] = histogram.get(key, 0) + 1
-        color_transitions = [{"from": frm, "to": to, "count": count} for (frm, to), count in histogram.items()]
+        color_transitions = self._summarize_color_transitions(changed_cells)
 
         payload = {
             "task_id": self.task_id,
@@ -261,6 +286,39 @@ class ArcGraphQueryPort:
             "entity_ref": self._attribute_entity(changed_cells, entities),
         }
         return self._normalize_write_result(self._call_tool("record_transition", payload), tool_key="record_transition")
+
+    def record_rule_evidence(self, execution: ExecutionResult, grid_diff: Mapping[str, Any]) -> dict[str, Any]:
+        """A177: extract candidate rule signatures (deterministic, see
+        rule_extraction.py) from this step's observed color-transition
+        histogram and send them for the server to confirm/falsify existing
+        Rule nodes against, or create new ones."""
+        changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
+        if not changed_cells:
+            return {"status": "no_changes", "recorded": False}
+
+        color_transitions = self._summarize_color_transitions(changed_cells)
+        signatures = extract_candidate_signatures(execution.action_id, color_transitions)
+        if not signatures:
+            return {"status": "no_changes", "recorded": False}
+
+        payload = {
+            "task_id": self.task_id,
+            "step": self._execution_step(execution),
+            "action_id": execution.action_id,
+            "candidate_signatures": [
+                {"action_family": sig.action_family, "from_color": sig.from_color, "to_color": sig.to_color}
+                for sig in signatures
+            ],
+        }
+        return self._normalize_write_result(self._call_tool("record_rule_evidence", payload), tool_key="record_rule_evidence")
+
+    @staticmethod
+    def _summarize_color_transitions(changed_cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        histogram: dict[tuple[Any, Any], int] = {}
+        for cell in changed_cells:
+            key = (cell.get("from"), cell.get("to"))
+            histogram[key] = histogram.get(key, 0) + 1
+        return [{"from": frm, "to": to, "count": count} for (frm, to), count in histogram.items()]
 
     @staticmethod
     def _attribute_entity(changed_cells: Sequence[Mapping[str, Any]], entities: Sequence[Any]) -> Any:
