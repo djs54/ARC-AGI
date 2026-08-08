@@ -28,20 +28,18 @@ ARC_V2_TOOL_NAMES = {
     "check_action_gate": "arc_check_action_gate",
     "record_reward_prediction_error": "arc_record_reward_prediction_error",
     # A176: persist A170's before/after diffs as graph State Nodes instead of
-    # a one-shot prompt fragment. Server side not yet implemented -- calls
-    # degrade to capability_missing via the existing strict=False path until
-    # the hand-off (docs/handoff/B278-persist-transitions-as-state-nodes.md)
-    # lands.
-    "record_transition": "arc_record_transition",
-    "fetch_entity_history": "arc_get_entity_history",
+    # a one-shot prompt fragment. B309 landed these server-side as generic
+    # (non-arc-prefixed) tools -- Transition/Rule aren't ARC-specific concepts,
+    # so hippocampy exposes them under general names any client can call.
+    "record_transition": "record_transition",
+    "fetch_entity_history": "get_entity_history",
     # A177: causal rules as first-class graph objects (PREDICTS/FALSIFIED_BY),
-    # replacing per-action tally counters. Server side not yet implemented --
-    # see docs/handoff/B278-rules-as-nodes.md.
-    "record_rule_evidence": "arc_record_rule",
-    "fetch_rules_for_action": "arc_get_rules_for_action",
+    # replacing per-action tally counters. Landed server-side in B309.
+    "record_rule_evidence": "record_rule",
+    "fetch_rules_for_action": "get_rules_for_action",
     # A179: cross-game rule transfer by structural (color-invariant)
-    # fingerprint -- see docs/handoff/B278-transfer-via-structural-signature.md.
-    "fetch_transferred_rules": "arc_get_transferred_rules",
+    # fingerprint. Landed server-side in B309.
+    "fetch_transferred_rules": "get_transferred_rules",
 }
 
 
@@ -313,7 +311,7 @@ class ArcGraphQueryPort:
                 for sig in signatures
             ],
             # A179: color-invariant structural fingerprint for cross-game
-            # transfer -- indexed server-side so arc_get_transferred_rules
+            # transfer -- indexed server-side so get_transferred_rules
             # can retrieve rules by mechanic shape (action_family + change
             # magnitude), not by literal, non-transferable color values.
             "fingerprint": compute_fingerprint(

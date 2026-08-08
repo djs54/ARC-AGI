@@ -58,7 +58,7 @@ class TestRecordTransitionWritePayload:
 
         assert result["ok"] is True
         tool_name, payload = stub.calls[0]
-        assert tool_name == "arc_record_transition"
+        assert tool_name == "record_transition"
         assert payload["task_id"] == "task-1"
         assert payload["step"] == 3
         assert payload["action_id"] == "ACTION6"

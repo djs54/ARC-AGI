@@ -137,7 +137,7 @@ class TestFetchTransferredRules:
         rules = port.fetch_transferred_rules("ACTION6:small")
 
         tool_name, payload = stub.calls[0]
-        assert tool_name == "arc_get_transferred_rules"
+        assert tool_name == "get_transferred_rules"
         assert payload == {"task_id": "task-1", "fingerprint": "ACTION6:small"}
         assert rules == [{"rule_id": "rule-A", "confidence": 0.6, "source_game_id": "game-A"}]
 
