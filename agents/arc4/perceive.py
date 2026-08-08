@@ -62,7 +62,7 @@ class PerceiveAgent:
             },
         )
 
-        snapshot.metadata["graph_ingestion"] = self._ingest_snapshot(snapshot)
+        snapshot.metadata["graph_ingestion"] = self._ingest_snapshot(snapshot, state)
         return PhaseResult(phase=WorkflowPhase.PERCEIVE, payload=snapshot)
 
     @staticmethod
@@ -110,7 +110,7 @@ class PerceiveAgent:
             updated.append(PerceivedEntity(kind=entity.kind, value=entity.value, attributes=new_attributes))
         return tuple(updated)
 
-    def _ingest_snapshot(self, snapshot: PerceptionSnapshot) -> str:
+    def _ingest_snapshot(self, snapshot: PerceptionSnapshot, state: WorkflowState) -> str:
         if self._graph_query_port is None:
             return "skipped"
 
@@ -124,8 +124,12 @@ class PerceiveAgent:
             return "failed"
 
         if result is None:
+            # A183: no result to inspect -- can't confirm a real write
+            # happened, so don't count it toward world_model_node_writes.
             return "ok"
         snapshot.metadata["graph_ingestion_result"] = result
+        if isinstance(result, Mapping) and result.get("status") == "ok":
+            state.world_model_node_writes += 1
         return "ok"
 
     @staticmethod
