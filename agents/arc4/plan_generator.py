@@ -537,6 +537,33 @@ class PlanGenerator:
         for candidate in candidates:
             if candidate.action_id == action_id:
                 matched = True
+                # A184: the escalation prompt never asks the LLM for a
+                # confidence value, so `bonus` is always 0.0 in practice --
+                # the max(...) below used to grant ANY LLM pick a flat
+                # replan_feedback_bonus (~0.3) score floor, with no
+                # awareness of whether the graph had already falsified this
+                # exact action. Confirmed live: this let an action falsified
+                # twice (deeply negative score) get re-promoted over
+                # completely untested alternatives, causing a premature
+                # second_veto episode termination. The graph's verdict is
+                # authoritative once reached (same principle as A182) -- the
+                # LLM's reasoning is still preserved for transparency, it
+                # just doesn't get to override an already-falsified action's
+                # score.
+                if candidate.metadata.get("repeated_falsified"):
+                    updated.append(
+                        _CandidateRecord(
+                            action_id=candidate.action_id,
+                            book_id=candidate.book_id,
+                            payload=dict(candidate.payload),
+                            score=candidate.score,
+                            rationale="; ".join(part for part in [candidate.rationale, reason, "llm guidance overridden: action already falsified"] if part),
+                            expected_effect=candidate.expected_effect,
+                            predicted_outcome=dict(candidate.predicted_outcome or {}),
+                            metadata={**candidate.metadata, "llm_guidance": True, "llm_reason": reason, "llm_guidance_overridden": True},
+                        )
+                    )
+                    continue
                 updated.append(
                     _CandidateRecord(
                         action_id=candidate.action_id,
