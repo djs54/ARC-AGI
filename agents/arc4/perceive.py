@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import deque
 from typing import Any, Mapping, Sequence
 
@@ -27,12 +28,14 @@ class PerceiveAgent:
         normalized_grid = self._normalize_grid(grid)
         grid_hash = self._hash_grid(normalized_grid)
         grid_shape = self._grid_shape(normalized_grid)
-        entities = self._extract_entities(normalized_grid)
+        raw_entities = self._extract_entities(normalized_grid)
+        entities = self._assign_correspondence(state, raw_entities)
         grid_text = self._encode_grid_text(normalized_grid)
         grid_diff = self._diff_grids(state.previous_grid, normalized_grid)
 
         state.previous_grid_hash = grid_hash
         state.previous_grid = normalized_grid
+        state.previous_entities = entities
         state.loop_history.append(grid_hash)
         state.loop_history_pointer = len(state.loop_history) - 1
         if len(state.loop_history) > self._loop_window:
@@ -61,6 +64,51 @@ class PerceiveAgent:
 
         snapshot.metadata["graph_ingestion"] = self._ingest_snapshot(snapshot)
         return PhaseResult(phase=WorkflowPhase.PERCEIVE, payload=snapshot)
+
+    @staticmethod
+    def _assign_correspondence(
+        state: WorkflowState,
+        entities: tuple[PerceivedEntity, ...],
+        *,
+        radius: float = 6.0,
+    ) -> tuple[PerceivedEntity, ...]:
+        """A175: frame-to-frame entity correspondence via bounded-radius nearest-
+        centroid matching (same color). Every entity previously collapsed to one
+        degenerate graph node because the server keys identity on fields the
+        client never sent -- this assigns a stable `entity_ref` that survives
+        across steps for the same physical object, which the client can now
+        actually send. Simple greedy matching, not optimal bipartite assignment
+        (see backlog/A175.md Step 0) -- start simple, escalate only if live
+        evidence shows systematic misassignment.
+        """
+        previous = state.previous_entities or ()
+        claimed: set[int] = set()
+        updated: list[PerceivedEntity] = []
+        for entity in entities:
+            centroid = entity.attributes.get("centroid")
+            best_index: int | None = None
+            best_distance: float | None = None
+            if centroid is not None:
+                for index, prev_entity in enumerate(previous):
+                    if index in claimed or prev_entity.value != entity.value:
+                        continue
+                    prev_centroid = prev_entity.attributes.get("centroid")
+                    if prev_centroid is None:
+                        continue
+                    distance = math.dist(centroid, prev_centroid)
+                    if distance <= radius and (best_distance is None or distance < best_distance):
+                        best_distance = distance
+                        best_index = index
+            if best_index is not None:
+                claimed.add(best_index)
+                entity_ref = previous[best_index].attributes.get("entity_ref")
+            else:
+                entity_ref = state.next_entity_ref
+                state.next_entity_ref += 1
+            new_attributes = dict(entity.attributes)
+            new_attributes["entity_ref"] = entity_ref
+            updated.append(PerceivedEntity(kind=entity.kind, value=entity.value, attributes=new_attributes))
+        return tuple(updated)
 
     def _ingest_snapshot(self, snapshot: PerceptionSnapshot) -> str:
         if self._graph_query_port is None:

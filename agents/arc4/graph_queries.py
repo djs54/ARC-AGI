@@ -455,7 +455,26 @@ class ArcGraphQueryPort:
 
     @staticmethod
     def _serialize_entity(entity: PerceivedEntity) -> dict[str, Any]:
-        return {"kind": entity.kind, "value": entity.value, "attributes": dict(entity.attributes)}
+        # A175: arc_perceive_state keys ActionEntity identity on flat
+        # color_id/region_index fields -- previously never sent, so every
+        # entity collapsed to entity_id="{task}_e0_0" (MERGE onto one
+        # degenerate node). Send the real color plus perceive.py's stable
+        # frame-to-frame correspondence id (region_index), and the other
+        # flat fields the write path actually reads. Omit "role" rather
+        # than invent a value the client doesn't have -- the server's own
+        # ent.get("role", "unknown") default applies.
+        centroid = entity.attributes.get("centroid")
+        centroid_row, centroid_col = (centroid[0], centroid[1]) if centroid else (None, None)
+        return {
+            "kind": entity.kind,
+            "value": entity.value,
+            "color_id": entity.attributes.get("color"),
+            "region_index": entity.attributes.get("entity_ref"),
+            "centroid_row": centroid_row,
+            "centroid_col": centroid_col,
+            "pixel_count": entity.attributes.get("cell_count"),
+            "attributes": dict(entity.attributes),
+        }
 
     @staticmethod
     def _serialize_candidate(candidate: Any) -> dict[str, Any] | None:

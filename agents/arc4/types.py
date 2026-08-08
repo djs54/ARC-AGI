@@ -356,6 +356,12 @@ class WorkflowState:
     # perception can diff before/after cell changes. Deliberately excluded
     # from to_dict()/from_dict() -- runtime-only, not persisted state.
     previous_grid: list[list[Any]] | None = None
+    # A175: ephemeral cache of the prior step's entities (for frame-to-frame
+    # correspondence matching) and a monotonic counter for minting fresh
+    # correspondence ids. Deliberately excluded from to_dict()/from_dict() --
+    # runtime-only, not persisted state.
+    previous_entities: tuple[PerceivedEntity, ...] | None = None
+    next_entity_ref: int = 0
     loop_history: list[str] = field(default_factory=list)
     loop_history_pointer: int = -1
     active_goal: ResolvedGoal | None = None
