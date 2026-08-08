@@ -50,7 +50,7 @@ class TestRecordRuleEvidence:
 
         assert result["ok"] is True
         tool_name, payload = stub.calls[0]
-        assert tool_name == "arc_record_rule"
+        assert tool_name == "record_rule"
         assert payload["action_id"] == "ACTION6"
         assert payload["candidate_signatures"] == [{"action_family": "ACTION6", "from_color": 2, "to_color": 5}]
 
