@@ -155,6 +155,22 @@ class PlanGenerator:
             graph_evidence: dict[str, Any] = {}
             graph_score = 0.0
             rules: list[dict[str, Any]] = []
+            # A182: whether the graph itself already applied a falsification
+            # penalty for this action_id -- when it has, the local
+            # action_falsification_counts penalty below is skipped rather
+            # than stacked on top, since both track the identical event
+            # within a single continuous episode (confirmed live: this used
+            # to roughly double the calibrated falsification_penalty
+            # weight). The graph is treated as authoritative once it has
+            # real evidence; the local counter is a fallback only, used when
+            # the graph has nothing to say (unavailable, or genuinely no
+            # evidence yet -- these two cases are indistinguishable from
+            # fetch_per_action_evidence's return shape), so a real in-run
+            # falsification is never silently dropped, and the fallback also
+            # preserves restart-durability (a reset WorkflowState loses
+            # action_falsification_counts, but the graph's contradictions
+            # count does not).
+            graph_contradiction_penalty_applied = False
             if graph_port is not None:
                 try:
                     graph_evidence = graph_port.fetch_per_action_evidence(action_id)
@@ -165,6 +181,7 @@ class PlanGenerator:
                         graph_score = evidence_confidence
                     if evidence_contradictions > evidence_supports:
                         graph_score -= self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
+                        graph_contradiction_penalty_applied = True
                 except Exception:
                     pass
 
@@ -216,7 +233,7 @@ class PlanGenerator:
                     decay = self._limits.repeat_decay_factor ** attempts
                     score *= decay
                     score -= min(self._limits.repeat_attempt_penalty * attempts, 0.18)
-                if falsifications:
+                if falsifications and not graph_contradiction_penalty_applied:
                     score -= min(self._limits.falsification_penalty * falsifications, 0.55)
                 if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
                     score += self._limits.replan_feedback_bonus
