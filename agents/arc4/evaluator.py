@@ -318,14 +318,52 @@ class Evaluator:
 
 
 def classify_v2_termination(status: str, reason: str, exception: BaseException | None = None) -> str:
-    """Map v2 WorkflowStatus to v1 FailureTaxonomy values."""
+    """Map v2 WorkflowStatus to v1 FailureTaxonomy values.
+
+    A180: the dict below must cover every (status, reason) pair
+    agents/arc4/workflow.py's self._finish(...) call sites can actually
+    produce -- WorkflowStatus.SKIPPED ("second_veto") and
+    WorkflowStatus.TERMINATED were previously absent entirely, so both
+    silently fell through to the CRASH default even though neither is an
+    actual crash (confirmed live: a clean run with no exception anywhere
+    in its logs was labeled failure_class=crash). "completed"/"won" never
+    matched anything real -- evaluator.py's _terminal_reason surfaces
+    "solved"/"victory" (among others) as the TERMINATED reason, not those
+    two -- replaced with the real success-reason strings.
+    """
     if exception is not None:
         return classify_failure(exception).value
 
     mapping = {
+        # Success -- these are wins, not failures, and must carry no
+        # FailureTaxonomy value at all.
+        "solved": None,
+        "victory": None,
+        # Reasoning/strategy failures -- the process worked as designed,
+        # it just didn't find a way to solve the puzzle.
         "stalled": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
         "stall_detected": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        "second_veto": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        # WorkflowStatus.SKIPPED.value -- workflow.py only ever pairs this
+        # status with reason "second_veto" today, but kept as an explicit
+        # status-level fallback so a future SKIPPED reason doesn't silently
+        # default to CRASH the same way second_veto used to.
+        "skipped": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        "action_space_exhausted": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        # Generic/ambiguous terminal flags (evaluator.py::_terminal_reason
+        # can surface any of these from observation/metadata, and
+        # workflow.py falls back to the literal "terminated" when the
+        # evaluator's reason is empty) -- not proven wins, but not crashes
+        # either; default them to the same reasoning-failure bucket rather
+        # than the infrastructure-failure one.
+        "terminal": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        "terminated": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        "done": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
+        "game_over": FailureTaxonomy.STRATEGY_EXHAUSTED.value,
         "budget_exhausted": FailureTaxonomy.WALL_CLOCK_TIMEOUT.value,
+        # Actual crashes -- WorkflowStatus.CRASHED is explicit here rather
+        # than relying on it falling through to the default.
+        "crashed": FailureTaxonomy.CRASH.value,
         "crash": FailureTaxonomy.CRASH.value,
         "crash_in_perceive": FailureTaxonomy.CRASH.value,
         "crash_in_resolve": FailureTaxonomy.CRASH.value,
@@ -333,7 +371,5 @@ def classify_v2_termination(status: str, reason: str, exception: BaseException |
         "crash_in_vet": FailureTaxonomy.CRASH.value,
         "crash_in_execute": FailureTaxonomy.CRASH.value,
         "crash_in_evaluate": FailureTaxonomy.CRASH.value,
-        "completed": None,
-        "won": None,
     }
     return mapping.get(reason, mapping.get(status, FailureTaxonomy.CRASH.value))
