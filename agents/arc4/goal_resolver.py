@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from .ports import GraphQueryPort, LLMMessage, LLMPort
+from .rule_extraction import compute_fingerprint
 from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowPhase, WorkflowState
 
 
@@ -108,6 +109,31 @@ class GoalResolver:
                     if isinstance(history, Mapping) and history.get("changed_count_total", 0) > 0:
                         confidence = min(0.75, confidence + 0.08)
                         evidence.append("entity_history:has_changed")
+
+                        # A179: cross-game transfer -- fingerprint the entity's
+                        # most recent observed transition (action_family +
+                        # color-invariant magnitude bucket) and check whether
+                        # structurally similar mechanics elsewhere tend to be
+                        # meaningful. Deliberately a much smaller boost than
+                        # in-game evidence above -- transfer is a lead, not a
+                        # fact, and must not be trusted as much as a
+                        # confirmed-in-this-game observation.
+                        transitions = history.get("transitions") or []
+                        fetch_transferred = getattr(graph_port, "fetch_transferred_rules", None)
+                        if fetch_transferred is not None and transitions:
+                            latest = transitions[-1] if isinstance(transitions[-1], Mapping) else {}
+                            transfer_action_id = latest.get("action_id")
+                            if transfer_action_id:
+                                transfer_changed_count = latest.get("changed_count", history.get("changed_count_total", 0))
+                                fingerprint = compute_fingerprint(str(transfer_action_id), int(transfer_changed_count or 0))
+                                try:
+                                    transferred = fetch_transferred(fingerprint.key())
+                                except Exception:
+                                    transferred = []
+                                if transferred:
+                                    best_transfer_confidence = max((r.get("confidence", 0.0) for r in transferred), default=0.0)
+                                    confidence = min(0.75, confidence + best_transfer_confidence * 0.05)
+                                    evidence.append("entity_history:transfer_match")
 
             hypotheses.append(
                 GoalHypothesis(
