@@ -29,12 +29,21 @@ def _resolve_max_retries(provider: str, llm_cfg: Dict[str, Any]) -> int | None:
 class LLMClient:
     """Small wrapper over an OpenAI-compatible chat endpoint."""
 
+    # A181: every achat() caller in this codebase (goal-disambiguation,
+    # action-pick) asks for a short JSON object with a brief "reason" field --
+    # never a long-form response. Without a cap, a local model can fail to
+    # emit a stop token and run away (observed live: 17,000+ decoded tokens
+    # for what should be well under 100). This is a generous ceiling for the
+    # real shape of these responses, not a tight one.
+    DEFAULT_MAX_TOKENS = 512
+
     def __init__(self, client: Any, model: str):
         self._client = client
         self._model = model
         self.last_usage: Optional[Dict[str, int]] = None
 
     def chat(self, messages: list[dict], **kwargs) -> str:
+        kwargs.setdefault("max_tokens", self.DEFAULT_MAX_TOKENS)
         response = self._client.chat.completions.create(
             model=self._model,
             messages=messages,
