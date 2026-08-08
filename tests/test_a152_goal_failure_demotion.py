@@ -160,7 +160,7 @@ def test_grounding_gate_does_not_suppress_fresh_alternative():
     resolver_full = GoalResolver(limits)
 
     class _StaticHypothesesResolver(GoalResolver):
-        def _tier_one_hypotheses(self, state, perception):  # noqa: D401
+        def _tier_one_hypotheses(self, state, perception, *, graph_port=None):  # noqa: D401
             return [
                 GoalHypothesis(goal_id="g1", description="active goal", confidence=0.57),
                 GoalHypothesis(goal_id="g2", description="fresh alternative", confidence=0.65),

@@ -37,7 +37,7 @@ class GoalResolver:
         graph_port: GraphQueryPort | None = None,
         llm_port: LLMPort | None = None,
     ) -> PhaseResult[ResolvedGoal]:
-        hypotheses = self._tier_one_hypotheses(state, perception)
+        hypotheses = self._tier_one_hypotheses(state, perception, graph_port=graph_port)
         graph_evidence: list[dict[str, Any]] = []
 
         if graph_port is not None:
@@ -78,19 +78,43 @@ class GoalResolver:
             metadata={"hypothesis_count": len(hypotheses)},
         )
 
-    def _tier_one_hypotheses(self, state: WorkflowState, perception: PerceptionSnapshot) -> list[GoalHypothesis]:
+    def _tier_one_hypotheses(
+        self,
+        state: WorkflowState,
+        perception: PerceptionSnapshot,
+        *,
+        graph_port: GraphQueryPort | None = None,
+    ) -> list[GoalHypothesis]:
         hypotheses: list[GoalHypothesis] = []
 
         for index, entity in enumerate(perception.entities[:3]):
             goal_id = self._slugify(f"{entity.kind}-{entity.value or index}")
             description = self._describe_entity_goal(entity.kind, entity.value, perception)
             confidence = min(0.75, self._limits.min_heuristic_confidence + 0.12 + (0.05 * (2 - min(index, 2))))
+            evidence = [f"entity:{entity.kind}:{entity.value}"]
+
+            # A176: consume A175/A176's persisted transition history -- an
+            # entity with a real history of changing is meaningfully more
+            # likely to be a goal-relevant object than one that's never been
+            # observed to change. Boost, don't replace, the heuristic score.
+            entity_ref = entity.attributes.get("entity_ref")
+            if graph_port is not None and entity_ref is not None:
+                fetch_history = getattr(graph_port, "fetch_entity_history", None)
+                if fetch_history is not None:
+                    try:
+                        history = fetch_history(entity_ref)
+                    except Exception:
+                        history = {}
+                    if isinstance(history, Mapping) and history.get("changed_count_total", 0) > 0:
+                        confidence = min(0.75, confidence + 0.08)
+                        evidence.append("entity_history:has_changed")
+
             hypotheses.append(
                 GoalHypothesis(
                     goal_id=goal_id,
                     description=description,
                     confidence=confidence,
-                    evidence=(f"entity:{entity.kind}:{entity.value}",),
+                    evidence=tuple(evidence),
                     metadata={"tier": 1, "entity_index": index, "attributes": dict(entity.attributes)},
                 )
             )
