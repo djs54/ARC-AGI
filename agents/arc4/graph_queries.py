@@ -7,7 +7,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from .rule_extraction import extract_candidate_signatures
+from .rule_extraction import compute_fingerprint, extract_candidate_signatures
 from .types import ExecutionResult, GoalHypothesis, PerceivedEntity, PerceptionSnapshot, PlanningResult, ResolvedGoal, VetDecision
 
 
@@ -39,6 +39,9 @@ ARC_V2_TOOL_NAMES = {
     # see docs/handoff/B278-rules-as-nodes.md.
     "record_rule_evidence": "arc_record_rule",
     "fetch_rules_for_action": "arc_get_rules_for_action",
+    # A179: cross-game rule transfer by structural (color-invariant)
+    # fingerprint -- see docs/handoff/B278-transfer-via-structural-signature.md.
+    "fetch_transferred_rules": "arc_get_transferred_rules",
 }
 
 
@@ -309,8 +312,38 @@ class ArcGraphQueryPort:
                 {"action_family": sig.action_family, "from_color": sig.from_color, "to_color": sig.to_color}
                 for sig in signatures
             ],
+            # A179: color-invariant structural fingerprint for cross-game
+            # transfer -- indexed server-side so arc_get_transferred_rules
+            # can retrieve rules by mechanic shape (action_family + change
+            # magnitude), not by literal, non-transferable color values.
+            "fingerprint": compute_fingerprint(
+                execution.action_id,
+                int(grid_diff.get("changed_count", len(changed_cells)) or 0),
+            ).key(),
         }
         return self._normalize_write_result(self._call_tool("record_rule_evidence", payload), tool_key="record_rule_evidence")
+
+    def fetch_transferred_rules(self, fingerprint_key: str) -> list[dict[str, Any]]:
+        """A179: rules from *other* games whose structural fingerprint
+        matches -- cross-game transfer, deliberately separate from
+        fetch_rules_for_action's in-game-only scope (A164 game_id
+        boundaries apply on the server side: this searches other games,
+        not the current one)."""
+        result = self._call_tool("fetch_transferred_rules", {"task_id": self.task_id, "fingerprint": fingerprint_key})
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return []
+        rules = result.get("rules", [])
+        if not isinstance(rules, (list, tuple)):
+            return []
+        return [
+            {
+                "rule_id": rule.get("rule_id"),
+                "confidence": float(rule.get("confidence", 0.0) or 0.0),
+                "source_game_id": rule.get("source_game_id"),
+            }
+            for rule in rules
+            if isinstance(rule, Mapping)
+        ]
 
     @staticmethod
     def _summarize_color_transitions(changed_cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

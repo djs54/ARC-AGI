@@ -104,3 +104,41 @@ def classify_signature(signature: RuleSignature, existing_rules: Sequence[Existi
         "confirmed_rule_ids": confirmed,
         "falsified_rule_ids": falsified,
     }
+
+
+# ── A179: structural fingerprint for cross-game transfer ──────────────────
+#
+# action_family (ACTION1..ACTION7) is already game-invariant -- fixed by the
+# ARC-AGI-3 action vocabulary, not a per-game palette choice. Literal colors
+# are exactly the opposite: "color 3" means nothing across two games with
+# different palettes. So the fingerprint keeps action_family and replaces
+# colors with a magnitude bucket (how many cells a transition touched) --
+# color-invariant, but still captures real shape difference ("this action
+# toggles one cell" vs "this action recolors a whole region" are genuinely
+# different mechanics, and that distinction *does* transfer across palettes).
+
+_MAGNITUDE_SMALL_MAX = 4
+_MAGNITUDE_LARGE_MIN = 20
+
+
+def magnitude_class(changed_count: int) -> str:
+    if changed_count <= 1:
+        return "single"
+    if changed_count <= _MAGNITUDE_SMALL_MAX:
+        return "small"
+    if changed_count < _MAGNITUDE_LARGE_MIN:
+        return "medium"
+    return "large"
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralFingerprint:
+    action_family: str
+    magnitude: str
+
+    def key(self) -> str:
+        return f"{self.action_family}:{self.magnitude}"
+
+
+def compute_fingerprint(action_id: str, changed_count: int) -> StructuralFingerprint:
+    return StructuralFingerprint(action_family=action_family(action_id), magnitude=magnitude_class(changed_count))
