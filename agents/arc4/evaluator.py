@@ -201,7 +201,27 @@ class Evaluator:
         )
 
         evaluation.metadata["graph_recording"] = self._record_evaluation(evaluation)
+        evaluation.metadata["transition_recording"] = self._record_transition(perception, execution)
         return PhaseResult(phase=WorkflowPhase.EVALUATE, status=PhaseStatus.TERMINATE if decision == WorkflowDecision.TERMINATE else PhaseStatus.OK, payload=evaluation, reason=reason or None)
+
+    def _record_transition(self, perception: Any, execution: ExecutionResult) -> str:
+        """A176: persist A170's grid_diff as a graph State Node."""
+        if self._graph_query_port is None:
+            return "skipped"
+
+        record = getattr(self._graph_query_port, "record_transition", None)
+        if record is None:
+            return "skipped"
+
+        grid_diff = perception.metadata.get("grid_diff") if isinstance(getattr(perception, "metadata", None), Mapping) else None
+        if not grid_diff:
+            return "skipped"
+
+        try:
+            record(execution, grid_diff, getattr(perception, "entities", ()))
+        except Exception:
+            return "failed"
+        return "ok"
 
     def _record_evaluation(self, evaluation: EvaluationResult) -> str:
         if self._graph_query_port is None:

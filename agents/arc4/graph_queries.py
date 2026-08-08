@@ -26,6 +26,13 @@ ARC_V2_TOOL_NAMES = {
     "fetch_mechanic_priors": "arc_get_mechanic_priors",
     "check_action_gate": "arc_check_action_gate",
     "record_reward_prediction_error": "arc_record_reward_prediction_error",
+    # A176: persist A170's before/after diffs as graph State Nodes instead of
+    # a one-shot prompt fragment. Server side not yet implemented -- calls
+    # degrade to capability_missing via the existing strict=False path until
+    # the hand-off (docs/handoff/B278-persist-transitions-as-state-nodes.md)
+    # lands.
+    "record_transition": "arc_record_transition",
+    "fetch_entity_history": "arc_get_entity_history",
 }
 
 
@@ -149,6 +156,20 @@ class ArcGraphQueryPort:
             }
         return {"path_exists": False, "supports": [], "contradicts": []}
 
+    def fetch_entity_history(self, entity_ref: Any) -> dict[str, Any]:
+        """A176: what has happened to this entity across the game so far --
+        the consumer query for A176's persisted Transition nodes."""
+        result = self._call_tool("fetch_entity_history", {"task_id": self.task_id, "entity_ref": entity_ref})
+        if isinstance(result, Mapping):
+            if result.get("status") == "capability_missing":
+                return {"transitions": [], "changed_count_total": 0}
+            transitions = result.get("transitions", [])
+            return {
+                "transitions": list(transitions) if isinstance(transitions, (list, tuple)) else [],
+                "changed_count_total": int(result.get("changed_count_total", 0) or 0),
+            }
+        return {"transitions": [], "changed_count_total": 0}
+
     @staticmethod
     def _extract_action_ids(result: Any) -> list[str]:
         """Extract a list of action ID strings from a tool result."""
@@ -210,6 +231,56 @@ class ArcGraphQueryPort:
             "entities_affected": list(self._entities_affected(execution.observation)),
         }
         return self._normalize_write_result(self._call_tool("record_action_effect", payload), tool_key="record_action_effect")
+
+    def record_transition(
+        self,
+        execution: ExecutionResult,
+        grid_diff: Mapping[str, Any],
+        entities: Sequence[Any] = (),
+    ) -> dict[str, Any]:
+        """A176: persist A170's before/after cell diff as a graph State Node,
+        summarized as a bounded color-transition histogram (not per-cell --
+        see backlog/A176.md Step 0) and attributed to the A175 entity_ref
+        whose bbox contains the most changed cells, when determinable."""
+        changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
+        if not changed_cells:
+            return {"status": "no_changes", "recorded": False}
+
+        histogram: dict[tuple[Any, Any], int] = {}
+        for cell in changed_cells:
+            key = (cell.get("from"), cell.get("to"))
+            histogram[key] = histogram.get(key, 0) + 1
+        color_transitions = [{"from": frm, "to": to, "count": count} for (frm, to), count in histogram.items()]
+
+        payload = {
+            "task_id": self.task_id,
+            "step": self._execution_step(execution),
+            "action_id": execution.action_id,
+            "changed_count": int(grid_diff.get("changed_count", len(changed_cells)) or 0),
+            "color_transitions": color_transitions,
+            "entity_ref": self._attribute_entity(changed_cells, entities),
+        }
+        return self._normalize_write_result(self._call_tool("record_transition", payload), tool_key="record_transition")
+
+    @staticmethod
+    def _attribute_entity(changed_cells: Sequence[Mapping[str, Any]], entities: Sequence[Any]) -> Any:
+        best_ref: Any = None
+        best_count = 0
+        for entity in entities:
+            attributes = getattr(entity, "attributes", None)
+            bbox = attributes.get("bbox") if isinstance(attributes, Mapping) else None
+            if not bbox or len(bbox) != 4:
+                continue
+            min_row, min_col, max_row, max_col = bbox
+            count = sum(
+                1
+                for cell in changed_cells
+                if min_row <= cell.get("row", -1) <= max_row and min_col <= cell.get("col", -1) <= max_col
+            )
+            if count > best_count:
+                best_count = count
+                best_ref = attributes.get("entity_ref")
+        return best_ref
 
     def record_evaluation(self, evaluation: Any) -> dict[str, Any]:
         metadata = evaluation.metadata if isinstance(getattr(evaluation, "metadata", None), Mapping) else {}
