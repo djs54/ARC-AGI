@@ -201,11 +201,11 @@ class Evaluator:
         )
 
         evaluation.metadata["graph_recording"] = self._record_evaluation(evaluation)
-        evaluation.metadata["transition_recording"] = self._record_transition(perception, execution)
-        evaluation.metadata["rule_recording"] = self._record_rule_evidence(perception, execution)
+        evaluation.metadata["transition_recording"] = self._record_transition(perception, execution, state)
+        evaluation.metadata["rule_recording"] = self._record_rule_evidence(perception, execution, state)
         return PhaseResult(phase=WorkflowPhase.EVALUATE, status=PhaseStatus.TERMINATE if decision == WorkflowDecision.TERMINATE else PhaseStatus.OK, payload=evaluation, reason=reason or None)
 
-    def _record_transition(self, perception: Any, execution: ExecutionResult) -> str:
+    def _record_transition(self, perception: Any, execution: ExecutionResult, state: WorkflowState) -> str:
         """A176: persist A170's grid_diff as a graph State Node."""
         if self._graph_query_port is None:
             return "skipped"
@@ -219,12 +219,15 @@ class Evaluator:
             return "skipped"
 
         try:
-            record(execution, grid_diff, getattr(perception, "entities", ()))
+            result = record(execution, grid_diff, getattr(perception, "entities", ()))
         except Exception:
             return "failed"
+        # A183: only a confirmed real write counts toward world_model_node_writes.
+        if isinstance(result, Mapping) and result.get("status") == "ok":
+            state.world_model_node_writes += 1
         return "ok"
 
-    def _record_rule_evidence(self, perception: Any, execution: ExecutionResult) -> str:
+    def _record_rule_evidence(self, perception: Any, execution: ExecutionResult, state: WorkflowState) -> str:
         """A177: extract and send candidate rule signatures for this step's
         observed transitions."""
         if self._graph_query_port is None:
@@ -239,9 +242,13 @@ class Evaluator:
             return "skipped"
 
         try:
-            record(execution, grid_diff)
+            result = record(execution, grid_diff)
         except Exception:
             return "failed"
+        # A183: a real rule create/confirm/falsify writes PREDICTS/
+        # CONFIRMED_BY/FALSIFIED_BY edges -- only count a confirmed write.
+        if isinstance(result, Mapping) and result.get("status") == "ok":
+            state.world_model_edge_writes += 1
         return "ok"
 
     @staticmethod

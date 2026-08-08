@@ -373,6 +373,17 @@ class WorkflowState:
     latest_veto_alternative: PlanCandidate | None = None
     replan_passes: int = 0
     crash_traceback: str | None = None
+    # A183: running counts of *confirmed* successful graph writes this
+    # episode (result status == "ok", not "no_changes"/"capability_missing"/
+    # "error") -- node_writes for ingest_perception (GridEntity/GridSnapshot)
+    # and record_transition (Transition), edge_writes for record_rule_evidence
+    # (PREDICTS/CONFIRMED_BY/FALSIFIED_BY). A client-side approximation of
+    # real graph growth, not an exact node/edge count -- replaces the
+    # previous world_model_node_count/edge_count telemetry, which counted
+    # unrelated in-memory list sizes (perceived entities, goal/plan
+    # alternatives) and had no connection to the actual graph at all.
+    world_model_node_writes: int = 0
+    world_model_edge_writes: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -392,6 +403,8 @@ class WorkflowState:
             "latest_veto_alternative": self.latest_veto_alternative.to_dict() if self.latest_veto_alternative else None,
             "replan_passes": self.replan_passes,
             "crash_traceback": self.crash_traceback,
+            "world_model_node_writes": self.world_model_node_writes,
+            "world_model_edge_writes": self.world_model_edge_writes,
         }
 
     @classmethod
@@ -413,6 +426,8 @@ class WorkflowState:
             latest_veto_alternative=PlanCandidate.from_dict(d["latest_veto_alternative"]) if d.get("latest_veto_alternative") else None,
             replan_passes=d.get("replan_passes", 0),
             crash_traceback=d.get("crash_traceback"),
+            world_model_node_writes=d.get("world_model_node_writes", 0),
+            world_model_edge_writes=d.get("world_model_edge_writes", 0),
         )
 
 

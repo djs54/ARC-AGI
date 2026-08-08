@@ -159,8 +159,8 @@ class ArcV2Telemetry:
             "step": self._cycle_index + 1,
             "action_id": self._action_id(),
             "goal_id": self._goal_id(),
-            "world_model_node_count": self._world_model_node_count(perception, goal, plan),
-            "world_model_edge_count": self._world_model_edge_count(goal, plan, execution),
+            "world_model_node_count": self._world_model_node_count(state),
+            "world_model_edge_count": self._world_model_edge_count(state),
             "world_model_contradiction_count": int(getattr(state, "action_falsification_counts", {}).get(self._contradiction_lookup_key() or "", 0)) if state is not None else 0,
             "world_model_demotion_count": 0,
             "reasoning_skip_count": 0,
@@ -272,18 +272,19 @@ class ArcV2Telemetry:
                 count += 1
         return count
 
-    def _world_model_node_count(self, perception: Any, goal: ResolvedGoal | None, plan: PlanningResult | None) -> int:
-        perception_count = len(getattr(perception, "entities", ()) or []) if perception is not None else 0
-        goal_count = 1 if goal is not None else 0
-        alternative_count = len(goal.alternatives) if goal is not None else 0
-        plan_count = len(plan.alternatives) if plan is not None else 0
-        return perception_count + goal_count + alternative_count + plan_count
+    def _world_model_node_count(self, state: WorkflowState | None) -> int:
+        # A183: was perceived-entity/goal/plan list sizes with no connection
+        # to the real graph -- now the running count of confirmed successful
+        # ingest_perception/record_transition writes this episode (see
+        # WorkflowState.world_model_node_writes).
+        return int(getattr(state, "world_model_node_writes", 0)) if state is not None else 0
 
-    def _world_model_edge_count(self, goal: ResolvedGoal | None, plan: PlanningResult | None, execution: ExecutionResult | None) -> int:
-        goal_edges = len(goal.metadata.get("graph_evidence", [])) if goal is not None else 0
-        plan_edges = len(plan.metadata.get("graph_records", [])) if plan is not None else 0
-        execution_edges = 1 if execution is not None else 0
-        return goal_edges + plan_edges + execution_edges
+    def _world_model_edge_count(self, state: WorkflowState | None) -> int:
+        # A183: was goal_evidence/graph_records list sizes with no connection
+        # to the real graph -- now the running count of confirmed successful
+        # record_rule_evidence writes this episode (see
+        # WorkflowState.world_model_edge_writes).
+        return int(getattr(state, "world_model_edge_writes", 0)) if state is not None else 0
 
     @staticmethod
     def _solve_phase_summary(state: WorkflowState) -> dict[str, Any]:
