@@ -25,6 +25,15 @@ class PlanGeneratorLimits:
     # unknown action, additive to (not a replacement for) the existing
     # falsification_penalty mechanism.
     rule_confidence_weight: float = 0.2
+    # A178: value-of-information bonuses for untested actions, replacing the
+    # flat untested_bonus when live rules exist to reason about. An action
+    # whose live rules already agree gets LESS bonus than the flat default
+    # (we already know roughly what happens -- low information value in
+    # testing it again); an action whose live rules genuinely disagree gets
+    # MORE (testing it will falsify at least one competing theory).
+    voi_agreement_bonus: float = 0.10
+    voi_disagreement_unit: float = 0.15
+    voi_max_bonus: float = 0.40
     replan_feedback_bonus: float = 0.3
     llm_low_score_threshold: float = 0.4
     llm_patience_steps: int = 2
@@ -145,6 +154,7 @@ class PlanGenerator:
             # A135: Enrich graph_score with per-action evidence from the graph
             graph_evidence: dict[str, Any] = {}
             graph_score = 0.0
+            rules: list[dict[str, Any]] = []
             if graph_port is not None:
                 try:
                     graph_evidence = graph_port.fetch_per_action_evidence(action_id)
@@ -165,12 +175,12 @@ class PlanGenerator:
                 fetch_rules = getattr(graph_port, "fetch_rules_for_action", None)
                 if fetch_rules is not None:
                     try:
-                        rules = fetch_rules(action_id)
+                        rules = fetch_rules(action_id) or []
                         live_rule_confidences = [r.get("confidence", 0.0) for r in rules if not r.get("falsified")]
                         if live_rule_confidences:
                             graph_score += max(live_rule_confidences) * self._limits.rule_confidence_weight
                     except Exception:
-                        pass
+                        rules = []
 
             target_variants: list[tuple[str, dict[str, Any], dict[str, Any]]] = [(action_id, {}, {})]
             if action_id == "ACTION6":
@@ -201,7 +211,7 @@ class PlanGenerator:
                 if goal_alignment:
                     score += self._limits.goal_alignment_bonus
                 if is_untested:
-                    score += self._limits.untested_bonus
+                    score += self._voi_bonus(rules)
                 else:
                     decay = self._limits.repeat_decay_factor ** attempts
                     score *= decay
@@ -277,6 +287,29 @@ class PlanGenerator:
                 )
 
         return candidates
+
+    def _voi_bonus(self, rules: Sequence[Mapping[str, Any]]) -> float:
+        """A178: value-of-information bonus for an untested action, based on
+        how much its live (unfalsified) rules disagree about what it does --
+        replacing the flat "prefer novelty" untested_bonus with something
+        closer to "what experiment is worth paying for next" (the
+        architecture's own mission statement). Falls back to the flat bonus
+        when no rules exist yet (the common early-game case)."""
+        live_rules = [rule for rule in rules if not rule.get("falsified")]
+        if not live_rules:
+            return self._limits.untested_bonus
+
+        distinct_predictions = {rule.get("to_color") for rule in live_rules}
+        if len(distinct_predictions) <= 1:
+            # Rules agree (or there's only one) -- we already have a decent
+            # idea what this does, so testing it again teaches less than a
+            # genuinely novel, disagreement-backed action would.
+            return self._limits.voi_agreement_bonus
+
+        return min(
+            self._limits.voi_max_bonus,
+            self._limits.voi_disagreement_unit * len(distinct_predictions),
+        )
 
     def _fallback_candidate(self, state: WorkflowState, goal: ResolvedGoal, perception: PerceptionSnapshot) -> _CandidateRecord:
         action_id = self._slugify(f"probe-{goal.selected.goal_id}")
