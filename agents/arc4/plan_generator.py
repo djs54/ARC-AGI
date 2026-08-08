@@ -151,37 +151,29 @@ class PlanGenerator:
         for action_id in available_actions[: self._limits.max_candidates]:
             goal_alignment = self._action_matches_goal(action_id, goal)
 
-            # A135: Enrich graph_score with per-action evidence from the graph
+            # A135: Enrich graph_score with per-action evidence from the graph.
+            # A185: split into a positive component (evidence_confidence, A177
+            # rule confidence) and a contradiction-penalty component, computed
+            # once per action_id (family-level) -- kept separate because for
+            # ACTION6's per-coordinate click targets, the family-level
+            # contradiction penalty must not be applied to a book_id (a
+            # specific coordinate) that has never itself been attempted (see
+            # the per-book_id loop below). The positive signal still
+            # legitimately transfers to a fresh coordinate; the penalty does not.
             graph_evidence: dict[str, Any] = {}
-            graph_score = 0.0
+            graph_positive_score = 0.0
+            graph_contradiction_penalty = 0.0
             rules: list[dict[str, Any]] = []
-            # A182: whether the graph itself already applied a falsification
-            # penalty for this action_id -- when it has, the local
-            # action_falsification_counts penalty below is skipped rather
-            # than stacked on top, since both track the identical event
-            # within a single continuous episode (confirmed live: this used
-            # to roughly double the calibrated falsification_penalty
-            # weight). The graph is treated as authoritative once it has
-            # real evidence; the local counter is a fallback only, used when
-            # the graph has nothing to say (unavailable, or genuinely no
-            # evidence yet -- these two cases are indistinguishable from
-            # fetch_per_action_evidence's return shape), so a real in-run
-            # falsification is never silently dropped, and the fallback also
-            # preserves restart-durability (a reset WorkflowState loses
-            # action_falsification_counts, but the graph's contradictions
-            # count does not).
-            graph_contradiction_penalty_applied = False
             if graph_port is not None:
                 try:
                     graph_evidence = graph_port.fetch_per_action_evidence(action_id)
                     evidence_confidence = graph_evidence.get("confidence", 0.0)
                     evidence_contradictions = graph_evidence.get("contradictions", 0)
                     evidence_supports = graph_evidence.get("supports", 0)
-                    if evidence_confidence > graph_score:
-                        graph_score = evidence_confidence
+                    if evidence_confidence > graph_positive_score:
+                        graph_positive_score = evidence_confidence
                     if evidence_contradictions > evidence_supports:
-                        graph_score -= self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
-                        graph_contradiction_penalty_applied = True
+                        graph_contradiction_penalty = self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
                 except Exception:
                     pass
 
@@ -195,7 +187,7 @@ class PlanGenerator:
                         rules = fetch_rules(action_id) or []
                         live_rule_confidences = [r.get("confidence", 0.0) for r in rules if not r.get("falsified")]
                         if live_rule_confidences:
-                            graph_score += max(live_rule_confidences) * self._limits.rule_confidence_weight
+                            graph_positive_score += max(live_rule_confidences) * self._limits.rule_confidence_weight
                     except Exception:
                         rules = []
 
@@ -224,7 +216,26 @@ class PlanGenerator:
                 is_untested = attempts == 0
                 repeated_falsified = falsifications >= 2
 
-                score = graph_score
+                # A185: book_id != action_id only for ACTION6's per-coordinate
+                # click targets. A genuinely untested coordinate must not
+                # inherit the family-wide contradiction penalty computed from
+                # OTHER coordinates' failures (confirmed live: never-clicked
+                # coordinates scored -4.58, worse than actually-falsified
+                # actions, despite their own rationale saying "untested"). For
+                # non-click actions book_id == action_id always, so the
+                # family-level penalty IS this action's own evidence and must
+                # still apply even on a fresh-this-episode attempt (e.g.
+                # persisted cross-session evidence) -- withholding the penalty
+                # is deliberately scoped to the click-target case only, not to
+                # every untested candidate.
+                is_distinct_click_target = book_id != action_id
+                withhold_family_penalty = is_untested and is_distinct_click_target
+                if withhold_family_penalty:
+                    score = graph_positive_score
+                    graph_contradiction_penalty_applied = False
+                else:
+                    score = graph_positive_score - graph_contradiction_penalty
+                    graph_contradiction_penalty_applied = graph_contradiction_penalty > 0
                 if goal_alignment:
                     score += self._limits.goal_alignment_bonus
                 if is_untested:
