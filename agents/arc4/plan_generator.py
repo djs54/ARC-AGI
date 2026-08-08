@@ -20,6 +20,11 @@ class PlanGeneratorLimits:
     goal_alignment_bonus: float = 0.18
     repeat_attempt_penalty: float = 0.04
     falsification_penalty: float = 0.16
+    # A177: how much a live (unfalsified) rule's confidence boosts a
+    # candidate's score -- a known causal claim deserves more trust than an
+    # unknown action, additive to (not a replacement for) the existing
+    # falsification_penalty mechanism.
+    rule_confidence_weight: float = 0.2
     replan_feedback_bonus: float = 0.3
     llm_low_score_threshold: float = 0.4
     llm_patience_steps: int = 2
@@ -152,6 +157,20 @@ class PlanGenerator:
                         graph_score -= self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
                 except Exception:
                     pass
+
+                # A177: rule evidence -- a candidate action with a live, unfalsified
+                # causal rule behind it is more trustworthy than one with none, a
+                # strict generalization of the falsification_penalty mechanism
+                # above (which only ever penalizes, never rewards a real known effect).
+                fetch_rules = getattr(graph_port, "fetch_rules_for_action", None)
+                if fetch_rules is not None:
+                    try:
+                        rules = fetch_rules(action_id)
+                        live_rule_confidences = [r.get("confidence", 0.0) for r in rules if not r.get("falsified")]
+                        if live_rule_confidences:
+                            graph_score += max(live_rule_confidences) * self._limits.rule_confidence_weight
+                    except Exception:
+                        pass
 
             target_variants: list[tuple[str, dict[str, Any], dict[str, Any]]] = [(action_id, {}, {})]
             if action_id == "ACTION6":

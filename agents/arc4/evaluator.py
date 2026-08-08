@@ -202,6 +202,7 @@ class Evaluator:
 
         evaluation.metadata["graph_recording"] = self._record_evaluation(evaluation)
         evaluation.metadata["transition_recording"] = self._record_transition(perception, execution)
+        evaluation.metadata["rule_recording"] = self._record_rule_evidence(perception, execution)
         return PhaseResult(phase=WorkflowPhase.EVALUATE, status=PhaseStatus.TERMINATE if decision == WorkflowDecision.TERMINATE else PhaseStatus.OK, payload=evaluation, reason=reason or None)
 
     def _record_transition(self, perception: Any, execution: ExecutionResult) -> str:
@@ -213,7 +214,7 @@ class Evaluator:
         if record is None:
             return "skipped"
 
-        grid_diff = perception.metadata.get("grid_diff") if isinstance(getattr(perception, "metadata", None), Mapping) else None
+        grid_diff = self._grid_diff(perception)
         if not grid_diff:
             return "skipped"
 
@@ -222,6 +223,33 @@ class Evaluator:
         except Exception:
             return "failed"
         return "ok"
+
+    def _record_rule_evidence(self, perception: Any, execution: ExecutionResult) -> str:
+        """A177: extract and send candidate rule signatures for this step's
+        observed transitions."""
+        if self._graph_query_port is None:
+            return "skipped"
+
+        record = getattr(self._graph_query_port, "record_rule_evidence", None)
+        if record is None:
+            return "skipped"
+
+        grid_diff = self._grid_diff(perception)
+        if not grid_diff:
+            return "skipped"
+
+        try:
+            record(execution, grid_diff)
+        except Exception:
+            return "failed"
+        return "ok"
+
+    @staticmethod
+    def _grid_diff(perception: Any) -> Mapping[str, Any] | None:
+        metadata = getattr(perception, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return None
+        return metadata.get("grid_diff") or None
 
     def _record_evaluation(self, evaluation: EvaluationResult) -> str:
         if self._graph_query_port is None:
