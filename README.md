@@ -1,12 +1,10 @@
 # ARC_AGI
 
-`ARC_AGI/` is the repo-shaped extraction workspace for the ARC effort.
+`ARC_AGI` builds a reasoning harness: scaffolding that lets cheaper, local-friendly LLMs work through difficult puzzles and problems they can't solve well unprompted. Instead of asking one model call to do everything, the harness wraps a model in a structured solve loop — perceive, resolve a goal, plan, vet the plan, execute, evaluate — backed by a persistent, graph-shaped world model that tracks what's been tried, what's been falsified, and what transfers, so the model doesn't have to re-derive it every step.
 
-The goal is to keep ARC work separate from the core HippoCampy/Campy memory product:
+ARC-AGI-3 is the current benchmark and proving ground for that harness, not the end goal. The reasoning loop and the world-model machinery are the actual product; the puzzle suite is the yardstick that keeps it honest.
 
-- `hippocampy` remains the local memory engine
-- `ARC_AGI` becomes the ARC solver/evaluation project
-- `ARC_AGI` consumes `hippocampy` as a dependency
+`hippocampy` is a dependency, not the focus: it's the local memory engine that gives the harness persistent, graph-backed memory (belief state, falsification tracking, cross-game transfer) over MCP. `ARC_AGI` consumes it; it does not develop it, and this repo's design decisions are driven by the harness's needs, not hippocampy's.
 
 For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -27,7 +25,7 @@ For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE
 
 ## Dependency Model
 
-This workspace is intentionally not a memory engine by itself.
+This workspace is intentionally not a memory engine by itself. HippoCampy is a supporting dependency the harness relies on for memory — it is not a second focus of this repo.
 
 Runtime ARC paths rely on HippoCampy for:
 
@@ -105,7 +103,7 @@ The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 m
 
 ## Recommendation
 
-Keep `ARC_AGI` as the ARC lab and benchmark project.
-Keep `hippocampy` as the memory product.
+Keep `ARC_AGI` as the reasoning-harness project: the solve loop, the graph-backed world model, and the planning/vetting machinery that let cheaper LLMs punch above their weight on hard puzzles.
+Keep `hippocampy` as the memory dependency it consumes — a supporting product, not a co-equal focus of this repo.
 
 That separation matches the product direction much better than continuing to let both efforts share the same top-level codebase.
