@@ -7,9 +7,25 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from .mechanic_fusion import TransferredRuleRecord, fuse_transferred_rules
 from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .rule_extraction import compute_fingerprint
 from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowPhase, WorkflowState
+
+# A179: cross-game single-rule transfer is a lead, not a fact -- its
+# contribution must be strictly smaller than the in-game
+# entity_history:has_changed boost (0.08 flat, see _tier_one_hypotheses).
+_TRANSFER_CONFIDENCE_MULTIPLIER = 0.05
+
+# A186: a fused Mechanic (multiple transferred rules that structurally agree)
+# is corroborating evidence *across* transferred rules, not stronger evidence
+# than a single transfer match -- its multiplier is exactly half of the
+# single-rule transfer multiplier above, and mechanic_fusion.py's merge
+# policy additionally caps a fused Mechanic's confidence strictly below its
+# strongest member's confidence. Together these guarantee
+# 0 < mechanic_boost < transfer_boost whenever a confident fusion exists
+# (see tests/test_a186_mechanic_fusion.py's ordering regression test).
+_MECHANIC_FUSION_CONFIDENCE_MULTIPLIER = _TRANSFER_CONFIDENCE_MULTIPLIER / 2
 
 
 @dataclass(slots=True)
@@ -132,8 +148,24 @@ class GoalResolver:
                                     transferred = []
                                 if transferred:
                                     best_transfer_confidence = max((r.get("confidence", 0.0) for r in transferred), default=0.0)
-                                    confidence = min(0.75, confidence + best_transfer_confidence * 0.05)
+                                    confidence = min(0.75, confidence + best_transfer_confidence * _TRANSFER_CONFIDENCE_MULTIPLIER)
                                     evidence.append("entity_history:transfer_match")
+
+                                    # A186: do the transferred rules for this
+                                    # fingerprint actually agree with each
+                                    # other (shared preconditions), not just
+                                    # share a fingerprint? A179's own review
+                                    # found the fingerprint alone can collide
+                                    # on unrelated mechanics. A confident
+                                    # fusion is corroboration across multiple
+                                    # transferred rules, so its boost is
+                                    # additional but deliberately smaller than
+                                    # the single-rule transfer boost above.
+                                    confidence, mechanic_matched = self._apply_mechanic_fusion_boost(
+                                        confidence, transferred, fingerprint.key(), graph_port
+                                    )
+                                    if mechanic_matched:
+                                        evidence.append("entity_history:mechanic_fusion")
 
             hypotheses.append(
                 GoalHypothesis(
@@ -180,6 +212,48 @@ class GoalResolver:
             )
 
         return hypotheses[: self._limits.max_hypotheses]
+
+    @staticmethod
+    def _apply_mechanic_fusion_boost(
+        confidence: float,
+        transferred: Sequence[Mapping[str, Any]],
+        fingerprint_key: str,
+        graph_port: GraphQueryPort | None,
+    ) -> tuple[float, bool]:
+        """A186: block+match+merge the transferred rules already fetched for
+        this fingerprint (fuse_transferred_rules is pure, so re-running it on
+        an already-fetched, single-fingerprint list is cheap -- no extra
+        network call). Applies the smaller mechanic-fusion boost only when a
+        confident fusion exists, and opportunistically persists the fusion
+        result when the graph port supports it. Never raises: a missing
+        record_mechanic_fusion method or a write failure only skips
+        persistence, it never blocks the confidence boost already computed."""
+        records = tuple(
+            TransferredRuleRecord(
+                rule_id=str(rule.get("rule_id")),
+                confidence=float(rule.get("confidence", 0.0) or 0.0),
+                source_game_id=rule.get("source_game_id"),
+                fingerprint=str(rule.get("fingerprint", fingerprint_key)),
+                preconditions=tuple(rule.get("preconditions") or ()),
+            )
+            for rule in transferred
+            if isinstance(rule, Mapping) and rule.get("rule_id")
+        )
+        fusions = fuse_transferred_rules(records)
+        if not fusions:
+            return confidence, False
+
+        best_fusion = max(fusions, key=lambda fusion: fusion.confidence)
+        boosted = min(0.75, confidence + best_fusion.confidence * _MECHANIC_FUSION_CONFIDENCE_MULTIPLIER)
+
+        record_fusion = getattr(graph_port, "record_mechanic_fusion", None) if graph_port is not None else None
+        if record_fusion is not None:
+            try:
+                record_fusion(best_fusion)
+            except Exception:
+                pass
+
+        return boosted, True
 
     def _merge_graph_evidence(
         self,

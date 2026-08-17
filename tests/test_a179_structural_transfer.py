@@ -139,7 +139,18 @@ class TestFetchTransferredRules:
         tool_name, payload = stub.calls[0]
         assert tool_name == "get_transferred_rules"
         assert payload == {"task_id": "task-1", "fingerprint": "ACTION6:small"}
-        assert rules == [{"rule_id": "rule-A", "confidence": 0.6, "source_game_id": "game-A"}]
+        # A186 extends this shape with "fingerprint" (filled in client-side
+        # from the query key) and "preconditions" (defaults to () until
+        # hippocampy stores/returns it) for cross-game mechanic fusion.
+        assert rules == [
+            {
+                "rule_id": "rule-A",
+                "confidence": 0.6,
+                "source_game_id": "game-A",
+                "fingerprint": "ACTION6:small",
+                "preconditions": (),
+            }
+        ]
 
     def test_capability_missing_degrades_to_empty_list(self):
         stub = _StubBrainClient(result={"status": "capability_missing"})

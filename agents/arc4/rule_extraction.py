@@ -142,3 +142,41 @@ class StructuralFingerprint:
 
 def compute_fingerprint(action_id: str, changed_count: int) -> StructuralFingerprint:
     return StructuralFingerprint(action_family=action_family(action_id), magnitude=magnitude_class(changed_count))
+
+
+# ── A186: precondition features for cross-game mechanic fusion ────────────
+#
+# A179's fingerprint says two transferred rules *might* be the same mechanic
+# ("same buttons exist" was already shown to be a weak signal on its own --
+# see A179's own review). Fusion needs a second, independent check before
+# trusting that enough to merge two rules' evidence: do they actually share
+# the state they fired on? These features describe the entity a rule fired
+# on, deliberately excluding literal color for the same reason the
+# fingerprint does -- "color 3" means nothing across two games with
+# different palettes, but "small, roughly square blob" does.
+
+
+def shape_class(height: int, width: int) -> str:
+    """Palette- and scale-invariant bounding-box shape bucket (aspect ratio
+    only)."""
+    if height <= 0 or width <= 0:
+        return "degenerate"
+    ratio = height / width
+    if ratio > 1.25:
+        return "tall"
+    if ratio < 0.8:
+        return "wide"
+    return "square"
+
+
+def entity_preconditions(kind: str, cell_count: int | None, bbox: Sequence[int] | None) -> list[str]:
+    """Deterministic, palette-invariant feature tags describing an entity
+    just before a rule fired on it -- the evidence mechanic_fusion.py's
+    structure-layer matching compares between transferred rules."""
+    features = [f"kind:{kind}"]
+    if cell_count is not None:
+        features.append(f"size_class:{magnitude_class(int(cell_count))}")
+    if bbox is not None and len(bbox) == 4:
+        min_row, min_col, max_row, max_col = bbox
+        features.append(f"shape_class:{shape_class(max_row - min_row + 1, max_col - min_col + 1)}")
+    return features

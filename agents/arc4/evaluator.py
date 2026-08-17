@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -229,7 +230,11 @@ class Evaluator:
 
     def _record_rule_evidence(self, perception: Any, execution: ExecutionResult, state: WorkflowState) -> str:
         """A177: extract and send candidate rule signatures for this step's
-        observed transitions."""
+        observed transitions. A186: also pass perception.entities so the
+        port can derive precondition features for cross-game mechanic
+        fusion, when the port's record_rule_evidence accepts the extra
+        parameter -- pre-A186 graph ports (including test doubles) that only
+        take (execution, grid_diff) keep working unchanged."""
         if self._graph_query_port is None:
             return "skipped"
 
@@ -242,7 +247,10 @@ class Evaluator:
             return "skipped"
 
         try:
-            result = record(execution, grid_diff)
+            if self._accepts_entities_param(record):
+                result = record(execution, grid_diff, getattr(perception, "entities", ()))
+            else:
+                result = record(execution, grid_diff)
         except Exception:
             return "failed"
         # A183: a real rule create/confirm/falsify writes PREDICTS/
@@ -250,6 +258,16 @@ class Evaluator:
         if isinstance(result, Mapping) and result.get("status") == "ok":
             state.world_model_edge_writes += 1
         return "ok"
+
+    @staticmethod
+    def _accepts_entities_param(record: Any) -> bool:
+        try:
+            parameters = inspect.signature(record).parameters
+        except (TypeError, ValueError):
+            return False
+        if any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters.values()):
+            return True
+        return len(parameters) >= 3
 
     @staticmethod
     def _grid_diff(perception: Any) -> Mapping[str, Any] | None:
