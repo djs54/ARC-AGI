@@ -230,19 +230,29 @@ class PlanGenerator:
                 # every untested candidate.
                 is_distinct_click_target = book_id != action_id
                 withhold_family_penalty = is_untested and is_distinct_click_target
-                if withhold_family_penalty:
-                    score = graph_positive_score
-                    graph_contradiction_penalty_applied = False
-                else:
-                    score = graph_positive_score - graph_contradiction_penalty
-                    graph_contradiction_penalty_applied = graph_contradiction_penalty > 0
+                graph_contradiction_penalty_applied = False if withhold_family_penalty else graph_contradiction_penalty > 0
+
+                # A186: repeat_decay_factor ** attempts is meant to fade a
+                # stale POSITIVE signal as an action gets over-exploited --
+                # applied to the combined (positive - contradiction_penalty)
+                # score, the same multiplication instead shrinks a negative
+                # contradiction penalty toward zero as attempts grow, so a
+                # repeatedly-falsified action gets LESS penalized the more
+                # times it fails (confirmed live: an action falsified 4
+                # times outscored one falsified once). Only graph_positive_score
+                # is decayed here; graph_contradiction_penalty is subtracted
+                # afterward at full, undecayed magnitude.
+                score = graph_positive_score
                 if goal_alignment:
                     score += self._limits.goal_alignment_bonus
                 if is_untested:
+                    if not withhold_family_penalty:
+                        score -= graph_contradiction_penalty
                     score += self._voi_bonus(rules)
                 else:
                     decay = self._limits.repeat_decay_factor ** attempts
                     score *= decay
+                    score -= graph_contradiction_penalty
                     score -= min(self._limits.repeat_attempt_penalty * attempts, 0.18)
                 if falsifications and not graph_contradiction_penalty_applied:
                     score -= min(self._limits.falsification_penalty * falsifications, 0.55)
