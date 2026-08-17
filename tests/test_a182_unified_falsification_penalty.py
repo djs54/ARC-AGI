@@ -78,7 +78,13 @@ class TestGraphContradictionIsAuthoritativeNotAdditive:
     def test_graph_contradiction_skips_local_penalty_not_double_counted(self):
         """This card's own reproduction: contradictions=2, supports=0, local
         falsifications=2, attempts=2. The OLD formula gave -0.5152 (double
-        penalty); the fix must give the single-penalty value instead."""
+        penalty); the fix must give the single-penalty value instead.
+
+        Expected value updated for A187: the contradiction penalty is no
+        longer decayed by repeat_decay_factor ** attempts (A187 fixed a
+        second bug where that decay shrank the penalty toward zero as
+        attempts grew, inverting its intent) -- it's now subtracted at full
+        magnitude after decay is applied to the positive component only."""
         graph = _GraphPort({"supports": 0, "contradictions": 2, "confidence": 0.0, "attempts": 2})
 
         score = _score_for(graph, falsifications=2, attempts=2)
@@ -87,9 +93,8 @@ class TestGraphContradictionIsAuthoritativeNotAdditive:
         assert score != pytest.approx(old_double_penalty_score)
         assert score > old_double_penalty_score
 
-        graph_score = -LIMITS.falsification_penalty * 2
-        decay = LIMITS.repeat_decay_factor**2
-        expected = graph_score * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18)
+        graph_contradiction_penalty = LIMITS.falsification_penalty * 2
+        expected = 0.0 - graph_contradiction_penalty - min(LIMITS.repeat_attempt_penalty * 2, 0.18)
         assert score == pytest.approx(expected)
 
 
