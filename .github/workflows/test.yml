@@ -1,0 +1,50 @@
+name: Tests
+
+# test-a is the project's documented required green-baseline signal (see
+# CLAUDE.md / BacklogRules.md) -- this job makes that convention a real,
+# enforced merge gate instead of an honor-system rule. test-all runs the
+# broader suite for visibility but never blocks a merge on its own.
+#
+# Dependency note: `make test-a`/`make test-all` normally assume
+# `pip install -e ../hippocampy`, a private sibling repo a CI runner can't
+# check out. Neither job here needs it -- installing just the public
+# dependencies below is enough to collect and pass the full suite.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  test-a:
+    name: test-a
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install httpx openai psutil pyyaml numpy pytest pytest-asyncio
+      - name: Run test-a subset
+        run: >
+          python -m pytest -q
+          tests/test_observability.py
+          tests/test_trace_durability.py
+          tests/test_import_boundary.py
+          tests/test_a140_cycle_policy.py
+
+  test-all:
+    name: test-all (informational, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install httpx openai psutil pyyaml numpy pytest pytest-asyncio
+      - name: Run full suite
+        run: python -m pytest tests/ -q
