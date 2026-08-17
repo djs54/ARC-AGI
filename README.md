@@ -72,36 +72,3 @@ PYTHONPATH=. .venv/bin/python run_single_puzzle.py --live-smoke --num-puzzles 1 
 `--live-smoke` implies `--real-api`, auto-loads `ARC_API_KEY` from `benchmarks/.arc/arc.json`, and uses forgiving local-Ollama timeouts. The brain daemon must be running (socket at `~/.campy/brain.sock`).
 
 Current rollout caveat: ARC v2 is wired to ARC-specific MCP query tools from the sibling `hippocampy` repo. If the running MCP server does not yet expose those `arc_*` methods, the ARC v2 runtime degrades gracefully instead of crashing, but smoke quality is limited until the server side is updated.
-
-## Current Status
-
-This is a clean separation scaffold, not a full migration completion.
-
-What is already done:
-
-- ARC code is copied into its own repo-shaped folder
-- ARC tests are copied into their own test tree
-- packaging metadata for a standalone ARC project is added
-- Production HippoCampy integration is concentrated behind MCP-facing modules in `sidequest_mcp_client/`, with any direct-import compatibility helpers isolated to `sidequest_mcp_client/test_compat/`
-- A modular ARC v2 runtime prototype now exists under `agents/arc4/` and can be selected with `run_single_puzzle.py --agent-version=v2`
-- ARC v2 integration tests cover the workflow slice, phase modules, MCP adapter mapping, CLI flag support, and telemetry emission
-
-What still remains if you want a fully independent git repo:
-
-- initialize a separate git repo inside `ARC_AGI/`
-- move ARC-only docs and result artifacts over time
-
-Current validation baseline:
-
-- `make test-a` is the required green-baseline signal for A-card work
-- focused ARC v2 regression coverage lives under `tests/test_arc4_*.py` and `tests/test_arc4_integration.py`
-- full-suite triage and restoration history remains tracked through A029 and its follow-up sequence
-
-The decision on `mcp_engine` direct imports has already landed: A002/A005/A006 moved all production paths behind the MCP stdio seam, and `BacklogRules.md` rule 4 forbids re-introducing direct imports. See [ARCHITECTURE.md](ARCHITECTURE.md) for the seam contract.
-
-## Recommendation
-
-Keep `ARC_AGI` as the reasoning-harness project: the solve loop, the graph-backed world model, and the planning/vetting machinery that let cheaper LLMs punch above their weight on hard puzzles.
-Keep `hippocampy` as the memory dependency it consumes — a supporting product, not a co-equal focus of this repo.
-
-That separation matches the product direction much better than continuing to let both efforts share the same top-level codebase.
