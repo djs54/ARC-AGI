@@ -7,7 +7,8 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from .rule_extraction import compute_fingerprint, extract_candidate_signatures
+from .mechanic_fusion import MechanicFusionResult
+from .rule_extraction import compute_fingerprint, entity_preconditions, extract_candidate_signatures
 from .types import ExecutionResult, GoalHypothesis, PerceivedEntity, PerceptionSnapshot, PlanningResult, ResolvedGoal, VetDecision
 
 
@@ -40,6 +41,13 @@ ARC_V2_TOOL_NAMES = {
     # A179: cross-game rule transfer by structural (color-invariant)
     # fingerprint. Landed server-side in B309.
     "fetch_transferred_rules": "get_transferred_rules",
+    # A186: fuse multiple structurally-matched transferred rules into one
+    # aggregate Mechanic record. Not yet implemented server-side -- see
+    # docs/handoff/B278-mechanic-fusion.md. Client sends/reads these
+    # defensively; capability_missing degrades to a clean no-op/[] like
+    # every other pre-launch tool in this table.
+    "record_mechanic_fusion": "record_mechanic",
+    "fetch_mechanic_candidates": "get_mechanic_candidates",
 }
 
 
@@ -288,7 +296,12 @@ class ArcGraphQueryPort:
         }
         return self._normalize_write_result(self._call_tool("record_transition", payload), tool_key="record_transition")
 
-    def record_rule_evidence(self, execution: ExecutionResult, grid_diff: Mapping[str, Any]) -> dict[str, Any]:
+    def record_rule_evidence(
+        self,
+        execution: ExecutionResult,
+        grid_diff: Mapping[str, Any],
+        entities: Sequence[Any] = (),
+    ) -> dict[str, Any]:
         """A177: extract candidate rule signatures (deterministic, see
         rule_extraction.py) from this step's observed color-transition
         histogram and send them for the server to confirm/falsify existing
@@ -318,6 +331,12 @@ class ArcGraphQueryPort:
                 execution.action_id,
                 int(grid_diff.get("changed_count", len(changed_cells)) or 0),
             ).key(),
+            # A186: palette-invariant feature tags describing the entity this
+            # rule fired on, for cross-game structure-layer matching in
+            # mechanic_fusion.py. Not yet stored/returned by hippocampy (see
+            # docs/handoff/B278-mechanic-fusion.md); sending it now is
+            # forward-compatible and harmless if the server ignores it.
+            "preconditions": self._preconditions_for_entity(entities, self._attribute_entity(changed_cells, entities)),
         }
         return self._normalize_write_result(self._call_tool("record_rule_evidence", payload), tool_key="record_rule_evidence")
 
@@ -333,15 +352,83 @@ class ArcGraphQueryPort:
         rules = result.get("rules", [])
         if not isinstance(rules, (list, tuple)):
             return []
+        parsed: list[dict[str, Any]] = []
+        for rule in rules:
+            if not isinstance(rule, Mapping):
+                continue
+            preconditions = rule.get("preconditions")
+            parsed.append(
+                {
+                    "rule_id": rule.get("rule_id"),
+                    "confidence": float(rule.get("confidence", 0.0) or 0.0),
+                    "source_game_id": rule.get("source_game_id"),
+                    # A186: the query key is already the fingerprint every
+                    # returned rule matched on -- fill it in client-side
+                    # rather than wait on the server to echo it back.
+                    "fingerprint": fingerprint_key,
+                    # A186: precondition feature tags for structure-layer
+                    # matching (mechanic_fusion.py). Defaults to empty until
+                    # hippocampy stores/returns it -- see
+                    # docs/handoff/B278-mechanic-fusion.md. An empty tuple
+                    # can never reach the shared-feature threshold, so this
+                    # degrades to "no confident match," never a false merge.
+                    "preconditions": tuple(preconditions) if isinstance(preconditions, (list, tuple)) else (),
+                }
+            )
+        return parsed
+
+    def record_mechanic_fusion(self, fusion: MechanicFusionResult) -> dict[str, Any]:
+        """A186: persist a deterministic fusion of 2+ structurally-matched
+        transferred rules as one aggregate Mechanic record. The merge policy
+        (mechanic_fusion.py) already ran client-side; this call is a pure
+        write of its result."""
+        payload = {
+            "task_id": self.task_id,
+            "fingerprint": fusion.fingerprint,
+            "member_rule_ids": list(fusion.member_rule_ids),
+            "source_game_ids": list(fusion.source_game_ids),
+            "confidence": fusion.confidence,
+            "merged_from": list(fusion.merged_from),
+        }
+        return self._normalize_write_result(self._call_tool("record_mechanic_fusion", payload), tool_key="record_mechanic_fusion")
+
+    def fetch_mechanic_candidates(self, fingerprint_key: str) -> list[dict[str, Any]]:
+        """A186: previously-fused Mechanic records for this fingerprint, if
+        any. Degrades to [] on capability_missing or a malformed response,
+        matching fetch_transferred_rules's shape."""
+        result = self._call_tool("fetch_mechanic_candidates", {"task_id": self.task_id, "fingerprint": fingerprint_key})
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return []
+        mechanics = result.get("mechanics", [])
+        if not isinstance(mechanics, (list, tuple)):
+            return []
         return [
             {
-                "rule_id": rule.get("rule_id"),
-                "confidence": float(rule.get("confidence", 0.0) or 0.0),
-                "source_game_id": rule.get("source_game_id"),
+                "mechanic_id": mechanic.get("mechanic_id"),
+                "confidence": float(mechanic.get("confidence", 0.0) or 0.0),
+                "member_rule_ids": list(mechanic.get("member_rule_ids", []) or []),
             }
-            for rule in rules
-            if isinstance(rule, Mapping)
+            for mechanic in mechanics
+            if isinstance(mechanic, Mapping)
         ]
+
+    @staticmethod
+    def _preconditions_for_entity(entities: Sequence[Any], entity_ref: Any) -> list[str]:
+        """A186: locate the entity _attribute_entity resolved (if any) and
+        derive its precondition feature tags. No entity attributed (or no
+        matching record found) -> empty list, the same safe default
+        fetch_transferred_rules already treats as never a confident match."""
+        if entity_ref is None:
+            return []
+        for entity in entities:
+            attributes = getattr(entity, "attributes", None)
+            if isinstance(attributes, Mapping) and attributes.get("entity_ref") == entity_ref:
+                return entity_preconditions(
+                    getattr(entity, "kind", "unknown"),
+                    attributes.get("cell_count"),
+                    attributes.get("bbox"),
+                )
+        return []
 
     @staticmethod
     def _summarize_color_transitions(changed_cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
