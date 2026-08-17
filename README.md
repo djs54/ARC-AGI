@@ -4,8 +4,6 @@
 
 ARC-AGI-3 is the current benchmark and proving ground for that harness, not the end goal. The reasoning loop and the world-model machinery are the actual product; the puzzle suite is the yardstick that keeps it honest.
 
-`hippocampy` is a dependency, not the focus: it's the local memory engine that gives the harness persistent, graph-backed memory (belief state, falsification tracking, cross-game transfer) over MCP. `ARC_AGI` consumes it; it does not develop it, and this repo's design decisions are driven by the harness's needs, not hippocampy's.
-
 For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What Is In Here
@@ -25,7 +23,7 @@ For the canonical system design of this repo, see [ARCHITECTURE.md](ARCHITECTURE
 
 ## Dependency Model
 
-This workspace is intentionally not a memory engine by itself. HippoCampy is a supporting dependency the harness relies on for memory — it is not a second focus of this repo.
+This workspace is intentionally not a memory engine by itself. HippoCampy is a supporting dependency the harness relies on for memory.
 
 Runtime ARC paths rely on HippoCampy for:
 
