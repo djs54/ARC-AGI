@@ -349,7 +349,7 @@ under `sidequest_mcp_client/test_compat/` and stay out of production call paths.
 Adapter ownership
 
 The MCP stdio adapter that serves this seam — the binary `CAMPY_MCP_CMD`
-points at — lives in `sidequests-brain/campy/adapters/mcp_server.py`, not
+points at — lives in `hippocampy/campy/adapters/mcp_server.py`, not
 in this repo. It is a brain-side artifact: it imports the unix-socket path,
 offline-queue format, and git-context detection from the `campy` package,
 and bridges MCP stdio JSON-RPC to the brain daemon at `~/.campy/brain.sock`.
@@ -362,7 +362,7 @@ Operator setup
 From inside `ARC_AGI/`, point the env var at the sibling repo's venv + adapter:
 
 ```bash
-export CAMPY_MCP_CMD="../sidequests-brain/.venv/bin/python -m campy.adapters.mcp_server"
+export CAMPY_MCP_CMD="../hippocampy/.venv/bin/python -m campy.adapters.mcp_server"
 ```
 
 The brain daemon (socket at `~/.campy/brain.sock`, with legacy `~/.sidequests/brain.sock` fallback) must already be

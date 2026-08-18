@@ -6,9 +6,23 @@ import importlib
 from typing import Any, Dict, Optional
 
 
+# B248: mcp_engine.* was renamed to campy.brain.brainstem.* /
+# campy.brain.hippocampus.graph.* by an unrelated hippocampy-side
+# codebase-anatomy refactor; mcp_engine no longer exists there. Updated to
+# the current module paths. Plain string literals here are fine —
+# tests/test_import_boundary.py's `import campy`/`from campy import` ban
+# does not match dict values, and this directory
+# (sidequest_mcp_client/test_compat/) is an explicit carve-out in that
+# test anyway.
+_MODULE_MAP = {
+    "config": "campy.brain.brainstem.config",
+    "graph.kuzu_client": "campy.brain.hippocampus.graph.kuzu_client",
+    "schema": "campy.brain.hippocampus.schema",
+}
+
+
 def _import_mcp(submodule: str):
-    base = "m" + "cp_" + "engine"
-    return importlib.import_module(base + "." + submodule)
+    return importlib.import_module(_MODULE_MAP[submodule])
 
 
 def load_config(path: Optional[str] = None) -> Dict[str, Any]:
