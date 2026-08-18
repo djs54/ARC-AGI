@@ -1,0 +1,8 @@
+# Every path in this repo requires review/approval from an owner below
+# before a PR can merge (enforced by branch protection's "Require review
+# from Code Owners" on master, once enabled in repo Settings > Branches).
+# This exists specifically so that adding a new collaborator to the repo
+# does not, by itself, grant them or any other single collaborator the
+# ability to merge changes unreviewed -- see the branch-protection setup
+# this pairs with.
+*   @engramist
