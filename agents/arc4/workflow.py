@@ -22,6 +22,66 @@ from .types import (
 )
 
 
+def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
+    """A204 / spec section 7: bracket an ExecutePhase callable with
+    write-ahead cycle recording. `execute` is called synchronously and
+    returns only after the real, live ARC API call has completed -- this is
+    the one place in the whole trajectory-Reasoner family (A200-A206) where
+    a bug can mean double-acting on non-idempotent external game state, so
+    the invariant here is non-negotiable: `write_cycle` failing (any
+    exception, or a missing `cycle_id`) must NEVER prevent `execute` from
+    running. The durability write is a safety net around the real action,
+    not a gate in front of it.
+
+    This wrapping is applied to the `execute` *dependency* itself, at
+    bundle-build time in arc_runtime/bundle.py -- the same closure-over-
+    graph_port pattern every other phase (resolve/plan/reason) already
+    uses, per ports.py's ReasonerPhase docstring: "WorkflowOrchestrator
+    itself does not need to hold a graph_port reference." WorkflowOrchestrator
+    .run() itself is therefore untouched by this card: it keeps calling
+    `self._dependencies.execute(...)` at exactly the same call site as
+    before, and simply gets a write-ahead-aware callable when one is wired
+    in by the bundle -- so `execute` is still "bracketed" from run()'s
+    point of view without giving the orchestrator a `_graph_port` attribute
+    it has never held.
+
+    `thread_id` is read from `state.active_investigation_anchor["thread_id"]`
+    at call time (the field A202's `run_reasoner_cycle` establishes and
+    maintains across cycles) -- `state` is passed into `execute` fresh each
+    cycle, so this always reflects whatever thread was active as of the end
+    of the *previous* cycle's `reason` phase (or None on the very first
+    cycle / whenever no investigation thread is currently open), which is
+    the correct, intended semantics per A202.
+    """
+
+    def _wrapped(state: WorkflowState, perception: Any, goal: Any, vet: Any) -> PhaseResult[Any]:
+        cycle_id = None
+        anchor = state.active_investigation_anchor
+        thread_id = anchor.get("thread_id") if anchor is not None else None
+        if graph_port is not None and thread_id is not None:
+            write_cycle = getattr(graph_port, "write_cycle", None)
+            if write_cycle is not None:
+                try:
+                    write_result = write_cycle(thread_id, state.step_index, action_sent=True)
+                    cycle_id = write_result.get("cycle_id") if isinstance(write_result, dict) else None
+                except Exception:
+                    cycle_id = None  # graph unreachable -- degrade, never block the real action
+
+        result = execute(state, perception, goal, vet)
+
+        if cycle_id is not None:
+            confirm_cycle = getattr(graph_port, "confirm_cycle", None)
+            if confirm_cycle is not None:
+                try:
+                    confirm_cycle(cycle_id, decision="pending", confirmed=True)
+                except Exception:
+                    pass  # a failed confirm write must not crash a successful execution
+
+        return result
+
+    return _wrapped
+
+
 @dataclass(slots=True)
 class WorkflowLimits:
     max_cycles: int = 10

@@ -19,7 +19,7 @@ from agents.arc4.ports import WorkflowDependencies
 from agents.arc4.reasoner_signals import run_reasoner_cycle
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import PhaseResult, PhaseStatus, WorkflowPhase
-from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
+from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator, wrap_execute_with_write_ahead
 from arc_runtime.game_session import ArcV2GameSession
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,7 @@ def build_arc_v2_bundle(
     world_model_eval: bool,
     max_cycles: int,
     llm_client: Any | None = None,
+    graph_port: ArcGraphQueryPort | None = None,
 ) -> ArcV2Bundle:
     # A164: scope graph evidence by game_id, not the manifest's static per-slot
     # task_id. tasks_manifest.json assigns a fixed task_id per slot (e.g.
@@ -133,7 +134,13 @@ def build_arc_v2_bundle(
     # of the same game, which is the identity graph evidence should actually
     # be scoped by. Falls back to task_id if game_id is ever unset.
     graph_task_id = game_id or task_id
-    graph_port = ArcGraphQueryPort(brain_client, task_id=graph_task_id, session_id=session_id, strict=False)
+    # A204: dispatch.py's run_arc_v2_task now constructs the ArcGraphQueryPort
+    # earlier than this bundle (so the startup resume/reconciliation check in
+    # spec section 7 can run before build_arc_v2_bundle exists at all) and
+    # passes it through here so the bundle reuses that exact instance rather
+    # than constructing a second, separately-scoped one.
+    if graph_port is None:
+        graph_port = ArcGraphQueryPort(brain_client, task_id=graph_task_id, session_id=session_id, strict=False)
     telemetry = ArcV2Telemetry(
         task_id=task_id,
         game_id=game_id,
@@ -162,9 +169,9 @@ def build_arc_v2_bundle(
     )
     vet = telemetry.wrap_phase("vet", PlanVetter(graph_port=graph_port).vet)
     execute_agent = Executor(transport=game_session)
-    execute = telemetry.wrap_phase(
-        "execute",
-        lambda state, perception, goal, vet_decision: execute_agent.execute(
+
+    def _execute_via_transport(state, perception, goal, vet_decision):
+        return execute_agent.execute(
             state,
             vet_decision.candidate or vet_decision.alternative,
             {
@@ -175,14 +182,27 @@ def build_arc_v2_bundle(
                 "state": perception.observation.get("state") if isinstance(perception.observation, Mapping) else None,
             },
         )
-        if (vet_decision.candidate or vet_decision.alternative) is not None
-        else PhaseResult(
-            phase=WorkflowPhase.EXECUTE,
-            status=PhaseStatus.CRASH,
-            reason="missing_vetted_candidate",
-            payload=None,
-        ),
-    )
+
+    # A204: write-ahead bracketing wraps only the real-API-call path above --
+    # not the missing_vetted_candidate fallback below, since that branch
+    # never actually calls the transport/executes a real action at all.
+    # Writing action_sent=True for a cycle that structurally never attempts
+    # an action would pollute the graph's cycle bookkeeping with a
+    # phantom "sent" record that resume-reconciliation would then have to
+    # explain away for no reason.
+    _execute_with_write_ahead = wrap_execute_with_write_ahead(_execute_via_transport, graph_port)
+
+    def _execute_phase(state, perception, goal, vet_decision):
+        if (vet_decision.candidate or vet_decision.alternative) is None:
+            return PhaseResult(
+                phase=WorkflowPhase.EXECUTE,
+                status=PhaseStatus.CRASH,
+                reason="missing_vetted_candidate",
+                payload=None,
+            )
+        return _execute_with_write_ahead(state, perception, goal, vet_decision)
+
+    execute = telemetry.wrap_phase("execute", _execute_phase)
     evaluate = telemetry.wrap_phase("evaluate", Evaluator(graph_query_port=graph_port).evaluate)
     # A202: reason is always-on once wired -- mirrors how every other phase
     # closure above already captures graph_port/llm_port at bundle-build
