@@ -38,6 +38,9 @@ ARC_V2_TOOL_NAMES = {
     # replacing per-action tally counters. Landed server-side in B309.
     "record_rule_evidence": "record_rule",
     "fetch_rules_for_action": "get_rules_for_action",
+    # A192: entity-neighborhood evidence -- live hypotheses/mechanics the graph
+    # associates with a specific entity, the entity-scoped analog of fetch_rules_for_action.
+    "fetch_entity_neighborhood": "arc_get_entity_neighborhood",
     # A179: cross-game rule transfer by structural (color-invariant)
     # fingerprint. Landed server-side in B309.
     "fetch_transferred_rules": "get_transferred_rules",
@@ -48,6 +51,16 @@ ARC_V2_TOOL_NAMES = {
     # every other pre-launch tool in this table.
     "record_mechanic_fusion": "record_mechanic",
     "fetch_mechanic_candidates": "get_mechanic_candidates",
+    # A201: investigation-thread state durability for the trajectory Reasoner
+    # (docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md). Four
+    # new tools for managing the Reasoner's durable decisions, resumes, and
+    # cycle tracking. Not yet server-side -- see docs/handoff/B278-investigation-
+    # thread-schema.md. Clients degrade cleanly to defined empty/no-op results
+    # on capability_missing.
+    "start_or_resume_thread": "arc_start_or_resume_thread",
+    "write_thread_state": "arc_write_thread_state",
+    "write_cycle": "arc_write_cycle",
+    "confirm_cycle": "arc_confirm_cycle",
 }
 
 
@@ -60,6 +73,7 @@ class ArcGraphQueryPort:
     session_id: str
     strict: bool = True
     tool_names: Mapping[str, str] = field(default_factory=lambda: dict(ARC_V2_TOOL_NAMES))
+    _capability_missing_count: int = field(default=0)
 
     def ingest_perception(self, perception: PerceptionSnapshot) -> dict[str, Any]:
         payload = {
@@ -208,6 +222,73 @@ class ArcGraphQueryPort:
             if isinstance(rule, Mapping)
         ]
 
+    def fetch_entity_neighborhood(self, entity_ref: Any) -> dict[str, Any]:
+        """A192: live hypotheses/mechanics the graph already associates with a
+        specific entity -- the neighborhood-inspection step of the graph-guided
+        investigation loop, entity-scoped rather than action-family-scoped.
+        B359 follow-up (2026-08-23): also carries "rules" -- live (unfalsified)
+        Rule nodes linked via a separate ENTITY_RULE edge, kept apart from
+        "hypotheses" (ENTITY_HYPOTHESIS) since a confirmed causal rule and a
+        standing hypothesis under test are different epistemic states, not
+        the same thing under two names."""
+        result = self._call_tool("fetch_entity_neighborhood", {"task_id": self.task_id, "entity_ref": entity_ref})
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return {"hypotheses": [], "rules": [], "mechanics": []}
+        hypotheses = result.get("hypotheses", [])
+        rules = result.get("rules", [])
+        mechanics = result.get("mechanics", [])
+        return {
+            "hypotheses": list(hypotheses) if isinstance(hypotheses, (list, tuple)) else [],
+            "rules": list(rules) if isinstance(rules, (list, tuple)) else [],
+            "mechanics": list(mechanics) if isinstance(mechanics, (list, tuple)) else [],
+        }
+
+    def start_or_resume_thread(self, anchor_ref: Any, anchor_type: str) -> dict[str, Any]:
+        """Investigation-thread lookup/create -- resume support for the
+        trajectory Reasoner (see docs/superpowers/specs/2026-08-23-trajectory-
+        reasoner-design.md). Degrades to a fresh-thread-shaped result when the
+        server capability doesn't exist yet."""
+        result = self._call_tool(
+            "start_or_resume_thread",
+            {"task_id": self.task_id, "anchor_ref": anchor_ref, "anchor_type": anchor_type},
+        )
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return {"thread_id": None, "state": "exploring", "resumed": False, "last_cycle": None}
+        return {
+            "thread_id": result.get("thread_id"),
+            "state": str(result.get("state", "exploring")),
+            "resumed": bool(result.get("resumed", False)),
+            "last_cycle": result.get("last_cycle"),
+        }
+
+    def write_thread_state(self, thread_id: Any, state: str) -> dict[str, Any]:
+        """Durable write of the Reasoner's resolved state. No-op (not an error)
+        when thread_id is None -- callers pass None when start_or_resume_thread
+        itself degraded, and this must not raise in that case."""
+        if thread_id is None:
+            return {"status": "skipped", "reason": "no_thread_id"}
+        result = self._call_tool("write_thread_state", {"thread_id": thread_id, "state": state})
+        return self._normalize_write_result(result, tool_key="write_thread_state")
+
+    def write_cycle(self, thread_id: Any, step: int, action_sent: bool) -> dict[str, Any]:
+        """Write-ahead call -- must be invoked BEFORE the real API action is
+        sent, per spec section 7's write-intent-first invariant. No-op when
+        thread_id is None."""
+        if thread_id is None:
+            return {"cycle_id": None}
+        result = self._call_tool("write_cycle", {"thread_id": thread_id, "step": step, "action_sent": action_sent})
+        if not isinstance(result, Mapping) or result.get("status") == "capability_missing":
+            return {"cycle_id": None}
+        return {"cycle_id": result.get("cycle_id")}
+
+    def confirm_cycle(self, cycle_id: Any, decision: str, confirmed: bool) -> dict[str, Any]:
+        """Post-action (or resume-time reconciliation) confirmation write.
+        No-op when cycle_id is None."""
+        if cycle_id is None:
+            return {"status": "skipped", "reason": "no_cycle_id"}
+        result = self._call_tool("confirm_cycle", {"cycle_id": cycle_id, "decision": decision, "confirmed": confirmed})
+        return self._normalize_write_result(result, tool_key="confirm_cycle")
+
     @staticmethod
     def _extract_action_ids(result: Any) -> list[str]:
         """Extract a list of action ID strings from a tool result."""
@@ -248,11 +329,19 @@ class ArcGraphQueryPort:
             return {"status": "skipped", "tool": "record_vet"}
 
         tool_key = "confirm_hypothesis" if vet.approved else "contradict_hypothesis"
-        payload = {
+        payload: dict[str, Any] = {
             "task_id": self.task_id,
             "hypothesis_id": candidate_id,
             "evidence": {"reason": vet.reason, "approved": vet.approved, "metadata": dict(vet.metadata)},
         }
+        # B359: pass entity_ref through so the server merges an
+        # ENTITY_HYPOTHESIS edge (GridEntity -> Hypothesis) with this
+        # confirm/contradict call -- the write-side counterpart to A192's
+        # fetch_entity_neighborhood read. Only click-target candidates carry
+        # entity_ref in metadata (A192); non-click actions are unaffected.
+        entity_ref = self._vet_entity_ref(vet)
+        if entity_ref is not None:
+            payload["entity_ref"] = entity_ref
         return self._normalize_write_result(self._call_tool(tool_key, payload), tool_key=tool_key)
 
     def record_execution(self, execution: ExecutionResult) -> dict[str, Any]:
@@ -315,7 +404,8 @@ class ArcGraphQueryPort:
         if not signatures:
             return {"status": "no_changes", "recorded": False}
 
-        payload = {
+        entity_ref = self._attribute_entity(changed_cells, entities)
+        payload: dict[str, Any] = {
             "task_id": self.task_id,
             "step": self._execution_step(execution),
             "action_id": execution.action_id,
@@ -336,8 +426,14 @@ class ArcGraphQueryPort:
             # mechanic_fusion.py. Not yet stored/returned by hippocampy (see
             # docs/handoff/B278-mechanic-fusion.md); sending it now is
             # forward-compatible and harmless if the server ignores it.
-            "preconditions": self._preconditions_for_entity(entities, self._attribute_entity(changed_cells, entities)),
+            "preconditions": self._preconditions_for_entity(entities, entity_ref),
         }
+        # B359 follow-up (2026-08-23): surface entity_ref at the top level too,
+        # not just buried in preconditions tags -- record_rule now merges an
+        # ENTITY_RULE (GridEntity -> Rule) edge when present, which is what
+        # fetch_entity_neighborhood's "rules" key reads back.
+        if entity_ref is not None:
+            payload["entity_ref"] = entity_ref
         return self._normalize_write_result(self._call_tool("record_rule_evidence", payload), tool_key="record_rule_evidence")
 
     def fetch_transferred_rules(self, fingerprint_key: str) -> list[dict[str, Any]]:
@@ -411,6 +507,14 @@ class ArcGraphQueryPort:
             for mechanic in mechanics
             if isinstance(mechanic, Mapping)
         ]
+
+    def pop_capability_missing_count(self) -> int:
+        """Returns the capability_missing count accumulated since the last call,
+        then resets it -- gives telemetry a natural per-step delta with no
+        bookkeeping needed on the telemetry side."""
+        count = self._capability_missing_count
+        self._capability_missing_count = 0
+        return count
 
     @staticmethod
     def _preconditions_for_entity(entities: Sequence[Any], entity_ref: Any) -> list[str]:
@@ -549,6 +653,7 @@ class ArcGraphQueryPort:
             if self._is_missing_tool_error(exc, tool_name):
                 if self.strict:
                     raise RuntimeError(f"required ARC tool missing: {tool_name}") from exc
+                self._capability_missing_count += 1
                 return {"status": "capability_missing", "tool": tool_name, "error": str(exc)}
             raise
 
@@ -571,6 +676,7 @@ class ArcGraphQueryPort:
                 if self._is_missing_tool_error(exc, tool_name):
                     if self.strict:
                         raise RuntimeError(f"required ARC tool missing: {tool_name}") from exc
+                    self._capability_missing_count += 1
                     return {"status": "capability_missing", "tool": tool_name, "error": str(exc)}
                 raise
         return result
@@ -751,6 +857,17 @@ class ArcGraphQueryPort:
             return vet.candidate.action_id
         if vet.alternative is not None:
             return vet.alternative.action_id
+        return None
+
+    @staticmethod
+    def _vet_entity_ref(vet: VetDecision) -> Any | None:
+        """B359: the click-target entity this vetted candidate targets, if
+        any -- mirrors _vet_action_id's candidate-then-alternative fallback."""
+        for source in (vet.candidate, vet.alternative):
+            if source is not None and isinstance(source.metadata, Mapping):
+                entity_ref = source.metadata.get("entity_ref")
+                if entity_ref is not None:
+                    return entity_ref
         return None
 
     @staticmethod

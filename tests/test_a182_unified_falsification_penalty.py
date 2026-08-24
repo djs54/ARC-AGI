@@ -84,10 +84,20 @@ class TestGraphContradictionIsAuthoritativeNotAdditive:
         longer decayed by repeat_decay_factor ** attempts (A187 fixed a
         second bug where that decay shrank the penalty toward zero as
         attempts grew, inverting its intent) -- it's now subtracted at full
-        magnitude after decay is applied to the positive component only."""
+        magnitude after decay is applied to the positive component only.
+
+        Updated for A191 (2026-08-23): local falsifications=1, not 2 --
+        A191 excludes any book_id with local falsifications >= 2 from the
+        candidate set entirely (this card's own real action would no longer
+        be scored at all with the original falsifications=2 fixture). The
+        graph's contradictions=2 evidence, which is what this test actually
+        verifies is authoritative over the local counter, is unchanged --
+        the "graph authoritative, not additive" formula below never
+        references the local falsifications count in the first place, so
+        this substitution changes nothing about what's being verified."""
         graph = _GraphPort({"supports": 0, "contradictions": 2, "confidence": 0.0, "attempts": 2})
 
-        score = _score_for(graph, falsifications=2, attempts=2)
+        score = _score_for(graph, falsifications=1, attempts=2)
 
         old_double_penalty_score = -0.5152
         assert score != pytest.approx(old_double_penalty_score)
@@ -99,32 +109,41 @@ class TestGraphContradictionIsAuthoritativeNotAdditive:
 
 
 class TestLocalFallbackWhenGraphHasNothing:
+    """Updated for A191 (2026-08-23): all three fixtures below now use
+    falsifications=1, not 2 -- A191 excludes any book_id with local
+    falsifications >= 2 from the candidate set entirely, so the original
+    falsifications=2 scenario is no longer scored at all (it's excluded
+    before ever reaching this local-fallback logic). falsifications=1 is
+    the highest count that still exercises this code path; the expected
+    formulas below are recomputed for it (attempts stays 2, since exclusion
+    only checks falsifications, not attempts)."""
+
     def test_no_contradiction_signal_falls_back_to_local_penalty(self):
         """Graph returns the capability-missing-shaped zero dict, but local
-        state knows about 2 real falsifications this run -- the fallback
+        state knows about 1 real falsification this run -- the fallback
         must still apply the local penalty so the signal isn't lost."""
         graph = _GraphPort({"supports": 0, "contradictions": 0, "confidence": 0.0, "attempts": 0})
 
-        score = _score_for(graph, falsifications=2, attempts=2)
+        score = _score_for(graph, falsifications=1, attempts=2)
 
         decay = LIMITS.repeat_decay_factor**2
-        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 2, 0.55)
+        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 1, 0.55)
         assert score == pytest.approx(expected)
 
     def test_no_graph_port_at_all_falls_back_to_local_penalty(self):
-        score = _score_for(None, falsifications=2, attempts=2)
+        score = _score_for(None, falsifications=1, attempts=2)
 
         decay = LIMITS.repeat_decay_factor**2
-        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 2, 0.55)
+        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 1, 0.55)
         assert score == pytest.approx(expected)
 
     def test_graph_evidence_call_raising_falls_back_to_local_penalty(self):
         graph = _GraphPort(raises=True)
 
-        score = _score_for(graph, falsifications=2, attempts=2)
+        score = _score_for(graph, falsifications=1, attempts=2)
 
         decay = LIMITS.repeat_decay_factor**2
-        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 2, 0.55)
+        expected = 0.0 * decay - min(LIMITS.repeat_attempt_penalty * 2, 0.18) - min(LIMITS.falsification_penalty * 1, 0.55)
         assert score == pytest.approx(expected)
 
 

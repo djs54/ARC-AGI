@@ -143,6 +143,10 @@ def build_arc_v2_bundle(
         world_model_eval=world_model_eval,
     )
     llm_port = SyncLLMPortAdapter(llm_client) if llm_client is not None else None
+    # A197: Set llm_port on telemetry so wrap_phase can capture per-phase token deltas
+    telemetry._llm_port = llm_port
+    # A196: Set graph_query_port on telemetry so _step_snapshot can read capability_missing_count
+    telemetry._graph_query_port = graph_port
 
     perceive = telemetry.wrap_phase("perceive", PerceiveAgent(graph_port).perceive)
     resolve_agent = GoalResolver(GoalResolverLimits())

@@ -231,8 +231,7 @@ class WorkflowOrchestrator:
 
     @staticmethod
     def _record_execution_attempt(state: WorkflowState, execution: ExecutionResult) -> None:
-        metadata = execution.candidate.metadata if execution.candidate is not None else {}
-        action_key = str((metadata or {}).get("book_id") or execution.action_id)
+        action_key = execution.candidate.book_id if execution.candidate is not None else execution.action_id
         state.action_attempt_counts[action_key] = state.action_attempt_counts.get(action_key, 0) + 1
 
     @staticmethod
@@ -241,8 +240,7 @@ class WorkflowOrchestrator:
         execution: ExecutionResult,
         evaluation: EvaluationResult,
     ) -> None:
-        metadata = execution.candidate.metadata if execution.candidate is not None else {}
-        action_key = str((metadata or {}).get("book_id") or execution.action_id)
+        action_key = execution.candidate.book_id if execution.candidate is not None else execution.action_id
         state.consecutive_no_progress_count = record_evaluation_outcome(
             no_progress_count=state.consecutive_no_progress_count,
             falsification_counts=state.action_falsification_counts,

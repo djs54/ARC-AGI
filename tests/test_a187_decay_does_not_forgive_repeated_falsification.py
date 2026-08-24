@@ -61,40 +61,44 @@ def _score_after_n_falsifications(action_id: str, n: int) -> float:
 
 
 class TestDecayNoLongerForgivesRepeatedFalsification:
-    def test_score_does_not_improve_as_attempts_grow(self):
-        """Core reproduction: under the old formula, ACTION1's score at
-        attempts=2/3/4 was -0.2168/-0.2323/-0.2455 -- moving TOWARD zero
-        (improving) as failures accumulated. The fixed formula must not
-        improve; each additional real failure should make the score equal
-        or worse, never better."""
-        scores = [_score_after_n_falsifications("ACTION1", n) for n in (2, 3, 4)]
+    """Updated for A191 (2026-08-23): this class's original concern was that
+    decay could make a repeatedly-falsified action's score improve instead
+    of worsen as failures accumulated -- verified by comparing scores across
+    falsification counts 1/2/3/4. A191 makes that comparison moot for
+    falsifications >= 2: such actions are now excluded from the candidate
+    set entirely (never scored at all), a strictly stronger guarantee than
+    "scored correctly and worsening." The tests below are restructured to
+    verify: (1) exclusion now holds for every falsification count this
+    card's original scenario covered, and (2) the one falsification count
+    still reachable through scoring (1, below A191's exclusion threshold)
+    still exercises this card's actual decay-math fix correctly."""
 
-        assert scores[1] <= scores[0], f"score improved from {scores[0]} to {scores[1]} after a 3rd failure"
-        assert scores[2] <= scores[1], f"score improved from {scores[1]} to {scores[2]} after a 4th failure"
+    def test_repeated_falsification_is_excluded_not_merely_scored(self):
+        """A191 supersedes this card's original "does it get worse" concern
+        for falsifications >= 2 -- confirm exclusion holds across the whole
+        range this card's live finding covered (2, 3, and 4 failures), not
+        just the boundary."""
+        for n in (2, 3, 4):
+            score = _score_after_n_falsifications("ACTION1", n)
+            # ACTION1 is the only available action; once excluded by A191,
+            # _build_candidates falls back to the flat 0.1 probe score.
+            assert score == pytest.approx(0.1), (
+                f"ACTION1 falsified {n} times should be excluded from real candidates "
+                f"and fall back to the flat probe score, got {score}"
+            )
 
-    def test_four_failures_scores_worse_than_one_failure(self):
-        """This card's exact live finding: an action falsified once must
-        outrank an action falsified four times, all else equal."""
-        score_one_failure = _score_after_n_falsifications("ACTION1", 1)
-        score_four_failures = _score_after_n_falsifications("ACTION1", 4)
+    def test_single_falsification_still_penalizes_correctly(self):
+        """The one falsification count below A191's exclusion threshold
+        (falsifications=1) still exercises this card's actual fix directly:
+        the contradiction penalty must be subtracted at full, undecayed
+        magnitude, not swallowed by repeat_decay_factor ** attempts."""
+        score = _score_after_n_falsifications("ACTION1", 1)
 
-        assert score_four_failures < score_one_failure, (
-            f"an action falsified 4 times ({score_four_failures}) should score worse than "
-            f"one falsified only once ({score_one_failure}), not better"
-        )
-
-    def test_exact_live_reproduction_values(self):
-        """Recomputes this card's own reverse-engineered trajectory: the
-        contradiction penalty grows linearly with attempts (0.16 per unit),
-        and under the fix, the decayed score must track that growth
-        directly (via the undecayed subtraction), not be swallowed by decay."""
-        LIMITS_LOCAL = LIMITS
-        for attempts in (2, 3, 4):
-            score = _score_after_n_falsifications("ACTION1", attempts)
-            decay = LIMITS_LOCAL.repeat_decay_factor**attempts
-            graph_contradiction_penalty = LIMITS_LOCAL.falsification_penalty * attempts
-            expected = 0.0 * decay - graph_contradiction_penalty - min(LIMITS_LOCAL.repeat_attempt_penalty * attempts, 0.18)
-            assert score == pytest.approx(expected), f"attempts={attempts}: got {score}, expected {expected}"
+        decay = LIMITS.repeat_decay_factor**1
+        graph_contradiction_penalty = LIMITS.falsification_penalty * 1
+        expected = 0.0 * decay - graph_contradiction_penalty - min(LIMITS.repeat_attempt_penalty * 1, 0.18)
+        assert score == pytest.approx(expected)
+        assert score < 0, "a single real falsification must still be penalized, not neutral or positive"
 
 
 class TestPositiveSignalStillDecays:

@@ -159,6 +159,11 @@ class PlanCandidate:
     # Schema: {"kind": "grid_change"|"no_change"|"level_gain"|"state_change", "confidence": float}
     predicted_outcome: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    book_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.book_id:
+            self.book_id = str(self.metadata.get("book_id") or self.action_id)
 
     def to_dict(self) -> dict:
         return {
@@ -170,6 +175,7 @@ class PlanCandidate:
             "payload": self.payload,
             "predicted_outcome": self.predicted_outcome,
             "metadata": self.metadata,
+            "book_id": self.book_id,
         }
 
     @classmethod
@@ -183,6 +189,7 @@ class PlanCandidate:
             payload=d.get("payload", {}),
             predicted_outcome=d.get("predicted_outcome", {}),
             metadata=d.get("metadata", {}),
+            book_id=d.get("book_id", ""),
         )
 
 

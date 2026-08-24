@@ -51,8 +51,9 @@ class PlanVetter:
             )
             return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.VETO, payload=decision, reason=decision.reason)
 
-        candidate_falsifications = int(state.action_falsification_counts.get(candidate.action_id, 0))
-        candidate_attempts = int(state.action_attempt_counts.get(candidate.action_id, 0))
+        candidate_book_id = candidate.book_id
+        candidate_falsifications = int(state.action_falsification_counts.get(candidate_book_id, 0))
+        candidate_attempts = int(state.action_attempt_counts.get(candidate_book_id, 0))
         alternative = self._choose_alternative(state, candidate, plan.alternatives)
 
         # A135: Graph-backed action gate — ask the graph if this action should be allowed
@@ -142,10 +143,10 @@ class PlanVetter:
         for alternative in alternatives:
             if alternative.action_id == candidate.action_id:
                 continue
-            if int(state.action_attempt_counts.get(alternative.action_id, 0)) == 0:
+            if int(state.action_attempt_counts.get(alternative.book_id, 0)) == 0:
                 return alternative
         if state.latest_veto_alternative is not None and state.latest_veto_alternative.action_id != candidate.action_id:
-            if int(state.action_attempt_counts.get(state.latest_veto_alternative.action_id, 0)) == 0:
+            if int(state.action_attempt_counts.get(state.latest_veto_alternative.book_id, 0)) == 0:
                 return state.latest_veto_alternative
         return None
 

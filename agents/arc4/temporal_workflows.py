@@ -140,9 +140,8 @@ class ArcPuzzleWorkflow:
 
             # Update state counters (mirror WorkflowOrchestrator._record_*)
             candidate = execution.get("candidate") if isinstance(execution, dict) else None
-            candidate_meta = candidate.get("metadata") if isinstance(candidate, dict) else {}
             action_id = execution.get("action_id", "")
-            action_key = str((candidate_meta or {}).get("book_id") or action_id)
+            action_key = (candidate.get("book_id") if isinstance(candidate, dict) else None) or action_id
             attempt_counts = self._state.setdefault("action_attempt_counts", {})
             attempt_counts[action_key] = attempt_counts.get(action_key, 0) + 1
 

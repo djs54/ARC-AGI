@@ -126,10 +126,18 @@ class TestPositiveFamilySignalStillTransfers:
 
 
 class TestAlreadyAttemptedClickTargetStillPenalized:
-    def test_repeated_click_target_still_gets_penalized(self):
+    def test_repeated_click_target_is_excluded_not_merely_penalized(self):
         """Regression guard: this card must not weaken A182's fix -- a
-        book_id that HAS itself been attempted and falsified is still
-        penalized correctly."""
+        book_id that HAS itself been attempted and falsified twice must not
+        be let back in.
+
+        Superseded by A191 (2026-08-23): repeated_falsified book_ids are now
+        excluded from the candidate set entirely at construction, a strictly
+        stronger guarantee than "penalized" -- this test now asserts
+        exclusion instead of a negative score (the original scenario, a
+        single available action with falsifications=2 and no alternatives,
+        now falls back to a generic probe candidate instead of ever scoring
+        ACTION6@20,10 at all)."""
         graph = _GraphPort(evidence={"supports": 0, "contradictions": 2, "confidence": 0.0, "attempts": 2})
         planner = PlanGenerator(LIMITS)
         state = WorkflowState(
@@ -146,10 +154,9 @@ class TestAlreadyAttemptedClickTargetStillPenalized:
 
         result = planner.generate(state, perception, _goal(), graph_port=graph).payload
 
-        assert result.candidate.metadata.get("book_id") == "ACTION6@20,10"
-        assert result.candidate.score < 0.0, (
-            f"a click target that has itself been falsified twice should still be penalized, "
-            f"got score={result.candidate.score}"
+        assert result.candidate.metadata.get("book_id") != "ACTION6@20,10", (
+            "a click target that has itself been falsified twice must be excluded from the "
+            "candidate set entirely (A191), not merely scored with a penalty"
         )
 
 

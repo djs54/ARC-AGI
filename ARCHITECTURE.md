@@ -44,6 +44,88 @@ Graph fit:
   inference are less important than bounded traversal, causal edge metadata,
   contradiction tracking, and fast operational summaries.
 
+### Graph-Engineering Principles (Shift A/B/C)
+
+Adopted 2026-08-23 from a graph-engineering review (a real-world case study of a
+multi-agent commercial-analytics system that failed under distributed judgment
+and was rebuilt around a graph control plane). These three shifts are the
+doctrine the rest of this section's schema, compiler loop, and Decision
+Ownership table exist to implement — treat them as the standard to evaluate
+any future agent-architecture change against, not just historical context.
+
+**Shift A — separate deterministic pre-processing from agentic work.**
+Signal detection, threshold monitoring, anomaly identification, and
+prioritization are handled by a standard deterministic pipeline before any
+LLM is invoked. Signals are pushed to a queue; the agent wakes up to
+*investigate*, never to *detect*. In this codebase: `perceive.py`, `vet`
+(`plan_vetter.py`), and `evaluate` (`evaluator.py`) must never invoke an LLM —
+only `resolve` (`goal_resolver.py`) and `plan` (`plan_generator.py`) may, and
+only when a deterministic gate (ambiguity, low confidence, sustained
+no-progress) decides escalation is warranted. A196/A197 (below) made this
+measurable instead of aspirational.
+
+**Shift B — consolidate reasoning into a single core agent.** Eliminate
+distributed judgment across autonomous peers. A single primary agent owns
+end-to-end reasoning and decision logic; short-lived sub-agents are spawned
+only for isolated, bounded data-gathering tasks and return raw results, never
+independent conclusions, to the primary agent. **Honest status in this
+codebase (audited 2026-08-23, see below): no single agent owns this today.**
+`WorkflowOrchestrator` explicitly does not reason (see the v2 Layer Model
+table — "Routes phases, enforces gates"). `goal_resolver.py` and
+`plan_generator.py` each own a separate, bounded LLM escalation tier and
+never see each other's reasoning, only structured state
+(`ResolvedGoal` → candidate list) — which is the *correct* shape for "bounded
+sub-agents returning raw results," not a violation. But nothing in the
+runtime watches a full episode's trajectory and reasons holistically about
+strategy; decisions are a scatter of phase-scoped deterministic gates
+(`_action_space_exhausted`, `force_explore_after`, `replan_passes`) each
+reading a narrow slice of `WorkflowState`. A194 (graph-driven termination) is
+the one piece that asks a holistic-ish question ("are there untested
+hypotheses left") — it's a single signal, not strategic reasoning over a run.
+This is a real, named gap, not a solved problem — the graph is the intended
+substrate of that continuity per this document's own mission statement, but
+today it is queried reactively, per-candidate, never consulted as "here's the
+whole episode so far, what's the strategy."
+
+**Shift C — the knowledge graph as a control plane, not just RAG.** Domain
+entities, relationships, and causal hierarchies are mapped into a structured
+graph that is not a passive retrieval database — it functions as the agent's
+control plane and search graph. Every graph edge represents an explicit
+testable hypothesis. The graph bounds the permissible paths the agent can
+explore, guiding investigation from *where* an issue occurs to *why*. This is
+this document's own "graph decides, LLM advises" principle stated by another
+name — see Decision Ownership below for how it's assigned per layer, and
+A191/A192 (candidate exclusion at construction, entity-neighborhood seeding)
+for concrete cases of moving from "graph scores an option" to "graph excludes
+or admits an option."
+
+#### The Graph-Guided Investigation Loop
+
+1. **Anchor on Entity** — the agent begins at the entity/object of interest
+   (in this codebase: A175's stable, cross-frame `entity_ref`).
+2. **Inspect Neighborhood** — retrieve adjacent nodes and outgoing edges from
+   the graph for that specific entity (A192/A199: `fetch_entity_neighborhood`,
+   `ENTITY_HYPOTHESIS` and `ENTITY_RULE` edges — hippocampy repo, B359).
+3. **Form & Test Hypotheses** — each edge is a specific, falsifiable causal
+   claim (A177's Rule/PREDICTS/FALSIFIED_BY objects).
+4. **Evaluate Evidence** — query ground-truth data (observed grid transitions)
+   to test the hypothesis against real numbers (A170's before/after diffs,
+   `evaluator.py`'s comparison against `predicted_outcome`).
+5. **Support or Contradict** — a contradicted branch is discarded (A182,
+   A185, A187, A191: falsification is authoritative and excludes the
+   candidate outright, not just penalizes it); a supported branch is
+   traversed deeper (A199: a confirmed rule on one click of an entity boosts
+   that same entity's score on its next consideration).
+6. **Terminate on Root Cause** — the loop repeats until all candidate
+   hypotheses are evaluated and exhausted (A194: termination is graph-aware,
+   not a flat attempt-count threshold — though see Shift B above for the
+   remaining gap in *strategic*, not just terminal, reasoning).
+
+Cards A190-A199 are the concrete implementation record for this section —
+see the Implementation Track entry below and `backlog/A193.md` for the full
+sequence, its two-group split (structural hardening vs. compliance
+measurement), and dependency ordering.
+
 ### Two-Level Graph Memory
 
 #### 1. Per-Game World Graph
@@ -201,6 +283,28 @@ The currently landed executable prototype for that direction is the ARC v2 runti
 - A123: `run_single_puzzle.py` integration, telemetry, and smoke path
 - B278: ARC-specific MCP query tool surface in the sibling `hippocampy` repo. Campy owns these brain internals (ecosystem-rules.md:47); ARC consumes them across the MCP seam via `agents/arc4/graph_queries.py`. A146 is the consumer-side verification that the A135/A138 evidence loop closes against B278 — closed 2026-08-04: hippocampy's `falsified_count` persistence bug (`docs/handoff/B278-graph-evidence.md`) no longer reproduces after a systematic-debugging pass (2026-08-03), re-verified from ARC's side against a live daemon.
 
+Graph-control-plane compliance hardening and measurement (2026-08-23 graph-engineering
+review, see `backlog/A193.md` for full context and ordering):
+
+- A190: `book_id` as a first-class `PlanCandidate` field (structural fix, replacing
+  six independently-reimplemented metadata resolutions)
+- A191: exclude repeatedly-falsified `book_id`s from the candidate set at construction
+- A192: seed candidate generation from entity-neighborhood graph evidence
+  (companion hippocampy tool tracked as B359 in the sibling repo)
+- A194: make termination graph-aware instead of a flat attempt counter
+- A195: assert the Shift-B invariant (no executed candidate is repeatedly-falsified)
+  on real run data, with a pass/fail gate script
+- A196: trend Shift-A/Shift-C compliance rates across runs, with a reporting script
+- A197: assert deterministic phases never incur LLM token cost, extending A195's
+  compliance_checks.py rather than a second parallel mechanism
+- A198: persist each compliance report to a JSONL history file so rates can be
+  trended over time, not just inspected one run at a time
+
+Ordering: A191 before A195 (the invariant A195 checks is only real once A191 exists);
+A192 and A194 before A196 (two of its four metrics have nothing to report otherwise);
+A195 before A197 (extends the module A195 introduces); A196 before A198 (extends its
+script directly). A190 has no hard dependency on the rest of the sequence.
+
 ### ARC v2 Runtime (Production Default — A127)
 
 The repo contains a modular ARC v2 runtime under `agents/arc4/`. This is the current production implementation path, promoting the v2 prototype to default agent.
@@ -237,6 +341,8 @@ The ARC v2 slice is organized around shared contracts and injected ports:
 4. Deterministic where possible, LLM where needed
 
 **v1 retirement (A148, 2026-08-02):** The v1 agent (`agents/arc3/`, including `orchestrator.py`) was moved to `archive/agents-arc3/` along with its dedicated test suite and the v1-vs-v2 comparison harness. It is not runnable via the CLI anymore — kept for git history/reference only. See `archive/agents-arc3/README.md`.
+
+**`agents/arc4/temporal_workflows.py` — deprecated (2026-08-23), not deleted.** `ArcPuzzleWorkflow` was a Temporal.io-backed execution path (opt-in via `--temporal` / `ARC_TEMPORAL_ENABLED=1`, never the default), intended to be the durable orchestration layer for trajectory-level decisions. On inspection it never became that: it's a mechanical port of the exact same fixed phase sequence and the same narrow gates `WorkflowOrchestrator` already runs, with zero reasoning added — Temporal's replay/retry machinery, not decision-making. The Reasoner design being worked out for Shift B (see Decision Ownership and the Graph-Engineering Principles section above) puts durability and decision authority in the graph itself, not in Temporal's per-workflow event history — a fresh process resumes by querying the graph for an attempt's in-progress state, not by Temporal replay, and the one case that requires special care (a non-idempotent side effect against the real ARC API, e.g. a click, in flight when a crash happens) is resolved by checking the real observation/game state on resume, not by trusting either store's own bookkeeping. `temporal_workflows.py` is not being built on or extended by that work. Left in place, unused, not wired into the new design — a separate future decision whether to remove it.
 
 ### ARC v2 MCP Rollout Status
 

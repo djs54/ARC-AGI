@@ -34,6 +34,16 @@ class PlanGeneratorLimits:
     voi_agreement_bonus: float = 0.10
     voi_disagreement_unit: float = 0.15
     voi_max_bonus: float = 0.40
+    # A192: how much a live (unfalsified) hypothesis from entity-neighborhood
+    # evidence boosts a click-target candidate's score -- entity-scoped signal
+    # analogous to action-family-scoped rule_confidence_weight.
+    entity_neighborhood_weight: float = 0.2
+    # B359 follow-up (2026-08-23): separate weight for entity-scoped confirmed
+    # Rule evidence (ENTITY_RULE), kept independently tunable from
+    # entity_neighborhood_weight (ENTITY_HYPOTHESIS) since a confirmed causal
+    # rule is stronger evidence than a still-under-test hypothesis -- same
+    # starting default for now, no empirical basis yet for a different ratio.
+    entity_rule_weight: float = 0.2
     replan_feedback_bonus: float = 0.3
     llm_low_score_threshold: float = 0.4
     llm_patience_steps: int = 2
@@ -90,7 +100,7 @@ class PlanGenerator:
         if llm_port is not None and candidates and candidates[0].score < self._limits.llm_low_score_threshold:
             llm_patch = self._query_llm(llm_port, perception, goal, candidates)
             if llm_patch is not None:
-                candidates = self._apply_llm_patch(candidates, llm_patch)
+                candidates = self._apply_llm_patch(candidates, llm_patch, state)
 
         ranked = self._rank_candidates(candidates)
 
@@ -215,6 +225,8 @@ class PlanGenerator:
                 falsifications = int(state.action_falsification_counts.get(book_id, 0))
                 is_untested = attempts == 0
                 repeated_falsified = falsifications >= 2
+                if repeated_falsified:
+                    continue
 
                 # A185: book_id != action_id only for ACTION6's per-coordinate
                 # click targets. A genuinely untested coordinate must not
@@ -256,6 +268,35 @@ class PlanGenerator:
                     score -= min(self._limits.repeat_attempt_penalty * attempts, 0.18)
                 if falsifications and not graph_contradiction_penalty_applied:
                     score -= min(self._limits.falsification_penalty * falsifications, 0.55)
+
+                # A192: entity-neighborhood evidence for click targets. Only applies
+                # when action_id == "ACTION6", entity_ref is present (not the fallback
+                # sentinel), and graph_port supports the query.
+                entity_neighborhood_grounded = False
+                entity_ref = target_info.get("entity_ref")
+                if entity_ref is not None and graph_port is not None:
+                    fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
+                    if fetch_neighborhood is not None:
+                        try:
+                            neighborhood = fetch_neighborhood(entity_ref)
+                            live_hypotheses = [h for h in neighborhood.get("hypotheses", []) if not h.get("falsified")]
+                            if live_hypotheses:
+                                score += max(h.get("confidence", 0.0) for h in live_hypotheses) * self._limits.entity_neighborhood_weight
+                                # A196: flag this so graph_grounded telemetry
+                                # can see entity-scoped grounding, not just
+                                # action-family-level graph_evidence.
+                                entity_neighborhood_grounded = True
+                            # B359 follow-up: entity-scoped confirmed Rule
+                            # evidence (ENTITY_RULE), additive and separate
+                            # from the hypothesis boost above -- both can
+                            # contribute if both exist for this entity.
+                            live_rules = [r for r in neighborhood.get("rules", []) if not r.get("falsified")]
+                            if live_rules:
+                                score += max(r.get("confidence", 0.0) for r in live_rules) * self._limits.entity_rule_weight
+                                entity_neighborhood_grounded = True
+                        except Exception:
+                            pass
+
                 if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
                     score += self._limits.replan_feedback_bonus
 
@@ -296,6 +337,7 @@ class PlanGenerator:
                             "repeated_falsified": repeated_falsified,
                             "replan_passes": state.replan_passes,
                             "mechanic_prior_source": action_id in mechanic_action_set,
+                            "entity_neighborhood_grounded": entity_neighborhood_grounded,
                             **target_info,
                         },
                     )
@@ -310,14 +352,14 @@ class PlanGenerator:
                 candidates.append(
                     _CandidateRecord(
                         action_id=veto_action,
-                        book_id=str((state.latest_veto_alternative.metadata or {}).get("book_id") or veto_action),
+                        book_id=state.latest_veto_alternative.book_id,
                         payload=dict(state.latest_veto_alternative.payload or {}),
                         score=self._limits.replan_feedback_bonus,
                         rationale=f"replan feedback suggests {veto_action}",
                         expected_effect=state.latest_veto_alternative.expected_effect,
                         predicted_outcome=dict(state.latest_veto_alternative.predicted_outcome or {}),
                         metadata={
-                            "book_id": str((state.latest_veto_alternative.metadata or {}).get("book_id") or veto_action),
+                            "book_id": state.latest_veto_alternative.book_id,
                             "replan_feedback": True,
                             "source": "veto_alternative",
                         },
@@ -549,14 +591,22 @@ class PlanGenerator:
             "reason": reason_match.group(1).strip() if reason_match else response.strip()[:200],
         }
 
-    def _apply_llm_patch(self, candidates: Sequence[_CandidateRecord], patch: dict[str, Any]) -> list[_CandidateRecord]:
+    def _apply_llm_patch(self, candidates: Sequence[_CandidateRecord], patch: dict[str, Any], state: WorkflowState | None = None) -> list[_CandidateRecord]:
         action_id = str(patch.get("action_id"))
         reason = str(patch.get("reason", "") or "")
         bonus = float(patch.get("confidence", 0.0) or 0.0)
+        # A189: an LLM patch names a bare action_id, but click-target actions
+        # (ACTION6) can have several distinct book_id coordinates sharing that
+        # same action_id in the candidate list. Boost at most the single
+        # best-scoring same-family candidate -- not every one that matches --
+        # so one LLM decision can't simultaneously re-rank an unbounded number
+        # of individually-unreasoned-about coordinates.
+        same_family = [c for c in candidates if c.action_id == action_id]
+        target = max(same_family, key=lambda c: c.score, default=None)
         updated: list[_CandidateRecord] = []
         matched = False
         for candidate in candidates:
-            if candidate.action_id == action_id:
+            if target is not None and candidate is target:
                 matched = True
                 # A184: the escalation prompt never asks the LLM for a
                 # confidence value, so `bonus` is always 0.0 in practice --
@@ -600,18 +650,33 @@ class PlanGenerator:
                 continue
             updated.append(candidate)
         if not matched:
-            updated.append(
-                _CandidateRecord(
-                    action_id=action_id,
-                    book_id=action_id,
-                    payload={},
-                    score=max(self._limits.replan_feedback_bonus, bonus),
-                    rationale=reason or f"llm suggested {action_id}",
-                    expected_effect=patch.get("expected_effect"),
-                    predicted_outcome={"kind": "grid_change", "confidence": float(bonus or 0.4)},
-                    metadata={"book_id": action_id, "llm_guidance": True, "llm_reason": reason},
-                )
+            # A191 excludes repeated_falsified book_ids from `candidates`
+            # entirely, so an LLM patch naming one of them never matches the
+            # `matched` branch above and would otherwise fall through to this
+            # "unmatched" path -- which used to treat it exactly like a
+            # genuinely novel suggestion (e.g. an action the deterministic
+            # scan didn't even consider) and hand it a fresh positive score
+            # floor with no `repeated_falsified` metadata at all. That
+            # re-opens the exact hole A184 closed, through a side door A184's
+            # own guard (which only inspects candidates still in the list)
+            # can't see. Check the same falsification history `_build_candidates`
+            # already excluded this action_id for, and refuse to resurrect it.
+            already_repeated_falsified = (
+                state is not None and int(state.action_falsification_counts.get(action_id, 0)) >= 2
             )
+            if not already_repeated_falsified:
+                updated.append(
+                    _CandidateRecord(
+                        action_id=action_id,
+                        book_id=action_id,
+                        payload={},
+                        score=max(self._limits.replan_feedback_bonus, bonus),
+                        rationale=reason or f"llm suggested {action_id}",
+                        expected_effect=patch.get("expected_effect"),
+                        predicted_outcome={"kind": "grid_change", "confidence": float(bonus or 0.4)},
+                        metadata={"book_id": action_id, "llm_guidance": True, "llm_reason": reason},
+                    )
+                )
         return updated
 
     def _should_force_explore(self, state: WorkflowState, top_candidate: _CandidateRecord) -> bool:
@@ -711,6 +776,7 @@ class PlanGenerator:
                         "y": y,
                         "entity_kind": entity.kind,
                         "entity_color": entity.value,
+                        "entity_ref": attrs.get("entity_ref"),
                     },
                 )
             )
@@ -765,6 +831,7 @@ class PlanGenerator:
             payload=dict(candidate.payload),
             predicted_outcome=dict(candidate.predicted_outcome or {}),
             metadata=metadata,
+            book_id=candidate.book_id,
         )
 
     @staticmethod

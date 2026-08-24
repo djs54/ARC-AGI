@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from agents.common.failure_taxonomy import FailureTaxonomy, classify_failure
+from .compliance_checks import check_shift_b_invariants
 from .ports import GraphQueryPort
 from .types import EvaluationResult, ExecutionResult, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowDecision, WorkflowPhase, WorkflowState
 
@@ -54,7 +55,7 @@ class Evaluator:
         predicted_effect = self._normalize_text(execution.predicted_effect)
         actual_effect = self._normalize_text(execution.actual_effect)
         terminal_reason = self._terminal_reason(execution)
-        action_space_exhausted = self._action_space_exhausted(execution, current_attempt_count)
+        action_space_exhausted, exhaustion_source = self._action_space_exhausted(execution, current_attempt_count)
         exec_meta = execution.metadata if isinstance(execution.metadata, Mapping) else {}
         level_gain = int(exec_meta.get("level_gain") or 0)
         meaningful_progress = bool(execution.did_progress)
@@ -168,37 +169,44 @@ class Evaluator:
         else:
             progress_tier = "flat"
 
+        compliance_violations = check_shift_b_invariants(execution)
+
+        metadata_dict = {
+            "action_id": execution.action_id,
+            "action_family": action_family,
+            "predicted_effect": execution.predicted_effect,
+            "actual_effect": execution.actual_effect,
+            "effect_match": effect_match,
+            "current_falsification_count": current_falsification_count,
+            "projected_falsification_count": current_falsification_count + falsification_delta,
+            "current_attempt_count": current_attempt_count,
+            "meaningful_progress": meaningful_progress,
+            "terminal_reason": terminal_reason,
+            "action_space_exhausted": action_space_exhausted,
+            "falsification_pressure_after": 0 if meaningful_progress else current_falsification_count + falsification_delta,
+            "goal_id": goal.selected.goal_id,
+            "stale_override": stale_override,
+            "grid_unchanged": grid_unchanged,
+            "grid_changed": grid_changed_flag,
+            "grid_diff": perception.metadata.get("grid_diff", {}) if isinstance(getattr(perception, "metadata", None), Mapping) else {},
+            "level_gain": level_gain,
+            "progress_tier": progress_tier,
+            "predicted_kind": predicted_kind,
+            "observed_kind": observed_kind,
+            "causal_override": causal_override,
+            "causal_path": causal_path,
+            "weak_prediction_override": weak_prediction_override,
+            "compliance_violations": compliance_violations,
+        }
+        if action_space_exhausted:
+            metadata_dict["exhaustion_source"] = exhaustion_source
+
         evaluation = EvaluationResult(
             decision=decision,
             meaningful_progress=meaningful_progress,
             falsification_delta=falsification_delta,
             reason=reason,
-            metadata={
-                "action_id": execution.action_id,
-                "action_family": action_family,
-                "predicted_effect": execution.predicted_effect,
-                "actual_effect": execution.actual_effect,
-                "effect_match": effect_match,
-                "current_falsification_count": current_falsification_count,
-                "projected_falsification_count": current_falsification_count + falsification_delta,
-                "current_attempt_count": current_attempt_count,
-                "meaningful_progress": meaningful_progress,
-                "terminal_reason": terminal_reason,
-                "action_space_exhausted": action_space_exhausted,
-                "falsification_pressure_after": 0 if meaningful_progress else current_falsification_count + falsification_delta,
-                "goal_id": goal.selected.goal_id,
-                "stale_override": stale_override,
-                "grid_unchanged": grid_unchanged,
-                "grid_changed": grid_changed_flag,
-                "grid_diff": perception.metadata.get("grid_diff", {}) if isinstance(getattr(perception, "metadata", None), Mapping) else {},
-                "level_gain": level_gain,
-                "progress_tier": progress_tier,
-                "predicted_kind": predicted_kind,
-                "observed_kind": observed_kind,
-                "causal_override": causal_override,
-                "causal_path": causal_path,
-                "weak_prediction_override": weak_prediction_override,
-            },
+            metadata=metadata_dict,
         )
 
         evaluation.metadata["graph_recording"] = self._record_evaluation(evaluation)
@@ -335,11 +343,23 @@ class Evaluator:
                 return key
         return None
 
-    def _action_space_exhausted(self, execution: ExecutionResult, current_attempt_count: int) -> bool:
+    def _action_space_exhausted(self, execution: ExecutionResult, current_attempt_count: int) -> tuple[bool, str]:
         metadata = execution.metadata if isinstance(execution.metadata, Mapping) else {}
         if bool(metadata.get("action_space_exhausted")) or bool(metadata.get("exhausted_action_space")):
-            return True
-        return current_attempt_count >= self._limits.exhausted_action_attempt_threshold
+            return True, "env_reported"
+        if current_attempt_count < self._limits.exhausted_action_attempt_threshold:
+            return False, ""
+        if self._graph_query_port is not None:
+            fetch_untested = getattr(self._graph_query_port, "fetch_untested_actions", None)
+            if fetch_untested is not None:
+                try:
+                    untested = fetch_untested()
+                    if untested:
+                        return False, ""
+                    return True, "graph_confirmed_no_untested"
+                except Exception:
+                    pass
+        return True, "threshold_only"
 
 
 def classify_v2_termination(status: str, reason: str, exception: BaseException | None = None) -> str:

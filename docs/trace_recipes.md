@@ -96,3 +96,46 @@ Identify steps where progress was made:
 ```bash
 jq -r '.[] | select(.details.score_delta > 0 or .details.reward > 0) | [.details.step, .details.score_delta, .details.reward] | @tsv' agent_execution_trace.json
 ```
+
+## A196: Shift-A/Shift-C Compliance Metrics
+
+### LLM escalation rate (plan-tier)
+Per-step plan-tier LLM escalations (when a patched/boosted candidate was actually executed):
+```bash
+jq -s '[.[] | select(.snapshot_type=="step")] | (map(select(.llm_escalated_plan)) | length) / length * 100' agent_execution_trace.json
+```
+
+### Graph-grounded decision rate
+Percentage of steps where the executed candidate had non-empty graph evidence at selection time:
+```bash
+jq -s '[.[] | select(.snapshot_type=="step")] | (map(select(.graph_grounded)) | length) / length * 100' agent_execution_trace.json
+```
+
+### Capability missing degradations
+Total count of graph calls that degraded to `capability_missing` (broker unavailable, tool not implemented):
+```bash
+jq -s '[.[] | select(.snapshot_type=="step")] | map(.capability_missing_count // 0) | add' agent_execution_trace.json
+```
+
+### Exhaustion source breakdown
+When the agent terminated (if A194's `exhaustion_source` is present), the breakdown by termination reason:
+```bash
+jq -s '[.[] | select(.snapshot_type=="step" and .exhaustion_source) | .exhaustion_source] | group_by(.) | map({source: .[0], count: length})' agent_execution_trace.json
+```
+
+Or use the aggregator script for a complete report:
+```bash
+python scripts/graph_compliance_report.py agent_execution_trace.json
+```
+
+## A198: Compliance Report History Trending
+
+### Trend graph-grounded decision rate over the last 10 recorded runs
+```bash
+jq -s '.[-10:] | .[] | {timestamp, graph_grounded_decision_rate}' reports/compliance_history.jsonl
+```
+
+Or use the history printer for a quick overview of recent runs:
+```bash
+python scripts/graph_compliance_report.py --show-history --last 10
+```

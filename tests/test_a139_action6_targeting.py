@@ -116,6 +116,14 @@ def test_action6_fallback_center_click_without_entities():
 
 
 def test_book_id_separates_attempt_counts():
+    """Updated for A191 (2026-08-23): this test's original point was that
+    book_id-scoped tracking keeps a falsified coordinate (ACTION6@5,5) from
+    poisoning a fresh one (ACTION6@20,20) -- confirmed by comparing scores.
+    A191 demonstrates the same separation even more strongly: the falsified
+    coordinate (falsifications=2, at A191's exclusion threshold) is now
+    excluded from the candidate set entirely rather than merely
+    out-scored, while the fresh coordinate is correctly present and
+    untested."""
     e1 = _entity(kind="point", value="2", centroid=(5.0, 5.0), cell_count=1, coverage=0.01)
     e2 = _entity(kind="point", value="9", centroid=(20.0, 20.0), cell_count=1, coverage=0.01)
     state = WorkflowState(
@@ -129,9 +137,11 @@ def test_book_id_separates_attempt_counts():
     assert result.payload is not None
     ranked = result.payload.metadata["ranked_candidates"]
     by_book = {item["book_id"]: item for item in ranked}
-    assert by_book["ACTION6@5,5"]["metadata"]["untested"] is False
+    assert "ACTION6@5,5" not in by_book, (
+        "a book_id falsified twice must be excluded from the candidate set entirely (A191), "
+        "not merely present with a lower score"
+    )
     assert by_book["ACTION6@20,20"]["metadata"]["untested"] is True
-    assert by_book["ACTION6@20,20"]["score"] > by_book["ACTION6@5,5"]["score"]
 
 
 def test_action_family_of_composite_id():

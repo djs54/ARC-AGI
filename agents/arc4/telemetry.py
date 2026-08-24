@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .types import EvaluationResult, ExecutionResult, GoalHypothesis, PlanningResult, ResolvedGoal, VetDecision, WorkflowRunResult, WorkflowState, WorkflowStatus
 from .evaluator import classify_v2_termination
+from .compliance_checks import check_shift_a_invariants
 
 
 @dataclass(slots=True)
@@ -32,16 +33,33 @@ class ArcV2Telemetry:
     _latest_vet: VetDecision | None = None
     _latest_execution: ExecutionResult | None = None
     _latest_evaluation: EvaluationResult | None = None
+    _llm_port: Any = None
+    _graph_query_port: Any = None
+    _phase_token_costs: dict[str, int] = field(default_factory=dict)
 
     def wrap_phase(self, phase_name: str, phase_callable: Callable[..., Any]) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            # Capture token delta from llm_port if available. The llm_port's counters
+            # are updated synchronously during LLM calls within phase_callable, even
+            # though telemetry.tokens_input/output are only synced to llm_port's values
+            # after the entire workflow completes (in dispatch.py).
+            tokens_before = (0, 0)
+            if self._llm_port is not None:
+                tokens_before = (self._llm_port.total_tokens_in, self._llm_port.total_tokens_out)
+
             result = phase_callable(*args, **kwargs)
-            self._record_phase_result(phase_name, result, args)
+
+            tokens_after = (0, 0)
+            if self._llm_port is not None:
+                tokens_after = (self._llm_port.total_tokens_in, self._llm_port.total_tokens_out)
+
+            phase_token_delta = (tokens_after[0] - tokens_before[0]) + (tokens_after[1] - tokens_before[1])
+            self._record_phase_result(phase_name, result, args, phase_token_delta=phase_token_delta)
             return result
 
         return wrapped
 
-    def _record_phase_result(self, phase_name: str, result: Any, args: tuple[Any, ...]) -> None:
+    def _record_phase_result(self, phase_name: str, result: Any, args: tuple[Any, ...], phase_token_delta: int = 0) -> None:
         payload = getattr(result, "payload", None)
         if phase_name == "perceive" and hasattr(payload, "observation"):
             self._latest_observation = getattr(payload, "observation", None)
@@ -56,7 +74,10 @@ class ArcV2Telemetry:
         elif phase_name == "evaluate" and isinstance(payload, EvaluationResult):
             self._latest_evaluation = payload
 
-        snapshot = self._phase_transition_snapshot(phase_name, result, args)
+        # Accumulate phase token costs across the episode
+        self._phase_token_costs[phase_name] = self._phase_token_costs.get(phase_name, 0) + phase_token_delta
+
+        snapshot = self._phase_transition_snapshot(phase_name, result, args, phase_token_delta)
         self._phase_history.append(snapshot)
         self._emit(snapshot)
 
@@ -64,6 +85,16 @@ class ArcV2Telemetry:
             step_snapshot = self._step_snapshot(args)
             self._phase_history.append(step_snapshot)
             self._emit(step_snapshot)
+            # Reset per-step phase token costs now that this step's
+            # compliance count has been computed -- without this, a single
+            # Shift-A violation on step N would silently re-count itself
+            # into every subsequent step's compliance_violation_count for
+            # the rest of the episode (the dict is keyed by phase name, and
+            # `check_shift_a_invariants` doesn't know a violation was
+            # already reported), inflating any future rate-based metric
+            # built on this field into "steps since the first violation"
+            # instead of "how many times did this actually happen."
+            self._phase_token_costs = {}
             self._cycle_index += 1
             self._last_phase = phase_name
 
@@ -99,7 +130,7 @@ class ArcV2Telemetry:
             final_result["world_model_live_snapshot"] = dict(final_result["world_model_snapshot"])
         return final_result
 
-    def _phase_transition_snapshot(self, phase_name: str, result: Any, args: Sequence[Any]) -> dict[str, Any]:
+    def _phase_transition_snapshot(self, phase_name: str, result: Any, args: Sequence[Any], phase_token_delta: int = 0) -> dict[str, Any]:
         state = self._extract_state(args)
         payload = getattr(result, "payload", None)
         snapshot = {
@@ -117,6 +148,7 @@ class ArcV2Telemetry:
             "reason": getattr(result, "reason", None),
             "runtime_seconds": round(time.monotonic() - self.started_at, 3),
             "workflow_step_index": getattr(state, "step_index", 0) if state is not None else 0,
+            "phase_token_cost": phase_token_delta,
         }
         if phase_name == "evaluate" and isinstance(payload, EvaluationResult):
             snapshot.update(
@@ -149,6 +181,27 @@ class ArcV2Telemetry:
         action_payload = {}
         if execution is not None and execution.candidate is not None and isinstance(execution.candidate.payload, Mapping):
             action_payload = dict(execution.candidate.payload)
+
+        llm_escalated_plan = False
+        graph_grounded = False
+        if execution is not None and execution.candidate is not None and isinstance(execution.candidate.metadata, Mapping):
+            cand_meta = execution.candidate.metadata
+            llm_escalated_plan = bool(cand_meta.get("llm_guidance"))
+            graph_evidence = cand_meta.get("graph_evidence")
+            graph_grounded = bool(graph_evidence) or bool(cand_meta.get("entity_neighborhood_grounded"))
+
+        exhaustion_source = None
+        if evaluation is not None and isinstance(evaluation.metadata, Mapping):
+            exhaustion_source = evaluation.metadata.get("exhaustion_source")
+
+        capability_missing_count = 0
+        if self._graph_query_port is not None:
+            pop = getattr(self._graph_query_port, "pop_capability_missing_count", None)
+            if pop is not None:
+                try:
+                    capability_missing_count = pop()
+                except Exception:
+                    capability_missing_count = 0
 
         snapshot = {
             "snapshot_type": "step",
@@ -184,6 +237,11 @@ class ArcV2Telemetry:
             "action_y": action_payload.get("y"),
             "decision_source": "arc_v2",
             "state": self._latest_observation_state(),
+            "compliance_violation_count": self._compute_compliance_violation_count(evaluation),
+            "llm_escalated_plan": llm_escalated_plan,
+            "graph_grounded": graph_grounded,
+            "exhaustion_source": exhaustion_source,
+            "capability_missing_count": capability_missing_count,
         }
 
         if evaluation is not None:
@@ -197,6 +255,16 @@ class ArcV2Telemetry:
         if perception is not None:
             snapshot["grid_hash"] = perception.grid_hash
         return snapshot
+
+    def _compute_compliance_violation_count(self, evaluation: EvaluationResult | None) -> int:
+        """Count both Shift-A (deterministic phase token cost) and Shift-B violations."""
+        # Shift-B violations from evaluation metadata
+        shift_b_violations = evaluation.metadata.get("compliance_violations", []) if evaluation is not None and isinstance(evaluation.metadata, Mapping) else []
+
+        # Shift-A violations from phase token costs
+        shift_a_violations = check_shift_a_invariants(self._phase_token_costs)
+
+        return len(shift_b_violations) + len(shift_a_violations)
 
     def _emit(self, snapshot: dict[str, Any]) -> None:
         if self.append_snapshot is not None:

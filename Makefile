@@ -1,4 +1,4 @@
-.PHONY: help smoke smoke-compare smoke-temporal test test-a test-all install temporal-up temporal-down
+.PHONY: help smoke smoke-compare smoke-temporal test test-a test-all install temporal-up temporal-down check-compliance compliance-history
 
 PYTHON ?= .venv/bin/python
 CAMPY_REPO ?= ../hippocampy
@@ -52,3 +52,8 @@ smoke-temporal: temporal-up ## full Temporal smoke: start server, run puzzle via
 	$(MAKE) temporal-down; \
 	exit $$RESULT
 
+check-compliance: ## exit non-zero if the most recent smoke trace recorded a Shift-B violation
+	$(PYTHON) scripts/check_compliance_violations.py
+
+compliance-history: ## record the latest smoke trace's compliance report into the trend history
+	$(PYTHON) scripts/graph_compliance_report.py artifacts/agent_execution_trace.json --append-history

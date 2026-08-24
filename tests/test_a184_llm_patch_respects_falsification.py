@@ -127,3 +127,66 @@ class TestEndToEndRepeatedFalsifiedActionLosesToUntested:
             f"repeatedly-falsified ACTION4 should not outrank untested alternatives, "
             f"got top candidate {result.candidate.action_id!r} (score={result.candidate.score})"
         )
+
+
+class TestApplyLlmPatchUnmatchedFallbackRespectsFalsificationHistory:
+    """Found during A191's implementation (2026-08-23): A191 excludes
+    repeated_falsified book_ids from `_build_candidates`'s output entirely,
+    which means an LLM patch naming one of them never hits this function's
+    `matched` branch (the one A184 actually guards) -- it falls through to
+    the "unmatched action_id" path instead, which used to treat it exactly
+    like a genuinely novel suggestion and hand it a fresh positive score
+    floor with no `repeated_falsified` awareness at all. That silently
+    re-opened the hole A184 closed, through a path A184's own guard can't
+    see (it only inspects candidates still in the list). Fixed by passing
+    `state` into `_apply_llm_patch` and checking the same falsification
+    history `_build_candidates` already excluded this action_id for."""
+
+    def test_unmatched_action_id_with_falsification_history_is_not_resurrected(self):
+        planner = PlanGenerator(PlanGeneratorLimits())
+        candidates = [_untested_candidate(action_id="ACTION1")]
+        state = WorkflowState(action_falsification_counts={"ACTION4": 2})
+
+        patched = planner._apply_llm_patch(candidates, {"action_id": "ACTION4", "reason": "try it again"}, state)
+
+        assert not any(c.action_id == "ACTION4" for c in patched), (
+            "ACTION4 has 2 real falsifications on record -- the unmatched-action fallback "
+            "must not resurrect it with a fresh positive score just because the LLM named it"
+        )
+        assert len(patched) == 1
+
+    def test_unmatched_action_id_without_falsification_history_still_created(self):
+        """Regression guard: a genuinely novel LLM suggestion (no falsification
+        history at all) must still work exactly as before this fix."""
+        planner = PlanGenerator(PlanGeneratorLimits())
+        candidates = [_untested_candidate(action_id="ACTION1")]
+        state = WorkflowState(action_falsification_counts={})
+
+        patched = planner._apply_llm_patch(candidates, {"action_id": "ACTION9", "reason": "hallucinated pick"}, state)
+
+        assert len(patched) == 2
+        new_candidate = next(c for c in patched if c.action_id == "ACTION9")
+        assert new_candidate.score >= PlanGeneratorLimits().replan_feedback_bonus
+
+    def test_unmatched_action_id_below_repeated_falsified_threshold_still_created(self):
+        """A single real falsification (below the >= 2 exclusion threshold)
+        must not block the unmatched fallback -- only genuinely
+        repeated_falsified history should."""
+        planner = PlanGenerator(PlanGeneratorLimits())
+        candidates = [_untested_candidate(action_id="ACTION1")]
+        state = WorkflowState(action_falsification_counts={"ACTION4": 1})
+
+        patched = planner._apply_llm_patch(candidates, {"action_id": "ACTION4", "reason": "try it again"}, state)
+
+        assert any(c.action_id == "ACTION4" for c in patched)
+
+    def test_no_state_passed_preserves_old_behavior(self):
+        """Backward compatibility: callers that don't pass `state` (state=None
+        default) get exactly the pre-fix behavior -- this guard is additive,
+        not a breaking API change."""
+        planner = PlanGenerator(PlanGeneratorLimits())
+        candidates = [_untested_candidate(action_id="ACTION1")]
+
+        patched = planner._apply_llm_patch(candidates, {"action_id": "ACTION4", "reason": "try it again"})
+
+        assert any(c.action_id == "ACTION4" for c in patched)

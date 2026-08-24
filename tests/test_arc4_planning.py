@@ -64,6 +64,13 @@ def _state(**overrides) -> WorkflowState:
 
 
 def test_untested_actions_rank_ahead_of_repeatedly_falsified_actions():
+    """Updated for A191 (2026-08-23): action-stale has 3 falsifications, at
+    or above A191's exclusion threshold (>= 2) -- it's now excluded from
+    the candidate set entirely rather than merely out-scored and present
+    as a lower-ranked alternative. This is a strictly stronger form of the
+    same "untested ranks ahead of falsified" guarantee this test's name
+    describes: they don't even compete, since the falsified action was
+    never made a candidate at all."""
     generator = PlanGenerator(PlanGeneratorLimits(untested_bonus=0.2, falsification_penalty=0.18, goal_alignment_bonus=0.1))
     perception = _perception(available_actions=("action-stale", "action-fresh"))
     goal = _goal(preferred_actions=("action-stale", "action-fresh"))
@@ -81,7 +88,10 @@ def test_untested_actions_rank_ahead_of_repeatedly_falsified_actions():
     assert result.payload is not None
     assert result.payload.candidate is not None
     assert result.payload.candidate.action_id == "action-fresh"
-    assert result.payload.alternatives[0].action_id == "action-stale"
+    assert not any(c.action_id == "action-stale" for c in result.payload.alternatives), (
+        "a repeatedly-falsified action must be excluded from the candidate set entirely (A191), "
+        "not merely present as a lower-ranked alternative"
+    )
 
 
 def test_goal_conditioning_uses_resolved_goal_contract():
