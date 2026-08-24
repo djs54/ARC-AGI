@@ -305,6 +305,25 @@ A192 and A194 before A196 (two of its four metrics have nothing to report otherw
 A195 before A197 (extends the module A195 introduces); A196 before A198 (extends its
 script directly). A190 has no hard dependency on the rest of the sequence.
 
+Trajectory Reasoner (2026-08-23, see
+`docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md` for the full design
+and `backlog/A206.md` for sequencing context) — the component that closes the Shift-B
+gap named above ("no agent... owns the trajectory"):
+
+- A200: pure investigation-thread state machine (no graph/LLM/I/O)
+- A201: hippocampy handoff doc + graph client stubs for investigation threads
+- A202: wire the Reasoner into `WorkflowOrchestrator`
+- A203: anchor-biasing in `goal_resolver.py`/`plan_generator.py`
+- A204: resume/crash-safety — write-ahead cycles, real-observation reconciliation (P0)
+- A205: degraded-mode fallback + `AWAITING_LLM` failure handling
+
+Ordering: A200 and A201 are the only safe parallel step (no file overlap, no
+dependency on each other). A202 depends on both. A203 depends on A202. A204 and A205
+both depend on A202 and have no logical dependency on each other, but are sequenced
+(A204 then A205) rather than run in parallel because both plausibly touch the same
+files (`types.py`, `workflow.py`'s Reasoner hook) — same file-conflict-safety
+reasoning as A196/A197 in the prior sequence.
+
 ### ARC v2 Runtime (Production Default — A127)
 
 The repo contains a modular ARC v2 runtime under `agents/arc4/`. This is the current production implementation path, promoting the v2 prototype to default agent.
