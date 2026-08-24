@@ -12,6 +12,7 @@ from .types import (
     PerceptionSnapshot,
     PhaseResult,
     PlanningResult,
+    ReasonerOutcome,
     ResolvedGoal,
     VetDecision,
     WorkflowState,
@@ -105,6 +106,30 @@ class EvaluatePhase(Protocol):
     ) -> PhaseResult[EvaluationResult]: ...
 
 
+@runtime_checkable
+class ReasonerPhase(Protocol):
+    """A202: runs once per cycle, after `evaluate`, and decides whether to
+    advance to a new investigation anchor, repeat (deepen or retry), or
+    terminate the whole episode. `graph_port`/`stall_reason` are keyword-only
+    and optional -- a concrete implementation (agents/arc4/reasoner_signals.py
+    ::run_reasoner_cycle) needs graph access and the orchestrator's own
+    check_stall signal, but WorkflowOrchestrator itself does not need to hold
+    a graph_port reference: bundle.py wires a closure over graph_port the
+    same way it already does for resolve/plan, so the orchestrator's call
+    site only ever needs to pass stall_reason explicitly."""
+
+    def __call__(
+        self,
+        state: WorkflowState,
+        perception: PerceptionSnapshot,
+        execution: ExecutionResult,
+        evaluation: EvaluationResult,
+        *,
+        graph_port: GraphQueryPort | None = None,
+        stall_reason: str | None = None,
+    ) -> ReasonerOutcome: ...
+
+
 @dataclass(slots=True)
 class WorkflowDependencies:
     perceive: PerceivePhase
@@ -113,3 +138,4 @@ class WorkflowDependencies:
     vet: VetPhase
     execute: ExecutePhase
     evaluate: EvaluatePhase
+    reason: ReasonerPhase | None = None  # None means "no Reasoner, run exactly as today"

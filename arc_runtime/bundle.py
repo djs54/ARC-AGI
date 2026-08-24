@@ -16,6 +16,7 @@ from agents.arc4.perceive import PerceiveAgent
 from agents.arc4.plan_generator import PlanGenerator, PlanGeneratorLimits
 from agents.arc4.plan_vetter import PlanVetter
 from agents.arc4.ports import WorkflowDependencies
+from agents.arc4.reasoner_signals import run_reasoner_cycle
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import PhaseResult, PhaseStatus, WorkflowPhase
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
@@ -179,6 +180,19 @@ def build_arc_v2_bundle(
         ),
     )
     evaluate = telemetry.wrap_phase("evaluate", Evaluator(graph_query_port=graph_port).evaluate)
+    # A202: reason is always-on once wired -- mirrors how every other phase
+    # closure above already captures graph_port/llm_port at bundle-build
+    # time rather than the orchestrator holding its own reference, so
+    # WorkflowOrchestrator itself needs no graph_port constructor param.
+    reason = lambda state, perception, execution, evaluation, *, stall_reason=None: run_reasoner_cycle(
+        state,
+        perception,
+        execution,
+        evaluation,
+        graph_port=graph_port,
+        llm_port=llm_port,
+        stall_reason=stall_reason,
+    )
 
     dependencies = WorkflowDependencies(
         perceive=perceive,
@@ -187,6 +201,7 @@ def build_arc_v2_bundle(
         vet=vet,
         execute=execute,
         evaluate=evaluate,
+        reason=reason,
     )
     orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=max_cycles))
     return ArcV2Bundle(graph_port=graph_port, telemetry=telemetry, dependencies=dependencies, orchestrator=orchestrator, llm_port=llm_port)

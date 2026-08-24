@@ -143,6 +143,20 @@ class WorkflowOrchestrator:
                 self._record_evaluation_state(state, execution_payload, evaluation_payload)
                 state.step_index += 1
 
+                # A202 / spec section 5: the environment's own authoritative
+                # terminal signal (a real win/loss from the ARC API itself,
+                # via termination_from_evaluation) stays independent and
+                # short-circuits *before* the Reasoner runs -- "an
+                # environment-terminal result doesn't need a strategic
+                # opinion." This check is deliberately positioned ahead of
+                # the stall/Reasoner block below (moved up from its prior
+                # position after the stall check) so a real terminal result
+                # is never routed through Reasoner logic, and the Reasoner
+                # is never invoked once the episode is already over.
+                termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
+                if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
+                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
+
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
                 # Count distinct base actions so ACTION6@x,y click targets don't
@@ -164,12 +178,34 @@ class WorkflowOrchestrator:
                     num_available,
                     num_attempted,
                 )
-                if stall_reason is not None:
-                    return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
 
-                termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
-                if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
-                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
+                if self._dependencies.reason is not None:
+                    # A202 / spec section 5: the Reasoner now owns the
+                    # advance/repeat/terminate decision. check_stall's signal
+                    # is folded in as one of its inputs (see
+                    # reasoner_signals.compute_cycle_signals) instead of
+                    # independently ending the run in the `else` branch below.
+                    outcome = self._dependencies.reason(
+                        state,
+                        perception_payload,
+                        execution_payload,
+                        evaluation_payload,
+                        stall_reason=stall_reason,
+                    )
+                    if outcome.decision == "terminate":
+                        return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
+                    if outcome.decision in ("repeat_deepen", "repeat_retry"):
+                        # Consumed by a later card (A203, anchor-biasing in
+                        # goal_resolver/plan_generator) -- this card only
+                        # needs to produce and store the hint correctly.
+                        state.reasoner_anchor_hint = outcome
+                    else:
+                        state.reasoner_anchor_hint = None
+                else:
+                    # No Reasoner configured -- today's exact existing
+                    # behavior, byte-for-byte.
+                    if stall_reason is not None:
+                        return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
 
                 current_observation = execution_payload.observation
             except Exception:

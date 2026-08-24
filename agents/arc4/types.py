@@ -308,6 +308,43 @@ class EvaluationResult:
         )
 
 
+@dataclass(slots=True)
+class ReasonerOutcome:
+    """A202: the orchestrator-facing result of one Reasoner cycle (see
+    agents/arc4/investigation_reasoner.py for the pure state machine this
+    wraps, and agents/arc4/reasoner_signals.py for the glue that produces
+    this). Lives in types.py (not ports.py, matching where PlanningResult/
+    VetDecision/etc. already live) and carries `decision` as a plain str
+    (investigation_reasoner.ReasonerDecision's value) rather than importing
+    that enum here, so the dependency direction stays one-way: reasoner
+    modules may import types.py, never the reverse."""
+
+    decision: str  # one of "advance" | "repeat_deepen" | "repeat_retry" | "terminate"
+    anchor_ref: Any | None = None
+    anchor_type: str | None = None  # "goal" | "entity" | None
+    required_action_id: str | None = None  # set only for REPEAT_RETRY -- the exact action to re-propose
+    required_book_id: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "decision": self.decision,
+            "anchor_ref": self.anchor_ref,
+            "anchor_type": self.anchor_type,
+            "required_action_id": self.required_action_id,
+            "required_book_id": self.required_book_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ReasonerOutcome:
+        return cls(
+            decision=d["decision"],
+            anchor_ref=d.get("anchor_ref"),
+            anchor_type=d.get("anchor_type"),
+            required_action_id=d.get("required_action_id"),
+            required_book_id=d.get("required_book_id"),
+        )
+
+
 T = TypeVar("T")
 
 
@@ -384,6 +421,21 @@ class WorkflowState:
     # alternatives) and had no connection to the actual graph at all.
     world_model_node_writes: int = 0
     world_model_edge_writes: int = 0
+    # A202: which investigation thread (if any) the trajectory Reasoner is
+    # currently anchored on, tracked in-process across cycles so a fresh
+    # thread is only started when the previous one actually concluded
+    # (SATISFIED/EXHAUSTED -> ADVANCE). Shape when set:
+    # {"anchor_ref": ..., "anchor_type": "goal"|"entity", "thread_id": ...,
+    # "state": "exploring", "deepening_cycle_count": 0, "already_retried": False}
+    # -- "state" is one of investigation_reasoner.InvestigationState's values,
+    # kept as a plain str here for the same one-way-dependency reason
+    # ReasonerOutcome.decision is a str above.
+    active_investigation_anchor: dict[str, Any] | None = None
+    # A202: the most recent REPEAT_DEEPEN/REPEAT_RETRY outcome, consumed by a
+    # later card (A203) to bias goal_resolver/plan_generator toward the
+    # Reasoner's chosen anchor. None whenever the last outcome was
+    # advance/terminate (nothing to bias toward).
+    reasoner_anchor_hint: ReasonerOutcome | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -405,6 +457,8 @@ class WorkflowState:
             "crash_traceback": self.crash_traceback,
             "world_model_node_writes": self.world_model_node_writes,
             "world_model_edge_writes": self.world_model_edge_writes,
+            "active_investigation_anchor": self.active_investigation_anchor,
+            "reasoner_anchor_hint": self.reasoner_anchor_hint.to_dict() if self.reasoner_anchor_hint else None,
         }
 
     @classmethod
@@ -428,6 +482,8 @@ class WorkflowState:
             crash_traceback=d.get("crash_traceback"),
             world_model_node_writes=d.get("world_model_node_writes", 0),
             world_model_edge_writes=d.get("world_model_edge_writes", 0),
+            active_investigation_anchor=d.get("active_investigation_anchor"),
+            reasoner_anchor_hint=ReasonerOutcome.from_dict(d["reasoner_anchor_hint"]) if d.get("reasoner_anchor_hint") else None,
         )
 
 
