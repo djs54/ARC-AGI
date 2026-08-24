@@ -252,6 +252,11 @@ class WorkflowOrchestrator:
                         evaluation_payload,
                         stall_reason=stall_reason,
                     )
+                    # A205 / spec section 8: make a degraded (graph-unreachable)
+                    # Reasoner cycle visible in telemetry rather than silently
+                    # swallowed. Set every cycle the Reasoner actually runs, so
+                    # this always reflects the most recent cycle's outcome.
+                    state.reasoner_degraded = outcome.degraded
                     if outcome.decision == "terminate":
                         return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
                     if outcome.decision in ("repeat_deepen", "repeat_retry"):

@@ -510,7 +510,14 @@ class TestRunReasonerCycleAwaitingLLM:
         mock_vote.assert_called_once()
         assert outcome.decision == "advance"
 
-    def test_resolve_llm_vote_raises_not_implemented(self):
+    def test_resolve_llm_vote_no_port_returns_exploring_sentinel(self):
+        # A202 shipped resolve_llm_vote as a loud NotImplementedError
+        # placeholder specifically for A205 to fill in (see this module's
+        # own docstring above). A205 replaced it with the real bounded LLM
+        # call; a missing llm_port is now one of its handled failure paths,
+        # resolving to InvestigationState.EXPLORING (guaranteed outside
+        # permissible_llm_transitions -- see tests/test_a205_reasoner_error_
+        # handling.py for the full failure-mode suite), not an exception.
         signals = CycleSignals(
             meaningful_progress=False,
             confidence=0.0,
@@ -520,5 +527,4 @@ class TestRunReasonerCycleAwaitingLLM:
             deepening_cycle_count=0,
             already_retried=False,
         )
-        with pytest.raises(NotImplementedError):
-            resolve_llm_vote(None, WorkflowState(), signals)
+        assert resolve_llm_vote(None, WorkflowState(), signals) == InvestigationState.EXPLORING

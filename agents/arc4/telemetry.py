@@ -242,6 +242,14 @@ class ArcV2Telemetry:
             "graph_grounded": graph_grounded,
             "exhaustion_source": exhaustion_source,
             "capability_missing_count": capability_missing_count,
+            # A205: mirrors llm_escalated_plan/graph_grounded/exhaustion_source's
+            # own "no Reasoner configured -> safe default" degrade pattern --
+            # WorkflowState.reasoner_degraded defaults to False and is only
+            # ever set True by WorkflowOrchestrator.run() after a Reasoner
+            # cycle actually raised/degraded (see workflow.py, reasoner_signals
+            # .py). getattr(..., False) also covers state being None (no
+            # WorkflowState found in this phase call's args at all).
+            "reasoner_degraded": bool(getattr(state, "reasoner_degraded", False)),
         }
 
         if evaluation is not None:

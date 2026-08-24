@@ -12,16 +12,19 @@ gates, does not reason").
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import re
+from typing import Any, Mapping
 
 from .investigation_reasoner import (
     CycleSignals,
     InvestigationState,
     apply_llm_vote,
     decision_for_state,
+    permissible_llm_transitions,
     transition,
 )
-from .ports import GraphQueryPort, LLMPort
+from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, ReasonerOutcome, WorkflowState
 
 
@@ -43,6 +46,11 @@ def compute_cycle_signals(
     confidence = 0.0
     untested_remaining = True
     all_falsified = False
+    # A205: visible (not silently swallowed) degraded-mode flag -- set True
+    # whenever a graph-client call below raises. The existing safe-default
+    # behavior on exception (confidence stays 0.0, untested_remaining stays
+    # True) is unchanged; this only adds visibility on top of it.
+    degraded = False
     if graph_port is not None:
         fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
         if anchor_type == "entity" and fetch_neighborhood is not None:
@@ -55,13 +63,14 @@ def compute_cycle_signals(
                 ]
                 confidence = max((h.get("confidence", 0.0) for h in live_items), default=0.0)
             except Exception:
-                pass
+                degraded = True
         fetch_untested = getattr(graph_port, "fetch_untested_actions", None)
         if fetch_untested is not None:
             try:
                 untested_remaining = bool(fetch_untested())
             except Exception:
                 untested_remaining = True
+                degraded = True
 
     # execution_inconclusive: no clear grid change and no explicit progress
     # signal. Read from evaluation.metadata["grid_changed"] -- evaluator.py
@@ -97,21 +106,111 @@ def compute_cycle_signals(
         execution_inconclusive=execution_inconclusive,
         deepening_cycle_count=deepening_cycle_count,
         already_retried=already_retried,
+        degraded=degraded,
     )
+
+
+def _build_transition_vote_prompt(state: WorkflowState, signals: CycleSignals) -> list[LLMMessage]:
+    """Schema-constrained JSON request, matching goal_resolver.py::_query_llm
+    / plan_generator.py::_query_llm's exact established convention: a system
+    message stating the required-JSON-only contract, a user message carrying
+    the actual decision inputs plus a `required_fields` list the model must
+    fill in. The LLM is told exactly which states are graph-permitted right
+    now (via permissible_llm_transitions) so a well-behaved model votes
+    in-set on the first try -- though resolve_llm_vote's caller (run_reasoner
+    _cycle -> apply_llm_vote) still independently re-validates the vote
+    against that same permitted set, never trusting the model's own
+    self-reported compliance."""
+    permitted = sorted(s.value for s in permissible_llm_transitions(signals))
+    return [
+        LLMMessage(
+            role="system",
+            content=(
+                "Resolve an ambiguous ARC investigation-thread transition by voting for "
+                "exactly one of the permitted next states. Respond with ONLY a JSON object "
+                'with exactly these keys: "state" (string, must match one of the permitted '
+                'states exactly) and "reason" (string, brief explanation).'
+            ),
+        ),
+        LLMMessage(
+            role="user",
+            content=json.dumps(
+                {
+                    "current_state": InvestigationState.AWAITING_LLM.value,
+                    "permitted_states": permitted,
+                    "signals": {
+                        "meaningful_progress": signals.meaningful_progress,
+                        "confidence": signals.confidence,
+                        "untested_remaining": signals.untested_remaining,
+                        "all_falsified": signals.all_falsified,
+                        "execution_inconclusive": signals.execution_inconclusive,
+                        "deepening_cycle_count": signals.deepening_cycle_count,
+                        "already_retried": signals.already_retried,
+                    },
+                    "required_fields": ["state", "reason"],
+                },
+                sort_keys=True,
+            ),
+        ),
+    ]
+
+
+def _parse_transition_vote(response: str) -> str | None:
+    """Mirrors goal_resolver.py::_parse_llm_response / plan_generator.py::
+    _parse_llm_response's exact fallback shape: try strict JSON first, then
+    fall back to a permissive regex scan of the raw text for a `state: ...`
+    mention (handles a model that ignores the JSON-only instruction but
+    still names its vote in prose). Returns None -- never raises -- on any
+    parse failure, so the caller's single `if parsed is None` check handles
+    it uniformly with an outright exception from the call itself."""
+    if not response:
+        return None
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, Mapping) and parsed.get("state"):
+        return str(parsed["state"])
+
+    state_match = re.search(r"state\s*[:=]\s*\"?([A-Za-z_]+)\"?", response, re.IGNORECASE)
+    return state_match.group(1) if state_match else None
 
 
 def resolve_llm_vote(llm_port: LLMPort | None, state: WorkflowState, signals: CycleSignals) -> InvestigationState:
-    """AWAITING_LLM escalation: the actual bounded-retry LLM call, failure
-    handling, and response parsing is A205's responsibility (Reasoner Error
-    Handling: Degraded-Mode Fallback + LLM-Escalation Failure Handling).
-    This card (A202) only defines the call point -- raise loudly rather than
-    silently guessing a vote, so an AWAITING_LLM cycle without a real
-    implementation is a visible gap, not a quietly-wrong decision."""
-    raise NotImplementedError(
-        "resolve_llm_vote has no real implementation yet -- the bounded LLM "
-        "retry/timeout/parsing logic for AWAITING_LLM escalation is A205's "
-        "responsibility, not A202's."
-    )
+    """AWAITING_LLM escalation: the real bounded LLM call for A205.
+
+    "Bounded" here means exactly one attempt wrapped in one try/except --
+    not a multi-attempt retry loop. Deviation from the design spec worth
+    calling out explicitly: spec section 8 says to "reuse the existing
+    retry/timeout conventions from goal_resolver/plan_generator's own
+    escalation calls," but neither goal_resolver.py::_query_llm nor
+    plan_generator.py::_query_llm actually implement any retry or timeout
+    logic today -- both call `llm_port.chat(messages)` exactly once, with no
+    surrounding try/except at all (a raised exception there propagates to
+    the caller). There is no existing multi-attempt-retry convention in this
+    codebase to reuse. Rather than inventing new, untested-elsewhere retry
+    machinery, this function matches the *actual* convention (a single
+    `chat()` call) and adds only the safety net this card specifically
+    requires: any failure at all (no llm_port, a raised exception, or an
+    unparseable/invalid response) resolves to InvestigationState.EXPLORING,
+    a sentinel investigation_reasoner.permissible_llm_transitions() never
+    includes (confirmed directly against that function's implementation --
+    it only ever returns a subset of {DEEPENING, SATISFIED, EXHAUSTED}), so
+    apply_llm_vote's existing out-of-set-vote fallback (prefer EXHAUSTED
+    when the graph permits it, else DEEPENING) does the actual fallback
+    work. No second, bespoke fallback rule is introduced here.
+    """
+    if llm_port is None:
+        return InvestigationState.EXPLORING
+    try:
+        response = llm_port.chat(_build_transition_vote_prompt(state, signals))
+        raw_vote = _parse_transition_vote(response)
+        if raw_vote is None:
+            return InvestigationState.EXPLORING
+        return InvestigationState(raw_vote)
+    except Exception:
+        return InvestigationState.EXPLORING
 
 
 def run_reasoner_cycle(
@@ -132,6 +231,10 @@ def run_reasoner_cycle(
     current goal/execution before reasoning: prefer the just-executed
     candidate's entity_ref if it has one (a click just happened, that's the
     natural next anchor), else the active goal's goal_id."""
+    # A205: local degraded flag, visible (not silently discarded) whenever a
+    # graph-client call below raises -- threaded into the returned
+    # ReasonerOutcome.degraded at the bottom of this function.
+    degraded = False
     anchor = state.active_investigation_anchor
     if anchor is None:
         cand_meta = execution.candidate.metadata if execution.candidate is not None else {}
@@ -151,6 +254,7 @@ def run_reasoner_cycle(
                     thread_id = result.get("thread_id") if isinstance(result, dict) else None
                 except Exception:
                     thread_id = None
+                    degraded = True
 
         anchor = {
             "anchor_ref": anchor_ref,
@@ -174,6 +278,7 @@ def run_reasoner_cycle(
         graph_port=graph_port,
         stall_reason=stall_reason,
     )
+    degraded = degraded or signals.degraded
 
     if current_state == InvestigationState.AWAITING_LLM:
         vote = resolve_llm_vote(llm_port, state, signals)
@@ -186,7 +291,7 @@ def run_reasoner_cycle(
         try:
             write_thread_state(anchor["thread_id"], new_state.value)
         except Exception:
-            pass
+            degraded = True  # decision-durability write failed -- the decision itself still stands
 
     decision = decision_for_state(new_state)
     if decision.value == "advance":
@@ -204,6 +309,7 @@ def run_reasoner_cycle(
         anchor_type=anchor["anchor_type"] if decision.value != "advance" else None,
         required_action_id=execution.action_id if decision.value == "repeat_retry" else None,
         required_book_id=getattr(execution.candidate, "book_id", None) if decision.value == "repeat_retry" else None,
+        degraded=degraded,
     )
 
 

@@ -331,6 +331,12 @@ class ReasonerOutcome:
     anchor_type: str | None = None  # "goal" | "entity" | None
     required_action_id: str | None = None  # set only for REPEAT_RETRY -- the exact action to re-propose
     required_book_id: str | None = None
+    # A205: True when any graph-client call this cycle raised (thread
+    # start/resume, thread-state write, or a CycleSignals graph query) --
+    # the decision above is still a valid, safe fallback decision, this
+    # just makes the degradation visible in telemetry instead of silently
+    # swallowed. See spec section 8.
+    degraded: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -339,6 +345,7 @@ class ReasonerOutcome:
             "anchor_type": self.anchor_type,
             "required_action_id": self.required_action_id,
             "required_book_id": self.required_book_id,
+            "degraded": self.degraded,
         }
 
     @classmethod
@@ -349,6 +356,7 @@ class ReasonerOutcome:
             anchor_type=d.get("anchor_type"),
             required_action_id=d.get("required_action_id"),
             required_book_id=d.get("required_book_id"),
+            degraded=d.get("degraded", False),
         )
 
 
@@ -443,6 +451,16 @@ class WorkflowState:
     # Reasoner's chosen anchor. None whenever the last outcome was
     # advance/terminate (nothing to bias toward).
     reasoner_anchor_hint: ReasonerOutcome | None = None
+    # A205: whether the most recent Reasoner cycle degraded (a graph-client
+    # call raised during that cycle -- see ReasonerOutcome.degraded). Set by
+    # WorkflowOrchestrator.run() right after invoking the `reason` dependency,
+    # each cycle, mirroring how world_model_node_writes/edge_writes are also
+    # mutated after their owning phase runs and read by telemetry.py's
+    # _step_snapshot on the *next* step's snapshot (same one-cycle-lagged
+    # characteristic this telemetry system already has for post-evaluate
+    # state mutations -- not something A205 introduces). Stays at its default
+    # False for the whole episode whenever no Reasoner is configured at all.
+    reasoner_degraded: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -466,6 +484,7 @@ class WorkflowState:
             "world_model_edge_writes": self.world_model_edge_writes,
             "active_investigation_anchor": self.active_investigation_anchor,
             "reasoner_anchor_hint": self.reasoner_anchor_hint.to_dict() if self.reasoner_anchor_hint else None,
+            "reasoner_degraded": self.reasoner_degraded,
         }
 
     @classmethod
@@ -491,6 +510,7 @@ class WorkflowState:
             world_model_edge_writes=d.get("world_model_edge_writes", 0),
             active_investigation_anchor=d.get("active_investigation_anchor"),
             reasoner_anchor_hint=ReasonerOutcome.from_dict(d["reasoner_anchor_hint"]) if d.get("reasoner_anchor_hint") else None,
+            reasoner_degraded=d.get("reasoner_degraded", False),
         )
 
 

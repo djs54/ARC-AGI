@@ -41,6 +41,13 @@ class CycleSignals:
     execution_inconclusive: bool
     deepening_cycle_count: int
     already_retried: bool
+    # A205: set by the I/O layer (reasoner_signals.compute_cycle_signals)
+    # when a graph-client call raised during this cycle's signal
+    # computation, so the failure is visible instead of only being
+    # silently absorbed into a conservative default. Still just a plain
+    # data field -- this module remains zero-I/O; it never sets this
+    # itself, only carries what the caller computed.
+    degraded: bool = False
 
 
 @dataclass(slots=True)
