@@ -366,6 +366,27 @@ class PlanGenerator:
                     )
                 )
 
+        # A203: apply anchor hint to boost scores if an entity-type hint exists
+        anchor_hint = getattr(state, "reasoner_anchor_hint", None)
+        if anchor_hint is not None and anchor_hint.anchor_type == "entity":
+            if anchor_hint.decision == "repeat_retry" and anchor_hint.required_book_id:
+                target = next((c for c in candidates if c.book_id == anchor_hint.required_book_id), None)
+                if target is not None:
+                    # Bypass scoring for this one candidate -- retry is a direct
+                    # instruction, not a scored preference. Do not resurrect it if
+                    # A191 already excluded it (target is None in that case, since
+                    # excluded book_ids never made it into `candidates` at all --
+                    # this is intentional: a genuinely falsified action must not be
+                    # retried just because the Reasoner asked to, the exclusion is
+                    # the stronger, correct signal).
+                    target.score = max(c.score for c in candidates) + 1.0
+                    target.rationale = f"{target.rationale}; reasoner requested retry"
+            elif anchor_hint.decision == "repeat_deepen":
+                for c in candidates:
+                    if c.metadata.get("entity_ref") == anchor_hint.anchor_ref:
+                        c.score += 0.3  # starting-point bias constant, no empirical basis yet -- same honest-gap pattern as A192's entity_neighborhood_weight
+                        c.metadata["reasoner_anchor_bias_applied"] = True
+
         return candidates
 
     def _voi_bonus(self, rules: Sequence[Mapping[str, Any]]) -> float:
