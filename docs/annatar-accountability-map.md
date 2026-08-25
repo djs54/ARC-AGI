@@ -332,5 +332,5 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 - `backlog/A207.md`: Second-veto routing (closed gap)
 - `backlog/A209.md`: Budget routing audit (correctly resolved)
 - `backlog/A210.md`: Annatar rename (this pass's parent card)
-- `backlog/A211.md`: Crash-safety audit (open gap)
+- `backlog/A211.md`: Crash-safety close-out (closed gap)
 - `backlog/A212.md`: First-veto routing audit (open gap)
