@@ -103,7 +103,9 @@ class WorkflowOrchestrator:
         while True:
             budget_reason = check_budget(state.step_index, self._limits.max_cycles)
             if budget_reason is not None:
-                return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, budget_reason, phase_results)
+                budget_result = self._route_budget_through_reasoner(state, current_observation, phase_results)
+                if budget_result is not None:
+                    return budget_result
 
             cycle_vetoes = 0
             try:
@@ -287,6 +289,94 @@ class WorkflowOrchestrator:
                     phase_results,
                     traceback_text=traceback.format_exc(),
                 )
+
+    def _route_budget_through_reasoner(
+        self,
+        state: WorkflowState,
+        current_observation: Mapping[str, Any],
+        phase_results: list[PhaseResult[Any]],
+    ) -> WorkflowRunResult:
+        """A209 fix (2026-08-25): `check_budget` previously ended the episode
+        directly, without ever giving the Reasoner a say -- another place the
+        "one agent that sees everything end-to-end" was structurally excluded
+        from a termination decision. Unlike `second_veto`, `check_budget` fires
+        BEFORE perceive runs, so there is no perception payload for the current
+        cycle at all.
+
+        Strategy: On the first iteration (step_index=0), there are no prior
+        cycles, so we skip the Reasoner and end directly -- nothing to report.
+        On subsequent iterations, we give the Reasoner a synthetic "budget
+        exhausted" signal (fresh, empty payloads -- A209's plan called this
+        "Option A"; its own Outcome section wrote "Option B" by mistake,
+        which described reusing the prior cycle's real state instead --
+        that is NOT what this implements, correct the record if referencing
+        it later) with the current (unchanged) observation, so it can close
+        out its own bookkeeping (e.g. write_thread_state on an open
+        investigation thread) before the episode ends.
+
+        Every branch of this method returns a real WorkflowRunResult -- there
+        is no path that returns None. In particular, `outcome.decision` from
+        the Reasoner call below is deliberately never inspected: the budget
+        ceiling is non-negotiable regardless of what the Reasoner decides, so
+        the method doesn't depend on (and doesn't assert) the Reasoner
+        producing any particular decision. This is what makes the hard-ceiling
+        guarantee structural rather than a matter of trusting the Reasoner to
+        answer correctly -- see test_reasoner_response_does_not_override_budget
+        for the proof (a Reasoner mock returning "advance" still ends the
+        episode as BUDGET_EXHAUSTED with zero further phases invoked)."""
+        # If no Reasoner configured, behavior is byte-for-byte identical to before.
+        if self._dependencies.reason is None:
+            return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
+
+        # First iteration has no prior cycle to report; end immediately.
+        if state.step_index == 0:
+            return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
+
+        # For step_index > 0, construct synthetic payloads representing
+        # "budget exhausted before we could run any phases." The Reasoner sees
+        # the last known observation and decides to terminate (as it should,
+        # since the budget is non-negotiable).
+        synthetic_execution = ExecutionResult(
+            action_id="", candidate=None, observation=current_observation, metadata={}
+        )
+        synthetic_evaluation = EvaluationResult(
+            decision=WorkflowDecision.CONTINUE,
+            meaningful_progress=False,
+            reason="budget_exhausted",
+            metadata={"grid_changed": False},
+        )
+
+        # We don't have a perception payload from this cycle (it hasn't run yet).
+        # The Reasoner needs one for its signature. We can't easily get the prior
+        # cycle's perception payload from the function signature, so we create a
+        # minimal synthetic one. This is acceptable because the Reasoner's only
+        # real decision here is to TERMINATE (the budget is hard), so the
+        # perception details don't matter — the signal "budget_exhausted" overrides.
+        # In a future iteration, if we store perception payloads in state, we
+        # could reuse the last real one instead.
+        from .types import PerceptionSnapshot  # Local import to avoid circular deps
+
+        synthetic_perception = PerceptionSnapshot(
+            grid_hash="",
+            observation=current_observation,
+            grid_shape=None,
+            loop_signal=False,
+            repeated_grid_count=0,
+            entities=(),
+            metadata={"synthetic": True, "reason": "budget_exhausted"},
+        )
+
+        outcome = self._dependencies.reason(
+            state,
+            synthetic_perception,
+            synthetic_execution,
+            synthetic_evaluation,
+            stall_reason="budget_exhausted",
+        )
+        # The Reasoner's decision should be to terminate (the budget is hard).
+        # But even if it somehow said "continue", we end the episode anyway
+        # because the budget is non-negotiable.
+        return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
     def _route_second_veto_through_reasoner(
         self,
