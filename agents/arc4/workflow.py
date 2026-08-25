@@ -295,7 +295,7 @@ class WorkflowOrchestrator:
         state: WorkflowState,
         current_observation: Mapping[str, Any],
         phase_results: list[PhaseResult[Any]],
-    ) -> WorkflowRunResult | None:
+    ) -> WorkflowRunResult:
         """A209 fix (2026-08-25): `check_budget` previously ended the episode
         directly, without ever giving the Reasoner a say -- another place the
         "one agent that sees everything end-to-end" was structurally excluded
@@ -306,14 +306,24 @@ class WorkflowOrchestrator:
         Strategy: On the first iteration (step_index=0), there are no prior
         cycles, so we skip the Reasoner and end directly -- nothing to report.
         On subsequent iterations, we give the Reasoner a synthetic "budget
-        exhausted" signal with the current (unchanged) observation, and let it
-        record the termination. The hard ceiling is maintained: the Reasoner's
-        response does not extend the episode past max_cycles.
+        exhausted" signal (fresh, empty payloads -- A209's plan called this
+        "Option A"; its own Outcome section wrote "Option B" by mistake,
+        which described reusing the prior cycle's real state instead --
+        that is NOT what this implements, correct the record if referencing
+        it later) with the current (unchanged) observation, so it can close
+        out its own bookkeeping (e.g. write_thread_state on an open
+        investigation thread) before the episode ends.
 
-        Returns a WorkflowRunResult if the episode should end now (no Reasoner
-        configured, or first iteration, or Reasoner said "terminate"); None
-        if somehow the Reasoner chose to continue (though that should not be
-        possible for a hard ceiling signal -- this case is a safety fallback)."""
+        Every branch of this method returns a real WorkflowRunResult -- there
+        is no path that returns None. In particular, `outcome.decision` from
+        the Reasoner call below is deliberately never inspected: the budget
+        ceiling is non-negotiable regardless of what the Reasoner decides, so
+        the method doesn't depend on (and doesn't assert) the Reasoner
+        producing any particular decision. This is what makes the hard-ceiling
+        guarantee structural rather than a matter of trusting the Reasoner to
+        answer correctly -- see test_reasoner_response_does_not_override_budget
+        for the proof (a Reasoner mock returning "advance" still ends the
+        episode as BUDGET_EXHAUSTED with zero further phases invoked)."""
         # If no Reasoner configured, behavior is byte-for-byte identical to before.
         if self._dependencies.reason is None:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
