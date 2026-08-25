@@ -282,12 +282,33 @@ class WorkflowOrchestrator:
 
                 current_observation = execution_payload.observation
             except Exception:
+                # A211: best-effort close-out of investigation thread on crash,
+                # without ever risking the original crash's traceback being masked.
+                traceback_text = traceback.format_exc()
+                anchor = state.active_investigation_anchor
+                thread_id = anchor.get("thread_id") if isinstance(anchor, dict) else None
+                if (
+                    self._dependencies.annatar is not None
+                    and thread_id is not None
+                    and self._dependencies.on_crash_cleanup is not None
+                ):
+                    try:
+                        # Close out the thread's graph state before returning CRASHED.
+                        # State value "exhausted" is used as an interim fit for the crash
+                        # close-out case, per A211's analysis that the existing state enum
+                        # has no perfect semantic match for "abnormally terminated."
+                        self._dependencies.on_crash_cleanup(thread_id, "exhausted")
+                    except Exception:
+                        # A211 non-negotiable: cleanup failure must never mask or replace
+                        # the original crash's traceback. The cleanup exception is silently
+                        # swallowed here; only the original traceback is reported.
+                        pass
                 return self._finish(
                     state,
                     WorkflowStatus.CRASHED,
                     "crash",
                     phase_results,
-                    traceback_text=traceback.format_exc(),
+                    traceback_text=traceback_text,
                 )
 
     def _route_budget_through_annatar(

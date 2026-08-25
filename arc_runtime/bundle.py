@@ -218,6 +218,15 @@ def build_arc_v2_bundle(
         stall_reason=stall_reason,
     )
 
+    # A211: best-effort crash cleanup closure -- captures graph_port at
+    # bundle-build time, matches the established closure-over-graph_port pattern
+    # used for every other phase. Called from workflow.py's except handler to
+    # close out an open investigation thread before returning CRASHED.
+    def _on_crash_cleanup(thread_id: str, state: str) -> None:
+        write_thread_state = getattr(graph_port, "write_thread_state", None)
+        if write_thread_state is not None:
+            write_thread_state(thread_id, state)
+
     dependencies = WorkflowDependencies(
         perceive=perceive,
         resolve=resolve,
@@ -226,6 +235,7 @@ def build_arc_v2_bundle(
         execute=execute,
         evaluate=evaluate,
         annatar=annatar,
+        on_crash_cleanup=_on_crash_cleanup,
     )
     orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=max_cycles))
     return ArcV2Bundle(graph_port=graph_port, telemetry=telemetry, dependencies=dependencies, orchestrator=orchestrator, llm_port=llm_port)
