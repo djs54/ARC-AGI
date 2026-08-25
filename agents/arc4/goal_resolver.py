@@ -75,7 +75,7 @@ class GoalResolver:
         hypotheses, grounding_gate_passed = self._apply_grounding_gate(state, perception, hypotheses)
 
         # A203: apply anchor hint to reorder hypotheses if a goal-type hint exists
-        anchor_hint = getattr(state, "reasoner_anchor_hint", None)
+        anchor_hint = getattr(state, "annatar_anchor_hint", None)
         if anchor_hint is not None and anchor_hint.anchor_type == "goal" and anchor_hint.decision in ("repeat_deepen", "repeat_retry"):
             anchored = next((h for h in hypotheses if h.goal_id == anchor_hint.anchor_ref), None)
             if anchored is not None and anchored is not hypotheses[0]:

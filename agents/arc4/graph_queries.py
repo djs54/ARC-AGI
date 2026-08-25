@@ -51,9 +51,9 @@ ARC_V2_TOOL_NAMES = {
     # every other pre-launch tool in this table.
     "record_mechanic_fusion": "record_mechanic",
     "fetch_mechanic_candidates": "get_mechanic_candidates",
-    # A201: investigation-thread state durability for the trajectory Reasoner
+    # A201: investigation-thread state durability for the trajectory Annatar
     # (docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md). Four
-    # new tools for managing the Reasoner's durable decisions, resumes, and
+    # new tools for managing Annatar's durable decisions, resumes, and
     # cycle tracking. Not yet server-side -- see docs/handoff/B278-investigation-
     # thread-schema.md. Clients degrade cleanly to defined empty/no-op results
     # on capability_missing.
@@ -245,7 +245,7 @@ class ArcGraphQueryPort:
 
     def start_or_resume_thread(self, anchor_ref: Any, anchor_type: str) -> dict[str, Any]:
         """Investigation-thread lookup/create -- resume support for the
-        trajectory Reasoner (see docs/superpowers/specs/2026-08-23-trajectory-
+        trajectory Annatar (see docs/superpowers/specs/2026-08-23-trajectory-
         reasoner-design.md). Degrades to a fresh-thread-shaped result when the
         server capability doesn't exist yet."""
         result = self._call_tool(
@@ -262,7 +262,7 @@ class ArcGraphQueryPort:
         }
 
     def write_thread_state(self, thread_id: Any, state: str) -> dict[str, Any]:
-        """Durable write of the Reasoner's resolved state. No-op (not an error)
+        """Durable write of Annatar's resolved state. No-op (not an error)
         when thread_id is None -- callers pass None when start_or_resume_thread
         itself degraded, and this must not raise in that case."""
         if thread_id is None:

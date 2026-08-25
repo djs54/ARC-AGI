@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from agents.arc4.investigation_reasoner import (
+from agents.arc4.annatar_state_machine import (
     CycleSignals,
     InvestigationState,
-    ReasonerDecision,
-    ReasonerLimits,
+    AnnatarDecision,
+    AnnatarLimits,
     apply_llm_vote,
     decision_for_state,
     permissible_llm_transitions,
@@ -75,7 +75,7 @@ class TestDeepeningTransitions:
 
     def test_custom_limits_respected(self):
         signals = _signals(deepening_cycle_count=1)
-        limits = ReasonerLimits(max_deepening_cycles_before_llm=1)
+        limits = AnnatarLimits(max_deepening_cycles_before_llm=1)
         assert transition(InvestigationState.DEEPENING, signals, limits) == InvestigationState.AWAITING_LLM
 
 
@@ -129,19 +129,19 @@ class TestApplyLlmVote:
 
 class TestDecisionForState:
     def test_satisfied_maps_to_advance_not_terminate(self):
-        assert decision_for_state(InvestigationState.SATISFIED) == ReasonerDecision.ADVANCE
+        assert decision_for_state(InvestigationState.SATISFIED) == AnnatarDecision.ADVANCE
 
     def test_exhausted_maps_to_advance_not_terminate(self):
-        assert decision_for_state(InvestigationState.EXHAUSTED) == ReasonerDecision.ADVANCE
+        assert decision_for_state(InvestigationState.EXHAUSTED) == AnnatarDecision.ADVANCE
 
     def test_retry_maps_to_repeat_retry(self):
-        assert decision_for_state(InvestigationState.RETRY) == ReasonerDecision.REPEAT_RETRY
+        assert decision_for_state(InvestigationState.RETRY) == AnnatarDecision.REPEAT_RETRY
 
     def test_deepening_maps_to_repeat_deepen(self):
-        assert decision_for_state(InvestigationState.DEEPENING) == ReasonerDecision.REPEAT_DEEPEN
+        assert decision_for_state(InvestigationState.DEEPENING) == AnnatarDecision.REPEAT_DEEPEN
 
     def test_exploring_maps_to_repeat_deepen(self):
-        assert decision_for_state(InvestigationState.EXPLORING) == ReasonerDecision.REPEAT_DEEPEN
+        assert decision_for_state(InvestigationState.EXPLORING) == AnnatarDecision.REPEAT_DEEPEN
 
     def test_awaiting_llm_has_no_decision_mapping(self):
         with pytest.raises(ValueError, match="no decision mapping"):

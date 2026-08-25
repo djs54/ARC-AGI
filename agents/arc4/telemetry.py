@@ -265,13 +265,13 @@ class ArcV2Telemetry:
             "exhaustion_source": exhaustion_source,
             "capability_missing_count": capability_missing_count,
             # A205: mirrors llm_escalated_plan/graph_grounded/exhaustion_source's
-            # own "no Reasoner configured -> safe default" degrade pattern --
-            # WorkflowState.reasoner_degraded defaults to False and is only
-            # ever set True by WorkflowOrchestrator.run() after a Reasoner
-            # cycle actually raised/degraded (see workflow.py, reasoner_signals
+            # own "no Annatar configured -> safe default" degrade pattern --
+            # WorkflowState.annatar_degraded defaults to False and is only
+            # ever set True by WorkflowOrchestrator.run() after a Annatar
+            # cycle actually raised/degraded (see workflow.py, annatar_signals
             # .py). getattr(..., False) also covers state being None (no
             # WorkflowState found in this phase call's args at all).
-            "reasoner_degraded": bool(getattr(state, "reasoner_degraded", False)),
+            "annatar_degraded": bool(getattr(state, "annatar_degraded", False)),
         }
 
         if evaluation is not None:
@@ -396,7 +396,7 @@ class ArcV2Telemetry:
             # Post-A206 fix (2026-08-25): visible without digging through the
             # full trace -- how many investigation anchors in a row ended
             # without ever showing meaningful_progress, as of episode end.
-            "reasoner_unproductive_anchor_streak": state.reasoner_unproductive_anchor_streak,
+            "annatar_unproductive_anchor_streak": state.annatar_unproductive_anchor_streak,
         }
 
     @staticmethod

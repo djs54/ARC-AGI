@@ -1,4 +1,4 @@
-"""Pure investigation-thread state machine for the trajectory Reasoner
+"""Pure investigation-thread state machine for the trajectory Annatar
 (docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md, section 4).
 
 Deterministic, stdlib only, no graph/LLM/I/O -- mirrors cycle_policy.py's
@@ -22,7 +22,7 @@ class InvestigationState(StrEnum):
     RETRY = "retry"
 
 
-class ReasonerDecision(StrEnum):
+class AnnatarDecision(StrEnum):
     ADVANCE = "advance"
     REPEAT_DEEPEN = "repeat_deepen"
     REPEAT_RETRY = "repeat_retry"
@@ -41,7 +41,7 @@ class CycleSignals:
     execution_inconclusive: bool
     deepening_cycle_count: int
     already_retried: bool
-    # A205: set by the I/O layer (reasoner_signals.compute_cycle_signals)
+    # A205: set by the I/O layer (annatar_signals.compute_cycle_signals)
     # when a graph-client call raised during this cycle's signal
     # computation, so the failure is visible instead of only being
     # silently absorbed into a conservative default. Still just a plain
@@ -51,7 +51,7 @@ class CycleSignals:
 
 
 @dataclass(slots=True)
-class ReasonerLimits:
+class AnnatarLimits:
     """Starting-point thresholds, no empirical basis yet -- see spec section
     11. Tune with real data once this lands, don't treat these as final."""
 
@@ -62,12 +62,12 @@ class ReasonerLimits:
 def transition(
     current_state: InvestigationState,
     signals: CycleSignals,
-    limits: ReasonerLimits | None = None,
+    limits: AnnatarLimits | None = None,
 ) -> InvestigationState:
     """Deterministic transition table, spec section 4.2. Does not resolve
     AWAITING_LLM -- that's apply_llm_vote's job, called separately by the
     integration layer once an LLM answer is available."""
-    limits = limits or ReasonerLimits()
+    limits = limits or AnnatarLimits()
 
     if current_state == InvestigationState.RETRY:
         if not signals.execution_inconclusive:
@@ -116,26 +116,26 @@ def apply_llm_vote(vote: InvestigationState, signals: CycleSignals) -> Investiga
     return InvestigationState.DEEPENING
 
 
-def decision_for_state(new_state: InvestigationState) -> ReasonerDecision:
+def decision_for_state(new_state: InvestigationState) -> AnnatarDecision:
     """Map a resolved investigation-thread state to what the orchestrator
     does next. SATISFIED/EXHAUSTED end THIS thread, not the episode -- both
     map to ADVANCE (start a fresh thread on a new anchor). Whole-episode
     TERMINATE is decided by the integration layer (A202), which alone knows
     whether there's anything left to advance to -- never by this function."""
     if new_state in (InvestigationState.SATISFIED, InvestigationState.EXHAUSTED):
-        return ReasonerDecision.ADVANCE
+        return AnnatarDecision.ADVANCE
     if new_state == InvestigationState.RETRY:
-        return ReasonerDecision.REPEAT_RETRY
+        return AnnatarDecision.REPEAT_RETRY
     if new_state in (InvestigationState.DEEPENING, InvestigationState.EXPLORING):
-        return ReasonerDecision.REPEAT_DEEPEN
+        return AnnatarDecision.REPEAT_DEEPEN
     raise ValueError(f"no decision mapping for state: {new_state}")
 
 
 __all__ = [
     "InvestigationState",
-    "ReasonerDecision",
+    "AnnatarDecision",
     "CycleSignals",
-    "ReasonerLimits",
+    "AnnatarLimits",
     "transition",
     "permissible_llm_transitions",
     "apply_llm_vote",

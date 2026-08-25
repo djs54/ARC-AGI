@@ -1,7 +1,7 @@
-"""Tests for A209: check_budget routing through the Reasoner.
+"""Tests for A209: check_budget routing through Annatar.
 
 A209 audits and fixes the gap where check_budget independently ended episodes
-without giving the Reasoner a chance to see and record the termination.
+without giving Annatar a chance to see and record the termination.
 """
 
 from __future__ import annotations
@@ -25,17 +25,17 @@ from agents.arc4.types import (
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
 
 
-class TestCheckBudgetRoutesToReasoner:
-    """Budget exhaustion should invoke the Reasoner (if configured)."""
+class TestCheckBudgetRoutesToAnnatar:
+    """Budget exhaustion should invoke Annatar (if configured)."""
 
-    def test_budget_fires_with_reasoner_configured(self):
-        """When budget exhausts and Reasoner is configured, Reasoner is called."""
+    def test_budget_fires_with_annatar_configured(self):
+        """When budget exhausts and Annatar is configured, Annatar is called."""
         # Setup: state is on cycle 10 of a max 10-cycle budget
         state = WorkflowState(step_index=10)
 
         # Mock dependencies
-        reasoner_mock = MagicMock()
-        reasoner_mock.return_value = MagicMock(decision="terminate")
+        annatar_mock = MagicMock()
+        annatar_mock.return_value = MagicMock(decision="terminate")
 
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
@@ -44,7 +44,7 @@ class TestCheckBudgetRoutesToReasoner:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=10))
@@ -53,18 +53,18 @@ class TestCheckBudgetRoutesToReasoner:
         # Run until budget exhausts
         result = orchestrator.run(state, observation)
 
-        # Verify Reasoner was called (step_index=10 means we're past the budget on step 10)
+        # Verify Annatar was called (step_index=10 means we're past the budget on step 10)
         # Actually, step_index=10 with max_cycles=10 means the check fires (10 >= 10 is true)
-        # So the Reasoner should be called for step_index > 0
-        assert reasoner_mock.called, "Reasoner should have been called when budget exhausted"
+        # So Annatar should be called for step_index > 0
+        assert annatar_mock.called, "Annatar should have been called when budget exhausted"
         assert result.status == WorkflowStatus.BUDGET_EXHAUSTED
         assert result.completed_cycles == 10
 
-    def test_budget_fires_first_cycle_no_reasoner_call(self):
-        """First cycle budget exhaustion (max_cycles=0) doesn't call Reasoner."""
+    def test_budget_fires_first_cycle_no_annatar_call(self):
+        """First cycle budget exhaustion (max_cycles=0) doesn't call Annatar."""
         state = WorkflowState(step_index=0)
 
-        reasoner_mock = MagicMock()
+        annatar_mock = MagicMock()
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
             resolve=MagicMock(),
@@ -72,7 +72,7 @@ class TestCheckBudgetRoutesToReasoner:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=0))
@@ -80,18 +80,18 @@ class TestCheckBudgetRoutesToReasoner:
 
         result = orchestrator.run(state, observation)
 
-        # First iteration with max_cycles=0 should NOT call the Reasoner
+        # First iteration with max_cycles=0 should NOT call Annatar
         # (no prior cycles to report)
-        assert not reasoner_mock.called, "Reasoner should not be called on first cycle"
+        assert not annatar_mock.called, "Annatar should not be called on first cycle"
         assert result.status == WorkflowStatus.BUDGET_EXHAUSTED
         assert result.completed_cycles == 0
 
 
-class TestCheckBudgetWithoutReasoner:
-    """When no Reasoner configured, behavior matches the old code (byte-for-byte)."""
+class TestCheckBudgetWithoutAnnatar:
+    """When no Annatar configured, behavior matches the old code (byte-for-byte)."""
 
-    def test_no_reasoner_configured_budget_exhaustion(self):
-        """Budget exhaustion without Reasoner returns immediately."""
+    def test_no_annatar_configured_budget_exhaustion(self):
+        """Budget exhaustion without Annatar returns immediately."""
         state = WorkflowState(step_index=5)
 
         dependencies = WorkflowDependencies(
@@ -101,7 +101,7 @@ class TestCheckBudgetWithoutReasoner:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=None,  # No Reasoner
+            annatar=None,  # No Annatar
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=5))
@@ -116,15 +116,15 @@ class TestCheckBudgetWithoutReasoner:
 
 
 class TestCheckBudgetIsHardCeiling:
-    """The hard ceiling is maintained: Reasoner cannot extend past max_cycles."""
+    """The hard ceiling is maintained: Annatar cannot extend past max_cycles."""
 
-    def test_reasoner_response_does_not_override_budget(self):
-        """Even if Reasoner said 'continue', episode ends due to budget."""
+    def test_annatar_response_does_not_override_budget(self):
+        """Even if Annatar said 'continue', episode ends due to budget."""
         state = WorkflowState(step_index=5)
 
-        reasoner_mock = MagicMock()
-        # Reasoner tries to say "continue" (this shouldn't happen, but if it does...)
-        reasoner_mock.return_value = MagicMock(decision="advance")
+        annatar_mock = MagicMock()
+        # Annatar tries to say "continue" (this shouldn't happen, but if it does...)
+        annatar_mock.return_value = MagicMock(decision="advance")
 
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
@@ -133,7 +133,7 @@ class TestCheckBudgetIsHardCeiling:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=5))
@@ -141,7 +141,7 @@ class TestCheckBudgetIsHardCeiling:
 
         result = orchestrator.run(state, observation)
 
-        # Episode ends as BUDGET_EXHAUSTED regardless of Reasoner's response
+        # Episode ends as BUDGET_EXHAUSTED regardless of Annatar's response
         assert result.status == WorkflowStatus.BUDGET_EXHAUSTED
         assert result.completed_cycles == 5
         # Phases should not run after budget is exhausted
@@ -174,7 +174,7 @@ class TestCheckBudgetRegressionGuard:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=None,
+            annatar=None,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=3))
@@ -188,17 +188,17 @@ class TestCheckBudgetRegressionGuard:
 
 
 class TestCheckBudgetSyntheticPayloads:
-    """Budget exhaustion with Reasoner creates synthetic payloads correctly."""
+    """Budget exhaustion with Annatar creates synthetic payloads correctly."""
 
     def test_synthetic_execution_payload_structure(self):
         """Synthetic execution payload has correct structure for budget exhaustion."""
-        # This test verifies that when the Reasoner is called, it receives
+        # This test verifies that when Annatar is called, it receives
         # a well-formed ExecutionResult with candidate=None and the current observation.
 
         state = WorkflowState(step_index=2)
 
-        reasoner_mock = MagicMock()
-        reasoner_mock.return_value = MagicMock(decision="terminate")
+        annatar_mock = MagicMock()
+        annatar_mock.return_value = MagicMock(decision="terminate")
 
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
@@ -207,7 +207,7 @@ class TestCheckBudgetSyntheticPayloads:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=2))
@@ -215,9 +215,9 @@ class TestCheckBudgetSyntheticPayloads:
 
         result = orchestrator.run(state, observation)
 
-        # Verify the Reasoner was called
-        assert reasoner_mock.called
-        call_args = reasoner_mock.call_args
+        # Verify Annatar was called
+        assert annatar_mock.called
+        call_args = annatar_mock.call_args
         assert call_args is not None
 
         # The call should have: state, perception, execution, evaluation, stall_reason
@@ -243,7 +243,7 @@ class TestCheckBudgetEdgeCases:
         """max_cycles=0 ends immediately on first cycle."""
         state = WorkflowState(step_index=0)
 
-        reasoner_mock = MagicMock()
+        annatar_mock = MagicMock()
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
             resolve=MagicMock(),
@@ -251,7 +251,7 @@ class TestCheckBudgetEdgeCases:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=0))
@@ -261,8 +261,8 @@ class TestCheckBudgetEdgeCases:
 
         assert result.status == WorkflowStatus.BUDGET_EXHAUSTED
         assert result.completed_cycles == 0
-        # Reasoner not called on first iteration
-        assert not reasoner_mock.called
+        # Annatar not called on first iteration
+        assert not annatar_mock.called
 
     def test_budget_fires_before_phases(self):
         """Budget check fires before any phases run."""
@@ -275,8 +275,8 @@ class TestCheckBudgetEdgeCases:
         vet_mock = MagicMock()
         execute_mock = MagicMock()
         evaluate_mock = MagicMock()
-        reasoner_mock = MagicMock()
-        reasoner_mock.return_value = MagicMock(decision="terminate")
+        annatar_mock = MagicMock()
+        annatar_mock.return_value = MagicMock(decision="terminate")
 
         dependencies = WorkflowDependencies(
             perceive=perceive_mock,
@@ -285,7 +285,7 @@ class TestCheckBudgetEdgeCases:
             vet=vet_mock,
             execute=execute_mock,
             evaluate=evaluate_mock,
-            reason=reasoner_mock,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=5))
@@ -301,6 +301,6 @@ class TestCheckBudgetEdgeCases:
         execute_mock.assert_not_called()
         evaluate_mock.assert_not_called()
 
-        # But the Reasoner should be called (since step_index > 0)
-        reasoner_mock.assert_called()
+        # But Annatar should be called (since step_index > 0)
+        annatar_mock.assert_called()
         assert result.status == WorkflowStatus.BUDGET_EXHAUSTED

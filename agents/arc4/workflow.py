@@ -26,7 +26,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     """A204 / spec section 7: bracket an ExecutePhase callable with
     write-ahead cycle recording. `execute` is called synchronously and
     returns only after the real, live ARC API call has completed -- this is
-    the one place in the whole trajectory-Reasoner family (A200-A206) where
+    the one place in the whole trajectory-Annatar family (A200-A206) where
     a bug can mean double-acting on non-idempotent external game state, so
     the invariant here is non-negotiable: `write_cycle` failing (any
     exception, or a missing `cycle_id`) must NEVER prevent `execute` from
@@ -36,7 +36,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     This wrapping is applied to the `execute` *dependency* itself, at
     bundle-build time in arc_runtime/bundle.py -- the same closure-over-
     graph_port pattern every other phase (resolve/plan/reason) already
-    uses, per ports.py's ReasonerPhase docstring: "WorkflowOrchestrator
+    uses, per ports.py's AnnatarPhase docstring: "WorkflowOrchestrator
     itself does not need to hold a graph_port reference." WorkflowOrchestrator
     .run() itself is therefore untouched by this card: it keeps calling
     `self._dependencies.execute(...)` at exactly the same call site as
@@ -46,7 +46,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     it has never held.
 
     `thread_id` is read from `state.active_investigation_anchor["thread_id"]`
-    at call time (the field A202's `run_reasoner_cycle` establishes and
+    at call time (the field A202's `run_annatar_cycle` establishes and
     maintains across cycles) -- `state` is passed into `execute` fresh each
     cycle, so this always reflects whatever thread was active as of the end
     of the *previous* cycle's `reason` phase (or None on the very first
@@ -103,7 +103,7 @@ class WorkflowOrchestrator:
         while True:
             budget_reason = check_budget(state.step_index, self._limits.max_cycles)
             if budget_reason is not None:
-                budget_result = self._route_budget_through_reasoner(state, current_observation, phase_results)
+                budget_result = self._route_budget_through_annatar(state, current_observation, phase_results)
                 if budget_result is not None:
                     return budget_result
 
@@ -147,7 +147,7 @@ class WorkflowOrchestrator:
                     state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
                     state.replan_passes += 1
                     if cycle_vetoes > self._limits.max_replan_passes_per_cycle:
-                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
+                        veto_result = self._route_second_veto_through_annatar(state, perception_payload, current_observation, phase_results)
                         if veto_result is not None:
                             return veto_result
                         continue
@@ -180,7 +180,7 @@ class WorkflowOrchestrator:
                     if not vet_payload.approved or vet.status == PhaseStatus.VETO:
                         state.latest_veto_reason = vet_payload.reason or vet.reason
                         state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
-                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
+                        veto_result = self._route_second_veto_through_annatar(state, perception_payload, current_observation, phase_results)
                         if veto_result is not None:
                             return veto_result
                         continue
@@ -214,12 +214,12 @@ class WorkflowOrchestrator:
                 # A202 / spec section 5: the environment's own authoritative
                 # terminal signal (a real win/loss from the ARC API itself,
                 # via termination_from_evaluation) stays independent and
-                # short-circuits *before* the Reasoner runs -- "an
+                # short-circuits *before* Annatar runs -- "an
                 # environment-terminal result doesn't need a strategic
                 # opinion." This check is deliberately positioned ahead of
-                # the stall/Reasoner block below (moved up from its prior
+                # the stall/Annatar block below (moved up from its prior
                 # position after the stall check) so a real terminal result
-                # is never routed through Reasoner logic, and the Reasoner
+                # is never routed through Annatar logic, and Annatar
                 # is never invoked once the episode is already over.
                 termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
                 if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
@@ -247,13 +247,13 @@ class WorkflowOrchestrator:
                     num_attempted,
                 )
 
-                if self._dependencies.reason is not None:
-                    # A202 / spec section 5: the Reasoner now owns the
+                if self._dependencies.annatar is not None:
+                    # A202 / spec section 5: the Annatar now owns the
                     # advance/repeat/terminate decision. check_stall's signal
                     # is folded in as one of its inputs (see
-                    # reasoner_signals.compute_cycle_signals) instead of
+                    # annatar_signals.compute_cycle_signals) instead of
                     # independently ending the run in the `else` branch below.
-                    outcome = self._dependencies.reason(
+                    outcome = self._dependencies.annatar(
                         state,
                         perception_payload,
                         execution_payload,
@@ -261,21 +261,21 @@ class WorkflowOrchestrator:
                         stall_reason=stall_reason,
                     )
                     # A205 / spec section 8: make a degraded (graph-unreachable)
-                    # Reasoner cycle visible in telemetry rather than silently
-                    # swallowed. Set every cycle the Reasoner actually runs, so
+                    # Annatar cycle visible in telemetry rather than silently
+                    # swallowed. Set every cycle the Annatar actually runs, so
                     # this always reflects the most recent cycle's outcome.
-                    state.reasoner_degraded = outcome.degraded
+                    state.annatar_degraded = outcome.degraded
                     if outcome.decision == "terminate":
-                        return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
+                        return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
                     if outcome.decision in ("repeat_deepen", "repeat_retry"):
                         # Consumed by a later card (A203, anchor-biasing in
                         # goal_resolver/plan_generator) -- this card only
                         # needs to produce and store the hint correctly.
-                        state.reasoner_anchor_hint = outcome
+                        state.annatar_anchor_hint = outcome
                     else:
-                        state.reasoner_anchor_hint = None
+                        state.annatar_anchor_hint = None
                 else:
-                    # No Reasoner configured -- today's exact existing
+                    # No Annatar configured -- today's exact existing
                     # behavior, byte-for-byte.
                     if stall_reason is not None:
                         return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
@@ -290,22 +290,22 @@ class WorkflowOrchestrator:
                     traceback_text=traceback.format_exc(),
                 )
 
-    def _route_budget_through_reasoner(
+    def _route_budget_through_annatar(
         self,
         state: WorkflowState,
         current_observation: Mapping[str, Any],
         phase_results: list[PhaseResult[Any]],
     ) -> WorkflowRunResult:
         """A209 fix (2026-08-25): `check_budget` previously ended the episode
-        directly, without ever giving the Reasoner a say -- another place the
+        directly, without ever giving the Annatar a say -- another place the
         "one agent that sees everything end-to-end" was structurally excluded
         from a termination decision. Unlike `second_veto`, `check_budget` fires
         BEFORE perceive runs, so there is no perception payload for the current
         cycle at all.
 
         Strategy: On the first iteration (step_index=0), there are no prior
-        cycles, so we skip the Reasoner and end directly -- nothing to report.
-        On subsequent iterations, we give the Reasoner a synthetic "budget
+        cycles, so we skip the Annatar and end directly -- nothing to report.
+        On subsequent iterations, we give the Annatar a synthetic "budget
         exhausted" signal (fresh, empty payloads -- A209's plan called this
         "Option A"; its own Outcome section wrote "Option B" by mistake,
         which described reusing the prior cycle's real state instead --
@@ -316,16 +316,16 @@ class WorkflowOrchestrator:
 
         Every branch of this method returns a real WorkflowRunResult -- there
         is no path that returns None. In particular, `outcome.decision` from
-        the Reasoner call below is deliberately never inspected: the budget
-        ceiling is non-negotiable regardless of what the Reasoner decides, so
-        the method doesn't depend on (and doesn't assert) the Reasoner
+        the Annatar call below is deliberately never inspected: the budget
+        ceiling is non-negotiable regardless of what the Annatar decides, so
+        the method doesn't depend on (and doesn't assert) the Annatar
         producing any particular decision. This is what makes the hard-ceiling
-        guarantee structural rather than a matter of trusting the Reasoner to
-        answer correctly -- see test_reasoner_response_does_not_override_budget
-        for the proof (a Reasoner mock returning "advance" still ends the
+        guarantee structural rather than a matter of trusting the Annatar to
+        answer correctly -- see test_annatar_response_does_not_override_budget
+        for the proof (a Annatar mock returning "advance" still ends the
         episode as BUDGET_EXHAUSTED with zero further phases invoked)."""
-        # If no Reasoner configured, behavior is byte-for-byte identical to before.
-        if self._dependencies.reason is None:
+        # If no Annatar configured, behavior is byte-for-byte identical to before.
+        if self._dependencies.annatar is None:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
         # First iteration has no prior cycle to report; end immediately.
@@ -333,7 +333,7 @@ class WorkflowOrchestrator:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
         # For step_index > 0, construct synthetic payloads representing
-        # "budget exhausted before we could run any phases." The Reasoner sees
+        # "budget exhausted before we could run any phases." Annatar sees
         # the last known observation and decides to terminate (as it should,
         # since the budget is non-negotiable).
         synthetic_execution = ExecutionResult(
@@ -347,9 +347,9 @@ class WorkflowOrchestrator:
         )
 
         # We don't have a perception payload from this cycle (it hasn't run yet).
-        # The Reasoner needs one for its signature. We can't easily get the prior
+        # Annatar needs one for its signature. We can't easily get the prior
         # cycle's perception payload from the function signature, so we create a
-        # minimal synthetic one. This is acceptable because the Reasoner's only
+        # minimal synthetic one. This is acceptable because Annatar's only
         # real decision here is to TERMINATE (the budget is hard), so the
         # perception details don't matter — the signal "budget_exhausted" overrides.
         # In a future iteration, if we store perception payloads in state, we
@@ -366,19 +366,19 @@ class WorkflowOrchestrator:
             metadata={"synthetic": True, "reason": "budget_exhausted"},
         )
 
-        outcome = self._dependencies.reason(
+        outcome = self._dependencies.annatar(
             state,
             synthetic_perception,
             synthetic_execution,
             synthetic_evaluation,
             stall_reason="budget_exhausted",
         )
-        # The Reasoner's decision should be to terminate (the budget is hard).
+        # The Annatar's decision should be to terminate (the budget is hard).
         # But even if it somehow said "continue", we end the episode anyway
         # because the budget is non-negotiable.
         return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
-    def _route_second_veto_through_reasoner(
+    def _route_second_veto_through_annatar(
         self,
         state: WorkflowState,
         perception_payload: Any,
@@ -386,27 +386,27 @@ class WorkflowOrchestrator:
         phase_results: list[PhaseResult[Any]],
     ) -> WorkflowRunResult | None:
         """Post-A206 fix (2026-08-25): a double veto previously ended the
-        episode directly, without ever giving the Reasoner a say -- the one
+        episode directly, without ever giving the Annatar a say -- the one
         place the "one agent that sees everything end-to-end" was
         structurally excluded from a real strategic decision ("the safety
         layer just rejected our plan twice, what now"). `vet` fires before
         `execute`/`evaluate`, so there's no real ExecutionResult/
         EvaluationResult for this cycle -- a synthetic "nothing was
-        attempted" pair is fed to the Reasoner instead
+        attempted" pair is fed to the Annatar instead
         (execution.candidate=None, meaningful_progress=False), plus
         stall_reason="second_veto" (reusing the existing stall-fold
         mechanism from compute_cycle_signals rather than inventing a
         parallel one). A repeated-double-veto pathological case is bounded
         by the same whole-episode-futility streak
-        (reasoner_signals.run_reasoner_cycle) built alongside this fix --
+        (annatar_signals.run_annatar_cycle) built alongside this fix --
         no new termination logic needed for that case specifically.
 
         Returns a WorkflowRunResult if the episode should end now (no
-        Reasoner configured -- exact prior behavior -- or the Reasoner said
+        Annatar configured -- exact prior behavior -- or the Annatar said
         "terminate"); None if the caller should `continue` the outer loop
-        instead, letting the Reasoner's decision (a fresh anchor, or the
+        instead, letting the Annatar's decision (a fresh anchor, or the
         same one) drive the next cycle."""
-        if self._dependencies.reason is None:
+        if self._dependencies.annatar is None:
             return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
 
         synthetic_execution = ExecutionResult(action_id="", candidate=None, observation=current_observation, metadata={})
@@ -416,7 +416,7 @@ class WorkflowOrchestrator:
             reason="second_veto",
             metadata={"grid_changed": False},
         )
-        outcome = self._dependencies.reason(
+        outcome = self._dependencies.annatar(
             state,
             perception_payload,
             synthetic_execution,
@@ -424,8 +424,8 @@ class WorkflowOrchestrator:
             stall_reason="second_veto",
         )
         if outcome.decision == "terminate":
-            return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
-        state.reasoner_anchor_hint = outcome if outcome.decision in ("repeat_deepen", "repeat_retry") else None
+            return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
+        state.annatar_anchor_hint = outcome if outcome.decision in ("repeat_deepen", "repeat_retry") else None
         return None
 
     def _invoke_phase(self, name: str, phase_callable: Any, *args: Any) -> PhaseResult[Any]:

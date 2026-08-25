@@ -1,9 +1,9 @@
 """A202: turns real runtime state (WorkflowState, perception, execution,
-evaluation, graph queries) into investigation_reasoner.CycleSignals, and
-implements the ReasonerPhase glue that ties A200's pure state machine and
+evaluation, graph queries) into annatar_state_machine.CycleSignals, and
+implements the AnnatarPhase glue that ties A200's pure state machine and
 A201's graph client together each cycle.
 
-Deliberately a separate module from investigation_reasoner.py (which must
+Deliberately a separate module from annatar_state_machine.py (which must
 stay zero-I/O per A200's acceptance criteria -- this module is the only
 place allowed to call graph_port/llm_port) and from workflow.py (which
 stays thin per its own existing design principle: "routes phases, enforces
@@ -16,17 +16,17 @@ import json
 import re
 from typing import Any, Mapping
 
-from .investigation_reasoner import (
+from .annatar_state_machine import (
     CycleSignals,
     InvestigationState,
-    ReasonerDecision,
+    AnnatarDecision,
     apply_llm_vote,
     decision_for_state,
     permissible_llm_transitions,
     transition,
 )
 from .ports import GraphQueryPort, LLMMessage, LLMPort
-from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, ReasonerOutcome, WorkflowState
+from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, AnnatarOutcome, WorkflowState
 
 
 def compute_cycle_signals(
@@ -86,13 +86,13 @@ def compute_cycle_signals(
     execution_inconclusive = not bool(eval_meta.get("grid_changed", False)) and not meaningful_progress
 
     # A202 (spec section 5's self-review correction): check_stall's signal
-    # becomes an *input* to the Reasoner instead of an independent return
+    # becomes an *input* to Annatar instead of an independent return
     # path out of WorkflowOrchestrator.run(). check_stall firing means
     # "every available action has been attempted repeatedly with no
     # progress" -- workflow.py's own precise, direct measure of action-space
     # exhaustion, which is strictly more authoritative for this anchor's
     # cycle than the graph-derived all_falsified/untested_remaining above.
-    # When it fires, override both toward the shape investigation_reasoner
+    # When it fires, override both toward the shape annatar_state_machine
     # .transition() reads as "nothing left" so the transition table is
     # pushed toward EXHAUSTED, not silently ignored.
     if stall_reason is not None:
@@ -118,7 +118,7 @@ def _build_transition_vote_prompt(state: WorkflowState, signals: CycleSignals) -
     the actual decision inputs plus a `required_fields` list the model must
     fill in. The LLM is told exactly which states are graph-permitted right
     now (via permissible_llm_transitions) so a well-behaved model votes
-    in-set on the first try -- though resolve_llm_vote's caller (run_reasoner
+    in-set on the first try -- though resolve_llm_vote's caller (run_annatar
     _cycle -> apply_llm_vote) still independently re-validates the vote
     against that same permitted set, never trusting the model's own
     self-reported compliance."""
@@ -195,7 +195,7 @@ def resolve_llm_vote(llm_port: LLMPort | None, state: WorkflowState, signals: Cy
     `chat()` call) and adds only the safety net this card specifically
     requires: any failure at all (no llm_port, a raised exception, or an
     unparseable/invalid response) resolves to InvestigationState.EXPLORING,
-    a sentinel investigation_reasoner.permissible_llm_transitions() never
+    a sentinel annatar_state_machine.permissible_llm_transitions() never
     includes (confirmed directly against that function's implementation --
     it only ever returns a subset of {DEEPENING, SATISFIED, EXHAUSTED}), so
     apply_llm_vote's existing out-of-set-vote fallback (prefer EXHAUSTED
@@ -223,7 +223,7 @@ DEFAULT_MAX_UNPRODUCTIVE_ANCHORS = 3
 # not a tuned value.
 
 
-def run_reasoner_cycle(
+def run_annatar_cycle(
     state: WorkflowState,
     perception: PerceptionSnapshot,
     execution: ExecutionResult,
@@ -233,9 +233,9 @@ def run_reasoner_cycle(
     llm_port: LLMPort | None = None,
     stall_reason: str | None = None,
     max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
-) -> ReasonerOutcome:
-    """The actual ReasonerPhase: resolves the current investigation thread's
-    state via investigation_reasoner's pure functions, persists the result
+) -> AnnatarOutcome:
+    """The actual AnnatarPhase: resolves the current investigation thread's
+    state via annatar_state_machine's pure functions, persists the result
     through A201's graph client, and returns the orchestrator-facing
     decision. If state.active_investigation_anchor is None (fresh attempt,
     or the previous thread just concluded), picks a starting anchor from the
@@ -251,14 +251,14 @@ def run_reasoner_cycle(
     decision. `anchor["any_progress"]` tracks whether THIS anchor has ever
     registered meaningful_progress across its whole life; when an anchor
     concludes (ADVANCE) without ever having shown progress,
-    state.reasoner_unproductive_anchor_streak increments -- any anchor that
+    state.annatar_unproductive_anchor_streak increments -- any anchor that
     DOES show progress resets it to 0. Crossing max_unproductive_anchors
     overrides the decision to TERMINATE (an existing workflow.py code path
     that decision_for_state() itself was documented as never actually
     producing)."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
-    # ReasonerOutcome.degraded at the bottom of this function.
+    # AnnatarOutcome.degraded at the bottom of this function.
     degraded = False
     anchor = state.active_investigation_anchor
     if anchor is None:
@@ -326,7 +326,7 @@ def run_reasoner_cycle(
         # deepening_cycle_count just reached the limit) -- but
         # decision_for_state() explicitly does not accept AWAITING_LLM as
         # input (must be resolved via apply_llm_vote() first, per
-        # investigation_reasoner.py's own docstring) and raises ValueError
+        # annatar_state_machine.py's own docstring) and raises ValueError
         # if handed it directly. apply_llm_vote() itself never *returns*
         # AWAITING_LLM (permissible_llm_transitions() never includes it), so
         # this branch is only ever reached via a fresh transition()
@@ -334,21 +334,21 @@ def run_reasoner_cycle(
         # above. Treat it the same as DEEPENING for decision purposes:
         # repeat, park the state, and let the *next* cycle's
         # current_state==AWAITING_LLM branch actually resolve it.
-        decision = ReasonerDecision.REPEAT_DEEPEN
+        decision = AnnatarDecision.REPEAT_DEEPEN
     else:
         decision = decision_for_state(new_state)
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
         if anchor.get("any_progress"):
-            state.reasoner_unproductive_anchor_streak = 0
+            state.annatar_unproductive_anchor_streak = 0
         else:
-            state.reasoner_unproductive_anchor_streak += 1
-        if state.reasoner_unproductive_anchor_streak >= max_unproductive_anchors:
+            state.annatar_unproductive_anchor_streak += 1
+        if state.annatar_unproductive_anchor_streak >= max_unproductive_anchors:
             # Whole-episode futility: every anchor tried in a row has been
             # completely dead. Override the per-anchor ADVANCE with a real
             # episode-level decision instead of silently starting yet
             # another anchor that's likely to fare the same.
-            decision = ReasonerDecision.TERMINATE
+            decision = AnnatarDecision.TERMINATE
     else:
         anchor["state"] = new_state.value
         if new_state == InvestigationState.DEEPENING:
@@ -357,7 +357,7 @@ def run_reasoner_cycle(
         state.active_investigation_anchor = anchor
 
     reports_anchor = decision.value in ("repeat_deepen", "repeat_retry")
-    return ReasonerOutcome(
+    return AnnatarOutcome(
         decision=decision.value,
         anchor_ref=anchor["anchor_ref"] if reports_anchor else None,
         anchor_type=anchor["anchor_type"] if reports_anchor else None,
@@ -367,4 +367,4 @@ def run_reasoner_cycle(
     )
 
 
-__all__ = ["compute_cycle_signals", "resolve_llm_vote", "run_reasoner_cycle"]
+__all__ = ["compute_cycle_signals", "resolve_llm_vote", "run_annatar_cycle"]
