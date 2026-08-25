@@ -151,3 +151,4 @@ class WorkflowDependencies:
     execute: ExecutePhase
     evaluate: EvaluatePhase
     annatar: AnnatarPhase | None = None  # None means "no Annatar, run exactly as today"
+    on_crash_cleanup: callable | None = None  # A211: best-effort thread closure on crash (no-op if None)

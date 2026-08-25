@@ -158,16 +158,23 @@ When Annatar is present, stall is Shift A compliant (a deterministic signal) and
 ### 2.4 Exception → CRASHED
 
 **Current Status:**  
-Does **NOT** route through Annatar or the graph at all. An unhandled exception in the main loop (whether during a phase, Annatar itself, or anywhere in the orchestrator) causes the episode to end with `WorkflowStatus.CRASHED` and no investigation-thread closure recorded in the graph.
+Routes through best-effort graph cleanup before ending. An unhandled exception in the main loop triggers the crash handler in `WorkflowOrchestrator.run()`, which now attempts a best-effort `write_thread_state` call (via the graph port's `write_thread_state` method) to close out any open investigation thread before returning `WorkflowStatus.CRASHED`. The close-out attempt is wrapped in its own try/except — if it raises, the original crash's traceback is preserved and reported, never masked.
 
-**Files:** `agents/arc4/workflow.py` (lines ~280–290)
+**Files:** `agents/arc4/workflow.py` (lines ~284–306), `arc_runtime/bundle.py` (lines ~213–219)
 
 **Principle Verdict:**  
-🔴 **Real Gap — Confirmed**
+✓ **Fixed**
 
-This violates Shift B's end-to-end reasoning principle: an investigation thread is left dangling in the graph forever (in whatever state it was in when the crash occurred), with no record of why or when it ended. The graph-control-plane premise (Shift C) fails: the graph is not consulted or updated for the most severe failure mode.
+A211 added the best-effort close-out logic. The crash handler now:
+1. Captures the original crash's traceback first
+2. Checks if an investigation thread is open (`state.active_investigation_anchor["thread_id"]` is not None)
+3. If Annatar is configured and a thread is open, calls the `on_crash_cleanup` closure (a graph-port-captured write operation)
+4. Wraps that cleanup in its own try/except to ensure the original traceback is never masked
+5. Returns the CRASHED result with the original traceback intact
 
-**Follow-up:** **A211** — confirmed-existing gap card for crash-safety and thread closure.
+This satisfies Shift B (the graph is now updated for the most severe failure mode, giving the reasoning owner a chance to see closed-out threads) and Shift C (the graph reflects reality: a crashed thread is marked as no longer active, not left dangling with stale state).
+
+**Follow-up:** None — A211 closed this gap.
 
 ---
 
@@ -301,7 +308,7 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 | 2.1 Env-Terminal | Exempt | ✓ Aligned | None |
 | 2.2 Annatar Terminate | Direct | ✓ Aligned | None |
 | 2.3 Stall (no-Annatar) | Legacy fallback | ✓ Acceptable | None |
-| 2.4 Exception/Crashed | None | 🔴 Gap confirmed | A211 |
+| 2.4 Exception/Crashed | Best-effort cleanup | ✓ Aligned | None |
 | 2.5 Budget Exhausted | Direct (visibility) | ✓ Aligned | None |
 | 2.6 Second Veto | Direct | ✓ Aligned | None |
 | 3 Temporal Workflows | Not wired | ✓ Exempt | None |
@@ -310,10 +317,10 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 | 6 Offline Scoring | Not applicable | ✓ Exempt | None |
 | 7 LLM Escalation Tiers | Absorbed in phase result | ✓ Correct | None |
 
-**Real gaps identified:** A211 (crash-safety/thread closure).  
-**Correctly aligned:** All other components.  
+**Real gaps identified:** None open — both gaps found during A210's scoping are now closed.  
+**Correctly aligned:** All other components, including crash-safety/thread closure (A211 closed) and first-veto routing (A212 closed).  
 **Exempt by design:** Deprecated code, utilities, offline analysis.
-**Closed this pass:** A212 (first-veto routing audit — fixed with visibility, informed-not-empowered).
+**Closed this pass:** A211 (crash-safety/thread closure — best-effort graph close-out, never masks the original crash) and A212 (first-veto routing audit — fixed with visibility, informed-not-empowered).
 
 ---
 
@@ -324,5 +331,5 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 - `backlog/A207.md`: Second-veto routing (closed gap)
 - `backlog/A209.md`: Budget routing audit (correctly resolved)
 - `backlog/A210.md`: Annatar rename (this pass's parent card)
-- `backlog/A211.md`: Crash-safety audit (open gap)
+- `backlog/A211.md`: Crash-safety close-out (closed gap)
 - `backlog/A212.md`: First-veto routing audit (closed — fixed with visibility)
