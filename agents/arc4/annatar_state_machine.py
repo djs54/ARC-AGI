@@ -1,4 +1,4 @@
-"""Pure investigation-thread state machine for the trajectory Reasoner
+"""Pure investigation-thread state machine for the trajectory Annatar
 (docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md, section 4).
 
 Deterministic, stdlib only, no graph/LLM/I/O -- mirrors cycle_policy.py's
@@ -41,7 +41,7 @@ class CycleSignals:
     execution_inconclusive: bool
     deepening_cycle_count: int
     already_retried: bool
-    # A205: set by the I/O layer (reasoner_signals.compute_cycle_signals)
+    # A205: set by the I/O layer (annatar_signals.compute_cycle_signals)
     # when a graph-client call raised during this cycle's signal
     # computation, so the failure is visible instead of only being
     # silently absorbed into a conservative default. Still just a plain

@@ -26,7 +26,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     """A204 / spec section 7: bracket an ExecutePhase callable with
     write-ahead cycle recording. `execute` is called synchronously and
     returns only after the real, live ARC API call has completed -- this is
-    the one place in the whole trajectory-Reasoner family (A200-A206) where
+    the one place in the whole trajectory-Annatar family (A200-A206) where
     a bug can mean double-acting on non-idempotent external game state, so
     the invariant here is non-negotiable: `write_cycle` failing (any
     exception, or a missing `cycle_id`) must NEVER prevent `execute` from
@@ -36,7 +36,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     This wrapping is applied to the `execute` *dependency* itself, at
     bundle-build time in arc_runtime/bundle.py -- the same closure-over-
     graph_port pattern every other phase (resolve/plan/reason) already
-    uses, per ports.py's ReasonerPhase docstring: "WorkflowOrchestrator
+    uses, per ports.py's AnnatarPhase docstring: "WorkflowOrchestrator
     itself does not need to hold a graph_port reference." WorkflowOrchestrator
     .run() itself is therefore untouched by this card: it keeps calling
     `self._dependencies.execute(...)` at exactly the same call site as
@@ -46,7 +46,7 @@ def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
     it has never held.
 
     `thread_id` is read from `state.active_investigation_anchor["thread_id"]`
-    at call time (the field A202's `run_reasoner_cycle` establishes and
+    at call time (the field A202's `run_annatar_cycle` establishes and
     maintains across cycles) -- `state` is passed into `execute` fresh each
     cycle, so this always reflects whatever thread was active as of the end
     of the *previous* cycle's `reason` phase (or None on the very first
@@ -214,12 +214,12 @@ class WorkflowOrchestrator:
                 # A202 / spec section 5: the environment's own authoritative
                 # terminal signal (a real win/loss from the ARC API itself,
                 # via termination_from_evaluation) stays independent and
-                # short-circuits *before* the Reasoner runs -- "an
+                # short-circuits *before* Annatar runs -- "an
                 # environment-terminal result doesn't need a strategic
                 # opinion." This check is deliberately positioned ahead of
-                # the stall/Reasoner block below (moved up from its prior
+                # the stall/Annatar block below (moved up from its prior
                 # position after the stall check) so a real terminal result
-                # is never routed through Reasoner logic, and the Reasoner
+                # is never routed through Annatar logic, and Annatar
                 # is never invoked once the episode is already over.
                 termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
                 if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
@@ -333,7 +333,7 @@ class WorkflowOrchestrator:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
         # For step_index > 0, construct synthetic payloads representing
-        # "budget exhausted before we could run any phases." The Reasoner sees
+        # "budget exhausted before we could run any phases." Annatar sees
         # the last known observation and decides to terminate (as it should,
         # since the budget is non-negotiable).
         synthetic_execution = ExecutionResult(
@@ -347,9 +347,9 @@ class WorkflowOrchestrator:
         )
 
         # We don't have a perception payload from this cycle (it hasn't run yet).
-        # The Reasoner needs one for its signature. We can't easily get the prior
+        # Annatar needs one for its signature. We can't easily get the prior
         # cycle's perception payload from the function signature, so we create a
-        # minimal synthetic one. This is acceptable because the Reasoner's only
+        # minimal synthetic one. This is acceptable because Annatar's only
         # real decision here is to TERMINATE (the budget is hard), so the
         # perception details don't matter — the signal "budget_exhausted" overrides.
         # In a future iteration, if we store perception payloads in state, we

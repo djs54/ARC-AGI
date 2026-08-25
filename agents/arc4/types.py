@@ -436,15 +436,15 @@ class WorkflowState:
     # alternatives) and had no connection to the actual graph at all.
     world_model_node_writes: int = 0
     world_model_edge_writes: int = 0
-    # A202: which investigation thread (if any) the trajectory Reasoner is
+    # A202: which investigation thread (if any) the trajectory Annatar is
     # currently anchored on, tracked in-process across cycles so a fresh
     # thread is only started when the previous one actually concluded
     # (SATISFIED/EXHAUSTED -> ADVANCE). Shape when set:
     # {"anchor_ref": ..., "anchor_type": "goal"|"entity", "thread_id": ...,
     # "state": "exploring", "deepening_cycle_count": 0, "already_retried": False}
-    # -- "state" is one of investigation_reasoner.InvestigationState's values,
+    # -- "state" is one of annatar_state_machine.InvestigationState's values,
     # kept as a plain str here for the same one-way-dependency reason
-    # ReasonerOutcome.decision is a str above.
+    # AnnatarOutcome.decision is a str above.
     active_investigation_anchor: dict[str, Any] | None = None
     # A202: the most recent REPEAT_DEEPEN/REPEAT_RETRY outcome, consumed by a
     # later card (A203) to bias goal_resolver/plan_generator toward the
