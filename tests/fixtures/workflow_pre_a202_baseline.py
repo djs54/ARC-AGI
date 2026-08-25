@@ -22,66 +22,6 @@ from .types import (
 )
 
 
-def wrap_execute_with_write_ahead(execute: Any, graph_port: Any) -> Any:
-    """A204 / spec section 7: bracket an ExecutePhase callable with
-    write-ahead cycle recording. `execute` is called synchronously and
-    returns only after the real, live ARC API call has completed -- this is
-    the one place in the whole trajectory-Reasoner family (A200-A206) where
-    a bug can mean double-acting on non-idempotent external game state, so
-    the invariant here is non-negotiable: `write_cycle` failing (any
-    exception, or a missing `cycle_id`) must NEVER prevent `execute` from
-    running. The durability write is a safety net around the real action,
-    not a gate in front of it.
-
-    This wrapping is applied to the `execute` *dependency* itself, at
-    bundle-build time in arc_runtime/bundle.py -- the same closure-over-
-    graph_port pattern every other phase (resolve/plan/reason) already
-    uses, per ports.py's ReasonerPhase docstring: "WorkflowOrchestrator
-    itself does not need to hold a graph_port reference." WorkflowOrchestrator
-    .run() itself is therefore untouched by this card: it keeps calling
-    `self._dependencies.execute(...)` at exactly the same call site as
-    before, and simply gets a write-ahead-aware callable when one is wired
-    in by the bundle -- so `execute` is still "bracketed" from run()'s
-    point of view without giving the orchestrator a `_graph_port` attribute
-    it has never held.
-
-    `thread_id` is read from `state.active_investigation_anchor["thread_id"]`
-    at call time (the field A202's `run_reasoner_cycle` establishes and
-    maintains across cycles) -- `state` is passed into `execute` fresh each
-    cycle, so this always reflects whatever thread was active as of the end
-    of the *previous* cycle's `reason` phase (or None on the very first
-    cycle / whenever no investigation thread is currently open), which is
-    the correct, intended semantics per A202.
-    """
-
-    def _wrapped(state: WorkflowState, perception: Any, goal: Any, vet: Any) -> PhaseResult[Any]:
-        cycle_id = None
-        anchor = state.active_investigation_anchor
-        thread_id = anchor.get("thread_id") if anchor is not None else None
-        if graph_port is not None and thread_id is not None:
-            write_cycle = getattr(graph_port, "write_cycle", None)
-            if write_cycle is not None:
-                try:
-                    write_result = write_cycle(thread_id, state.step_index, action_sent=True)
-                    cycle_id = write_result.get("cycle_id") if isinstance(write_result, dict) else None
-                except Exception:
-                    cycle_id = None  # graph unreachable -- degrade, never block the real action
-
-        result = execute(state, perception, goal, vet)
-
-        if cycle_id is not None:
-            confirm_cycle = getattr(graph_port, "confirm_cycle", None)
-            if confirm_cycle is not None:
-                try:
-                    confirm_cycle(cycle_id, decision="pending", confirmed=True)
-                except Exception:
-                    pass  # a failed confirm write must not crash a successful execution
-
-        return result
-
-    return _wrapped
-
-
 @dataclass(slots=True)
 class WorkflowLimits:
     max_cycles: int = 10
@@ -145,10 +85,7 @@ class WorkflowOrchestrator:
                     state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
                     state.replan_passes += 1
                     if cycle_vetoes > self._limits.max_replan_passes_per_cycle:
-                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
-                        if veto_result is not None:
-                            return veto_result
-                        continue
+                        return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
 
                     resolved_goal = self._invoke_phase("resolve", self._dependencies.resolve, state, perception_payload)
                     phase_results.append(resolved_goal)
@@ -178,10 +115,7 @@ class WorkflowOrchestrator:
                     if not vet_payload.approved or vet.status == PhaseStatus.VETO:
                         state.latest_veto_reason = vet_payload.reason or vet.reason
                         state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
-                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
-                        if veto_result is not None:
-                            return veto_result
-                        continue
+                        return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
 
                 execution = self._invoke_phase(
                     "execute",
@@ -209,20 +143,6 @@ class WorkflowOrchestrator:
                 self._record_evaluation_state(state, execution_payload, evaluation_payload)
                 state.step_index += 1
 
-                # A202 / spec section 5: the environment's own authoritative
-                # terminal signal (a real win/loss from the ARC API itself,
-                # via termination_from_evaluation) stays independent and
-                # short-circuits *before* the Reasoner runs -- "an
-                # environment-terminal result doesn't need a strategic
-                # opinion." This check is deliberately positioned ahead of
-                # the stall/Reasoner block below (moved up from its prior
-                # position after the stall check) so a real terminal result
-                # is never routed through Reasoner logic, and the Reasoner
-                # is never invoked once the episode is already over.
-                termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
-                if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
-                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
-
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
                 # Count distinct base actions so ACTION6@x,y click targets don't
@@ -244,39 +164,12 @@ class WorkflowOrchestrator:
                     num_available,
                     num_attempted,
                 )
+                if stall_reason is not None:
+                    return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
 
-                if self._dependencies.reason is not None:
-                    # A202 / spec section 5: the Reasoner now owns the
-                    # advance/repeat/terminate decision. check_stall's signal
-                    # is folded in as one of its inputs (see
-                    # reasoner_signals.compute_cycle_signals) instead of
-                    # independently ending the run in the `else` branch below.
-                    outcome = self._dependencies.reason(
-                        state,
-                        perception_payload,
-                        execution_payload,
-                        evaluation_payload,
-                        stall_reason=stall_reason,
-                    )
-                    # A205 / spec section 8: make a degraded (graph-unreachable)
-                    # Reasoner cycle visible in telemetry rather than silently
-                    # swallowed. Set every cycle the Reasoner actually runs, so
-                    # this always reflects the most recent cycle's outcome.
-                    state.reasoner_degraded = outcome.degraded
-                    if outcome.decision == "terminate":
-                        return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
-                    if outcome.decision in ("repeat_deepen", "repeat_retry"):
-                        # Consumed by a later card (A203, anchor-biasing in
-                        # goal_resolver/plan_generator) -- this card only
-                        # needs to produce and store the hint correctly.
-                        state.reasoner_anchor_hint = outcome
-                    else:
-                        state.reasoner_anchor_hint = None
-                else:
-                    # No Reasoner configured -- today's exact existing
-                    # behavior, byte-for-byte.
-                    if stall_reason is not None:
-                        return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
+                termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
+                if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
+                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
 
                 current_observation = execution_payload.observation
             except Exception:
@@ -287,56 +180,6 @@ class WorkflowOrchestrator:
                     phase_results,
                     traceback_text=traceback.format_exc(),
                 )
-
-    def _route_second_veto_through_reasoner(
-        self,
-        state: WorkflowState,
-        perception_payload: Any,
-        current_observation: Mapping[str, Any],
-        phase_results: list[PhaseResult[Any]],
-    ) -> WorkflowRunResult | None:
-        """Post-A206 fix (2026-08-25): a double veto previously ended the
-        episode directly, without ever giving the Reasoner a say -- the one
-        place the "one agent that sees everything end-to-end" was
-        structurally excluded from a real strategic decision ("the safety
-        layer just rejected our plan twice, what now"). `vet` fires before
-        `execute`/`evaluate`, so there's no real ExecutionResult/
-        EvaluationResult for this cycle -- a synthetic "nothing was
-        attempted" pair is fed to the Reasoner instead
-        (execution.candidate=None, meaningful_progress=False), plus
-        stall_reason="second_veto" (reusing the existing stall-fold
-        mechanism from compute_cycle_signals rather than inventing a
-        parallel one). A repeated-double-veto pathological case is bounded
-        by the same whole-episode-futility streak
-        (reasoner_signals.run_reasoner_cycle) built alongside this fix --
-        no new termination logic needed for that case specifically.
-
-        Returns a WorkflowRunResult if the episode should end now (no
-        Reasoner configured -- exact prior behavior -- or the Reasoner said
-        "terminate"); None if the caller should `continue` the outer loop
-        instead, letting the Reasoner's decision (a fresh anchor, or the
-        same one) drive the next cycle."""
-        if self._dependencies.reason is None:
-            return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
-
-        synthetic_execution = ExecutionResult(action_id="", candidate=None, observation=current_observation, metadata={})
-        synthetic_evaluation = EvaluationResult(
-            decision=WorkflowDecision.CONTINUE,
-            meaningful_progress=False,
-            reason="second_veto",
-            metadata={"grid_changed": False},
-        )
-        outcome = self._dependencies.reason(
-            state,
-            perception_payload,
-            synthetic_execution,
-            synthetic_evaluation,
-            stall_reason="second_veto",
-        )
-        if outcome.decision == "terminate":
-            return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
-        state.reasoner_anchor_hint = outcome if outcome.decision in ("repeat_deepen", "repeat_retry") else None
-        return None
 
     def _invoke_phase(self, name: str, phase_callable: Any, *args: Any) -> PhaseResult[Any]:
         result = phase_callable(*args)

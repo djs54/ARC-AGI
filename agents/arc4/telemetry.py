@@ -11,6 +11,28 @@ from .evaluator import classify_v2_termination
 from .compliance_checks import check_shift_a_invariants
 
 
+def _has_positive_graph_evidence(graph_evidence: Any) -> bool:
+    """True only when graph_evidence carries actual positive support, not
+    just any non-empty container. plan_generator.py's real per-action
+    evidence shape is a dict with confidence/supports/contradictions keys
+    (e.g. {"confidence": 0.0, "contradictions": 64, "supports": 0} for an
+    action the graph has confirmed doesn't work) -- `bool(that dict)` is
+    True even though it says the opposite of "grounded." A candidate is
+    only meaningfully graph-grounded when the evidence shows net-positive
+    signal: some measured confidence, or more supporting than contradicting
+    observations. Also handles the goal-level list-of-evidence-items shape
+    (each item its own small evidence dict) by checking whether any item is
+    itself positive."""
+    if isinstance(graph_evidence, Mapping):
+        confidence = graph_evidence.get("confidence") or 0.0
+        supports = graph_evidence.get("supports") or 0
+        contradictions = graph_evidence.get("contradictions") or 0
+        return bool(confidence > 0 or supports > contradictions)
+    if isinstance(graph_evidence, (list, tuple)):
+        return any(_has_positive_graph_evidence(item) for item in graph_evidence)
+    return False
+
+
 @dataclass(slots=True)
 class ArcV2Telemetry:
     """Collect phase-level snapshots and final run artifacts for one task."""
@@ -188,7 +210,7 @@ class ArcV2Telemetry:
             cand_meta = execution.candidate.metadata
             llm_escalated_plan = bool(cand_meta.get("llm_guidance"))
             graph_evidence = cand_meta.get("graph_evidence")
-            graph_grounded = bool(graph_evidence) or bool(cand_meta.get("entity_neighborhood_grounded"))
+            graph_grounded = _has_positive_graph_evidence(graph_evidence) or bool(cand_meta.get("entity_neighborhood_grounded"))
 
         exhaustion_source = None
         if evaluation is not None and isinstance(evaluation.metadata, Mapping):
@@ -371,6 +393,10 @@ class ArcV2Telemetry:
             "no_progress_count": state.consecutive_no_progress_count,
             "action_attempt_counts": dict(state.action_attempt_counts),
             "action_falsification_counts": dict(state.action_falsification_counts),
+            # Post-A206 fix (2026-08-25): visible without digging through the
+            # full trace -- how many investigation anchors in a row ended
+            # without ever showing meaningful_progress, as of episode end.
+            "reasoner_unproductive_anchor_streak": state.reasoner_unproductive_anchor_streak,
         }
 
     @staticmethod

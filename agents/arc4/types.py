@@ -461,6 +461,25 @@ class WorkflowState:
     # state mutations -- not something A205 introduces). Stays at its default
     # False for the whole episode whenever no Reasoner is configured at all.
     reasoner_degraded: bool = False
+    # Post-A206 fix (2026-08-25, user-directed live-smoke follow-up): how
+    # many investigation-thread anchors in a row have concluded (ADVANCE)
+    # without ever once registering meaningful_progress. Tracks whole-
+    # episode futility across DIFFERENT anchors -- the per-anchor state
+    # machine (investigation_reasoner.py) already handles "this one anchor
+    # is going nowhere" via its own EXHAUSTED/RETRY transitions, but nothing
+    # aggregated "I've now tried N completely different anchors and NONE of
+    # them showed any sign of life" into a real whole-episode decision.
+    # Confirmed live: a 60-step smoke run cycled through 4+ different goal
+    # anchors, every one totally unproductive (meaningful_progress=False on
+    # all 120 evaluate snapshots), and nothing noticed -- the run just burned
+    # its full step budget. reasoner_signals.py::run_reasoner_cycle
+    # increments this on every unproductive ADVANCE and resets it to 0 the
+    # moment any anchor shows real progress; once it crosses
+    # run_reasoner_cycle's max_unproductive_anchors threshold, the Reasoner
+    # emits ReasonerDecision.TERMINATE (an existing, already-wired
+    # workflow.py code path that decision_for_state itself was documented,
+    # in A202's own review notes, as never actually producing).
+    reasoner_unproductive_anchor_streak: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -485,6 +504,7 @@ class WorkflowState:
             "active_investigation_anchor": self.active_investigation_anchor,
             "reasoner_anchor_hint": self.reasoner_anchor_hint.to_dict() if self.reasoner_anchor_hint else None,
             "reasoner_degraded": self.reasoner_degraded,
+            "reasoner_unproductive_anchor_streak": self.reasoner_unproductive_anchor_streak,
         }
 
     @classmethod
@@ -511,6 +531,7 @@ class WorkflowState:
             active_investigation_anchor=d.get("active_investigation_anchor"),
             reasoner_anchor_hint=ReasonerOutcome.from_dict(d["reasoner_anchor_hint"]) if d.get("reasoner_anchor_hint") else None,
             reasoner_degraded=d.get("reasoner_degraded", False),
+            reasoner_unproductive_anchor_streak=d.get("reasoner_unproductive_anchor_streak", 0),
         )
 
 

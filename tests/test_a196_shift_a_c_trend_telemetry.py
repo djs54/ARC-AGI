@@ -218,6 +218,78 @@ class TestStepSnapshotNewFields:
         assert "graph_grounded" in snapshot
         assert snapshot["graph_grounded"] is False
 
+    def test_graph_grounded_false_for_purely_negative_evidence(self):
+        """Regression test (2026-08-25, live-smoke-discovered): the real
+        production shape of PlanCandidate.metadata["graph_evidence"]
+        (plan_generator.py::_build_candidates, via
+        graph_port.fetch_per_action_evidence) is a dict like
+        {"confidence": 0.0, "contradictions": 64, "supports": 0} for an
+        action the graph has confirmed does NOT work -- non-empty, but the
+        opposite of "grounded." The pre-fix bool(graph_evidence) check
+        counted this as graph_grounded=True (confirmed live: a 60-step
+        smoke run where every single candidate had 0 confidence / dozens of
+        contradictions / 0 supports still reported 100% graph_grounded_
+        decision_rate), which made the KPI meaningless for judging whether
+        the graph is actually steering decisions well. Purely negative
+        evidence must report graph_grounded=False."""
+        telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
+        candidate = PlanCandidate(
+            action_id="ACTION6",
+            metadata={
+                "graph_evidence": {
+                    "attempts": 66,
+                    "confidence": 0.0,
+                    "contradictions": 64,
+                    "supports": 0,
+                    "raw": {"falsified_count": 64, "confidence": 0.0},
+                },
+            },
+        )
+        execution = ExecutionResult(action_id="ACTION6", candidate=candidate, observation={})
+        telemetry._latest_execution = execution
+
+        snapshot = telemetry._step_snapshot((WorkflowState(),))
+
+        assert snapshot["graph_grounded"] is False
+
+    def test_graph_grounded_true_for_real_positive_confidence(self):
+        """Companion to the regression test above: the same real dict shape
+        with genuine positive confidence must still report grounded=True --
+        the fix distinguishes positive from negative, it doesn't just flip
+        the sign."""
+        telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
+        candidate = PlanCandidate(
+            action_id="ACTION6",
+            metadata={
+                "graph_evidence": {"attempts": 5, "confidence": 0.6, "contradictions": 1, "supports": 4},
+            },
+        )
+        execution = ExecutionResult(action_id="ACTION6", candidate=candidate, observation={})
+        telemetry._latest_execution = execution
+
+        snapshot = telemetry._step_snapshot((WorkflowState(),))
+
+        assert snapshot["graph_grounded"] is True
+
+    def test_graph_grounded_true_when_supports_outweigh_contradictions_despite_zero_confidence(self):
+        """Edge case: confidence can be 0.0 while supports still outweigh
+        contradictions (e.g. a freshly-transferred rule with supports=2,
+        contradictions=0, and confidence not yet computed) -- grounded on
+        the supports>contradictions signal alone, not confidence alone."""
+        telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
+        candidate = PlanCandidate(
+            action_id="ACTION6",
+            metadata={
+                "graph_evidence": {"attempts": 2, "confidence": 0.0, "contradictions": 0, "supports": 2},
+            },
+        )
+        execution = ExecutionResult(action_id="ACTION6", candidate=candidate, observation={})
+        telemetry._latest_execution = execution
+
+        snapshot = telemetry._step_snapshot((WorkflowState(),))
+
+        assert snapshot["graph_grounded"] is True
+
     def test_exhaustion_source_present(self):
         """Test 5a: exhaustion_source reflects evaluation.metadata.get('exhaustion_source') when present."""
         telemetry = ArcV2Telemetry(

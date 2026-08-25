@@ -214,6 +214,15 @@ def resolve_llm_vote(llm_port: LLMPort | None, state: WorkflowState, signals: Cy
         return InvestigationState.EXPLORING
 
 
+DEFAULT_MAX_UNPRODUCTIVE_ANCHORS = 3
+# Post-A206 fix (2026-08-25): starting-point value, no empirical basis yet --
+# same honest-gap treatment as every other new scoring/threshold constant
+# introduced this session. Confirmed live: a stuck puzzle cycled through 4+
+# totally unproductive anchors before wall-clock budget ended the episode;
+# 3 in a row is a reasonable first guess at "this episode is going nowhere,"
+# not a tuned value.
+
+
 def run_reasoner_cycle(
     state: WorkflowState,
     perception: PerceptionSnapshot,
@@ -223,6 +232,7 @@ def run_reasoner_cycle(
     graph_port: GraphQueryPort | None = None,
     llm_port: LLMPort | None = None,
     stall_reason: str | None = None,
+    max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
 ) -> ReasonerOutcome:
     """The actual ReasonerPhase: resolves the current investigation thread's
     state via investigation_reasoner's pure functions, persists the result
@@ -231,7 +241,21 @@ def run_reasoner_cycle(
     or the previous thread just concluded), picks a starting anchor from the
     current goal/execution before reasoning: prefer the just-executed
     candidate's entity_ref if it has one (a click just happened, that's the
-    natural next anchor), else the active goal's goal_id."""
+    natural next anchor), else the active goal's goal_id.
+
+    Whole-episode futility (2026-08-25 fix): the per-anchor state machine
+    already recognizes when ONE anchor is going nowhere (EXHAUSTED/RETRY),
+    but nothing aggregated across DIFFERENT anchors -- a puzzle where every
+    anchor tried is equally dead would just cycle through anchors forever
+    until check_budget's wall-clock ceiling ended it, never producing a real
+    decision. `anchor["any_progress"]` tracks whether THIS anchor has ever
+    registered meaningful_progress across its whole life; when an anchor
+    concludes (ADVANCE) without ever having shown progress,
+    state.reasoner_unproductive_anchor_streak increments -- any anchor that
+    DOES show progress resets it to 0. Crossing max_unproductive_anchors
+    overrides the decision to TERMINATE (an existing workflow.py code path
+    that decision_for_state() itself was documented as never actually
+    producing)."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
     # ReasonerOutcome.degraded at the bottom of this function.
@@ -264,6 +288,7 @@ def run_reasoner_cycle(
             "state": InvestigationState.EXPLORING.value,
             "deepening_cycle_count": 0,
             "already_retried": False,
+            "any_progress": False,
         }
 
     current_state = InvestigationState(anchor["state"])
@@ -280,6 +305,7 @@ def run_reasoner_cycle(
         stall_reason=stall_reason,
     )
     degraded = degraded or signals.degraded
+    anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress)
 
     if current_state == InvestigationState.AWAITING_LLM:
         vote = resolve_llm_vote(llm_port, state, signals)
@@ -313,6 +339,16 @@ def run_reasoner_cycle(
         decision = decision_for_state(new_state)
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
+        if anchor.get("any_progress"):
+            state.reasoner_unproductive_anchor_streak = 0
+        else:
+            state.reasoner_unproductive_anchor_streak += 1
+        if state.reasoner_unproductive_anchor_streak >= max_unproductive_anchors:
+            # Whole-episode futility: every anchor tried in a row has been
+            # completely dead. Override the per-anchor ADVANCE with a real
+            # episode-level decision instead of silently starting yet
+            # another anchor that's likely to fare the same.
+            decision = ReasonerDecision.TERMINATE
     else:
         anchor["state"] = new_state.value
         if new_state == InvestigationState.DEEPENING:
@@ -320,10 +356,11 @@ def run_reasoner_cycle(
         anchor["already_retried"] = new_state == InvestigationState.RETRY
         state.active_investigation_anchor = anchor
 
+    reports_anchor = decision.value in ("repeat_deepen", "repeat_retry")
     return ReasonerOutcome(
         decision=decision.value,
-        anchor_ref=anchor["anchor_ref"] if decision.value != "advance" else None,
-        anchor_type=anchor["anchor_type"] if decision.value != "advance" else None,
+        anchor_ref=anchor["anchor_ref"] if reports_anchor else None,
+        anchor_type=anchor["anchor_type"] if reports_anchor else None,
         required_action_id=execution.action_id if decision.value == "repeat_retry" else None,
         required_book_id=getattr(execution.candidate, "book_id", None) if decision.value == "repeat_retry" else None,
         degraded=degraded,

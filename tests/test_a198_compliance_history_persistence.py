@@ -224,7 +224,7 @@ class TestScriptIntegration:
             # Run the script without any new flags
             result = subprocess.run(
                 [sys.executable, "scripts/graph_compliance_report.py", str(trace_path)],
-                cwd="/Users/djshelton/Desktop/GitProjects/ARC_AGI",
+                cwd=str(Path(__file__).resolve().parents[1]),
                 capture_output=True,
                 text=True,
             )
@@ -287,7 +287,7 @@ class TestScriptIntegration:
                     "--show-history",
                     str(history_path),
                 ],
-                cwd="/Users/djshelton/Desktop/GitProjects/ARC_AGI",
+                cwd=str(Path(__file__).resolve().parents[1]),
                 capture_output=True,
                 text=True,
             )
