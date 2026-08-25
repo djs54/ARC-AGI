@@ -176,7 +176,7 @@ This violates Shift B's end-to-end reasoning principle: an investigation thread 
 ### 2.5 Budget Exhausted (_route_budget_through_annatar)
 
 **Current Status:**  
-Routes through Annatar for visibility and bookkeeping. When `check_budget` fires on a later iteration (not the first cycle), the orchestrator constructs fresh synthetic perception/execution/evaluation payloads and invokes `run_annatar_cycle` with `stall_reason="budget_exhausted"`. The Reasoner's returned decision is deliberately *never* inspected — the method returns `_finish(..., BUDGET_EXHAUSTED, ...)` unconditionally, regardless of what Annatar decided.
+Routes through Annatar for visibility and bookkeeping. When `check_budget` fires on a later iteration (not the first cycle), the orchestrator constructs fresh synthetic perception/execution/evaluation payloads and invokes `run_annatar_cycle` with `stall_reason="budget_exhausted"`. Annatar's returned decision is deliberately *never* inspected — the method returns `_finish(..., BUDGET_EXHAUSTED, ...)` unconditionally, regardless of what Annatar decided.
 
 **Files:** `agents/arc4/workflow.py` (lines ~312–327)
 
