@@ -1,7 +1,7 @@
 """Tests for A203: anchor hint biasing in goal_resolver and plan_generator.
 
-A202 produced state.reasoner_anchor_hint (a ReasonerOutcome) when the trajectory
-Reasoner decides to REPEAT_DEEPEN or REPEAT_RETRY. A203 wires this hint to:
+A202 produced state.annatar_anchor_hint (an AnnatarOutcome) when the trajectory
+Annatar decides to REPEAT_DEEPEN or REPEAT_RETRY. A203 wires this hint to:
 - goal_resolver.resolve() to re-rank/select the anchored goal hypothesis
 - plan_generator._build_candidates() to boost scores for anchored entity candidates
   or force a retry (with A191 exclusion protection: never resurrect falsified actions)
@@ -23,7 +23,7 @@ from agents.arc4.types import (
     GoalHypothesis,
     PerceivedEntity,
     PerceptionSnapshot,
-    ReasonerOutcome,
+    AnnatarOutcome,
     ResolvedGoal,
     WorkflowState,
 )
@@ -99,7 +99,7 @@ class TestGoalResolverAnchorHinting:
         result_baseline = resolver.resolve(_state(), perception)
 
         # With hint=None
-        state_with_none = _state(reasoner_anchor_hint=None)
+        state_with_none = _state(annatar_anchor_hint=None)
         result_with_none = resolver.resolve(state_with_none, perception)
 
         # Byte-for-byte identical: same goal_id, confidence, alternatives
@@ -125,12 +125,12 @@ class TestGoalResolverAnchorHinting:
         top_id_without_hint = result_without_hint.payload.selected.goal_id
 
         # With a hint anchoring to "block-blue" (second hypothesis), it should move to top
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_deepen",
             anchor_ref="block-blue",
             anchor_type="goal",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
         result_with_hint = resolver.resolve(state_with_hint, perception)
 
         assert result_with_hint.payload is not None
@@ -150,12 +150,12 @@ class TestGoalResolverAnchorHinting:
         )
 
         # Hint to a non-existent goal
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_deepen",
             anchor_ref="phantom-goal-xyz",
             anchor_type="goal",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
 
         # Should not crash, should fall back to normal ranking
         result = resolver.resolve(state_with_hint, perception)
@@ -189,7 +189,7 @@ class TestPlanGeneratorAnchorHinting:
 
         # With hint=None
         candidates_with_none = planner._build_candidates(
-            _state(reasoner_anchor_hint=None), perception, _goal(), ["ACTION1"], []
+            _state(annatar_anchor_hint=None), perception, _goal(), ["ACTION1"], []
         )
 
         # Should be byte-for-byte identical
@@ -208,13 +208,13 @@ class TestPlanGeneratorAnchorHinting:
         )
 
         # Hint to retry ACTION2 (which normally would not be top)
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_retry",
             anchor_ref=None,
             anchor_type="entity",
             required_book_id="ACTION2",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
 
         candidates = planner._build_candidates(
             state_with_hint, perception, _goal(), ["ACTION1", "ACTION2"], []
@@ -227,14 +227,14 @@ class TestPlanGeneratorAnchorHinting:
         action2 = action2_candidates[0]
         # Should have high score and updated rationale
         assert action2.score >= max(c.score for c in candidates if c.book_id != "ACTION2")
-        assert "reasoner requested retry" in action2.rationale
+        assert "annatar requested retry" in action2.rationale
 
     def test_plan_generator_with_repeat_retry_excluded_candidate_silent_noop(self):
         """Test 6: repeat_retry hint for an A191-excluded candidate is a silent no-op.
 
         This is the non-negotiable regression guard: A191's exclusion of
         repeated_falsified candidates must NOT be bypassed even when a
-        ReasonerOutcome requests a retry.
+        AnnatarOutcome requests a retry.
         """
         planner = PlanGenerator(PlanGeneratorLimits())
         perception = PerceptionSnapshot(
@@ -249,13 +249,13 @@ class TestPlanGeneratorAnchorHinting:
         )
 
         # Hint requests retry of ACTION1 (even though it's excluded)
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_retry",
             anchor_ref=None,
             anchor_type="entity",
             required_book_id="ACTION1",
         )
-        state.reasoner_anchor_hint = hint
+        state.annatar_anchor_hint = hint
 
         candidates = planner._build_candidates(
             state, perception, _goal(), ["ACTION1", "ACTION2"], []
@@ -284,12 +284,12 @@ class TestPlanGeneratorAnchorHinting:
         )
 
         # Hint to deepen on entity_ref=10
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_deepen",
             anchor_ref=10,
             anchor_type="entity",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
 
         candidates = planner._build_candidates(
             state_with_hint, perception, _goal(), ["ACTION6"], []
@@ -304,12 +304,12 @@ class TestPlanGeneratorAnchorHinting:
         assert len(entity20_candidates) > 0, "Should have ACTION6 candidate for entity_ref=20"
 
         # Entity 10 should have score boost and flag
-        assert entity10_candidates[0].metadata.get("reasoner_anchor_bias_applied") is True
+        assert entity10_candidates[0].metadata.get("annatar_anchor_bias_applied") is True
         # The bias is additive (+0.3), so exact score comparison depends on other factors
         # but we can verify the flag is set
 
         # Entity 20 should NOT have the flag
-        assert entity20_candidates[0].metadata.get("reasoner_anchor_bias_applied") is not True
+        assert entity20_candidates[0].metadata.get("annatar_anchor_bias_applied") is not True
 
 
 class TestA203RegressionGuards:
@@ -343,13 +343,13 @@ class TestA203RegressionGuards:
         )
 
         # Hint to retry ACTION6@17,18 (which is excluded)
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_retry",
             anchor_ref=None,
             anchor_type="entity",
             required_book_id="ACTION6@17,18",
         )
-        state.reasoner_anchor_hint = hint
+        state.annatar_anchor_hint = hint
 
         candidates = planner._build_candidates(
             state, perception, _goal(), ["ACTION6"], []
@@ -379,12 +379,12 @@ class TestAnchorHintEdgeCases:
         )
 
         # Entity-type hint (should be ignored by goal_resolver)
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_deepen",
             anchor_ref=10,
             anchor_type="entity",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
 
         result = resolver.resolve(state_with_hint, perception)
 
@@ -401,12 +401,12 @@ class TestAnchorHintEdgeCases:
         )
 
         # Goal-type hint (should be ignored by plan_generator)
-        hint = ReasonerOutcome(
+        hint = AnnatarOutcome(
             decision="repeat_deepen",
             anchor_ref="goal-1",
             anchor_type="goal",
         )
-        state_with_hint = _state(reasoner_anchor_hint=hint)
+        state_with_hint = _state(annatar_anchor_hint=hint)
 
         candidates = planner._build_candidates(
             state_with_hint, perception, _goal(), ["ACTION1"], []

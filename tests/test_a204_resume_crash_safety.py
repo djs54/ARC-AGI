@@ -1,7 +1,7 @@
 """A204: write-ahead cycle recording bracketing the `execute` phase call,
 and startup resume / real-observation reconciliation.
 
-Highest-stakes card in the trajectory-Reasoner family (A200-A206): the one
+Highest-stakes card in the trajectory-Annatar family (A200-A206): the one
 place a bug means double-acting on the real, live ARC API. See
 docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md section 7.
 

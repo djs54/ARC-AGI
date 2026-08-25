@@ -1,15 +1,15 @@
 """A202: wires A200's pure state machine + A201's graph client into
-WorkflowOrchestrator.run() via the new `reason` dependency.
+WorkflowOrchestrator.run() via the new `annatar` dependency.
 
 Test groups:
-  - Backward-compat byte-for-byte regression (reason=None) against a real
+  - Backward-compat byte-for-byte regression (annatar=None) against a real
     pre-A202 baseline of workflow.py, loaded from a copy of the file taken
     immediately before this card's edits.
   - Orchestrator control-flow tests: terminate / repeat_deepen / advance /
-    stall-folded-into-reasoner / termination-short-circuits-before-reasoner /
+    stall-folded-into-annatar / termination-short-circuits-before-annatar /
     check_budget unaffected.
-  - Unit tests for agents/arc4/reasoner_signals.py's compute_cycle_signals
-    and run_reasoner_cycle (including the AWAITING_LLM -> resolve_llm_vote
+  - Unit tests for agents/arc4/annatar_signals.py's compute_cycle_signals
+    and run_annatar_cycle (including the AWAITING_LLM -> resolve_llm_vote
     -> apply_llm_vote path and the NotImplementedError placeholder).
 """
 
@@ -25,10 +25,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agents.arc4 import reasoner_signals as reasoner_signals_module
-from agents.arc4.investigation_reasoner import CycleSignals, InvestigationState
+from agents.arc4 import annatar_signals as annatar_signals_module
+from agents.arc4.annatar_state_machine import CycleSignals, InvestigationState
 from agents.arc4.ports import WorkflowDependencies
-from agents.arc4.reasoner_signals import compute_cycle_signals, resolve_llm_vote, run_reasoner_cycle
+from agents.arc4.annatar_signals import compute_cycle_signals, resolve_llm_vote, run_annatar_cycle
 from agents.arc4.types import (
     EvaluationResult,
     ExecutionResult,
@@ -38,7 +38,7 @@ from agents.arc4.types import (
     PhaseStatus,
     PlanCandidate,
     PlanningResult,
-    ReasonerOutcome,
+    AnnatarOutcome,
     ResolvedGoal,
     VetDecision,
     WorkflowDecision,
@@ -151,27 +151,27 @@ class TestBackwardCompatByteForByte:
         assert current_result.to_dict() == baseline_result.to_dict()
 
 
-class TestReasonerControlFlow:
-    def test_terminate_decision_ends_run_as_reasoner_exhausted(self):
+class TestAnnatarControlFlow:
+    def test_terminate_decision_ends_run_as_annatar_exhausted(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
         deps = _shared_dependencies(
             calls,
             overrides={"evaluate": [_evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat")]},
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
 
         assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "reasoner_exhausted"
+        assert result.reason == "annatar_exhausted"
         assert mock_reason.call_count == 1
 
     def test_repeat_deepen_sets_anchor_hint_and_continues(self):
         calls: list[str] = []
         outcomes = deque(
             [
-                ReasonerOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"),
+                AnnatarOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"),
                 None,  # unused: cycle 2 terminates via evaluation, reason not called again
             ]
         )
@@ -190,26 +190,26 @@ class TestReasonerControlFlow:
                 ],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=5)).run(WorkflowState(), {"grid": [[1]]})
 
         assert result.status == WorkflowStatus.TERMINATED
         assert result.completed_cycles == 2
         assert mock_reason.call_count == 1
-        assert result.state.reasoner_anchor_hint is not None
-        assert result.state.reasoner_anchor_hint.decision == "repeat_deepen"
+        assert result.state.annatar_anchor_hint is not None
+        assert result.state.annatar_anchor_hint.decision == "repeat_deepen"
 
     def test_advance_decision_clears_anchor_hint(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="advance"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="advance"))
         deps = _shared_dependencies(
             calls,
             overrides={"evaluate": [_evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat")]},
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
-        state = WorkflowState(reasoner_anchor_hint=ReasonerOutcome(decision="repeat_deepen"))
+        state = WorkflowState(annatar_anchor_hint=AnnatarOutcome(decision="repeat_deepen"))
         # Give it a second cycle's worth of scripted responses so the loop
         # can genuinely continue past cycle 1 rather than crashing on an
         # exhausted scripted queue.
@@ -227,19 +227,19 @@ class TestReasonerControlFlow:
                 ],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=5)).run(state, {"grid": [[1]]})
 
         assert result.completed_cycles == 2
-        assert result.state.reasoner_anchor_hint is None
+        assert result.state.annatar_anchor_hint is None
 
-    def test_stall_signal_folds_into_reasoner_instead_of_independently_stalling(self):
+    def test_stall_signal_folds_into_annatar_instead_of_independently_stalling(self):
         calls: list[str] = []
         outcomes = deque(
             [
-                ReasonerOutcome(decision="repeat_deepen"),
-                ReasonerOutcome(decision="terminate"),
+                AnnatarOutcome(decision="repeat_deepen"),
+                AnnatarOutcome(decision="terminate"),
             ]
         )
         mock_reason = MagicMock(side_effect=lambda *a, **k: outcomes.popleft())
@@ -257,7 +257,7 @@ class TestReasonerControlFlow:
                 ],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(
             deps, limits=WorkflowLimits(max_cycles=5, max_consecutive_no_progress=2)
@@ -265,8 +265,8 @@ class TestReasonerControlFlow:
 
         # Old standalone path would have returned STALLED here (see
         # test_stall_terminates_after_repeated_no_progress in
-        # test_arc4_workflow.py for the same scenario without a reasoner).
-        # With a reasoner configured, the run must NOT end via that path.
+        # test_arc4_workflow.py for the same scenario without an annatar).
+        # With an annatar configured, the run must NOT end via that path.
         assert result.status != WorkflowStatus.STALLED
         assert mock_reason.call_count == 2
         first_call_kwargs = mock_reason.call_args_list[0].kwargs
@@ -274,16 +274,16 @@ class TestReasonerControlFlow:
         assert first_call_kwargs["stall_reason"] is None
         assert second_call_kwargs["stall_reason"] == "stall_detected"
         assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "reasoner_exhausted"
+        assert result.reason == "annatar_exhausted"
 
-    def test_evaluation_termination_short_circuits_before_reasoner_runs(self):
+    def test_evaluation_termination_short_circuits_before_annatar_runs(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="advance"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="advance"))
         deps = _shared_dependencies(
             calls,
             overrides={"evaluate": [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True, reason="done")]},
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
 
@@ -293,9 +293,9 @@ class TestReasonerControlFlow:
 
     def test_check_budget_still_gates_before_anything_else(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="advance"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="advance"))
         deps = _shared_dependencies(calls)
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=0)).run(WorkflowState(), {"grid": [[1]]})
 
@@ -304,20 +304,20 @@ class TestReasonerControlFlow:
         assert mock_reason.call_count == 0
 
 
-class TestSecondVetoRoutesThroughReasoner:
+class TestSecondVetoRoutesThroughAnnatar:
     """User-directed follow-up (2026-08-25): a double veto previously ended
     the episode directly via _finish(SKIPPED, "second_veto", ...) without
-    ever invoking the Reasoner -- exactly the strategic moment ("the safety
+    ever invoking Annatar -- exactly the strategic moment ("the safety
     layer just rejected our plan twice, what now") the "one agent that sees
     everything end-to-end" is supposed to own, structurally excluded from
     it. `vet` fires before `execute`/`evaluate`, so no real
     ExecutionResult/EvaluationResult exists for a second-veto cycle;
-    workflow.py now feeds the Reasoner a synthetic "nothing was attempted"
+    workflow.py now feeds Annatar a synthetic "nothing was attempted"
     pair (candidate=None, meaningful_progress=False) plus
     stall_reason="second_veto" (reusing the existing stall-fold mechanism
     rather than inventing a parallel one)."""
 
-    def test_no_reasoner_configured_preserves_exact_prior_behavior(self):
+    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
         """Regression guard, mirrors test_second_veto_skips_execution in
         test_arc4_workflow.py exactly -- reason=None must be untouched."""
         calls: list[str] = []
@@ -335,9 +335,9 @@ class TestSecondVetoRoutesThroughReasoner:
         assert result.status == WorkflowStatus.SKIPPED
         assert result.reason == "second_veto"
 
-    def test_reasoner_invoked_with_synthetic_inconclusive_signals_and_second_veto_stall_reason(self):
+    def test_annatar_invoked_with_synthetic_inconclusive_signals_and_second_veto_stall_reason(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
         deps = _shared_dependencies(
             calls,
             overrides={
@@ -346,7 +346,7 @@ class TestSecondVetoRoutesThroughReasoner:
                 "resolve": [_goal(), _goal()],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
 
@@ -357,9 +357,9 @@ class TestSecondVetoRoutesThroughReasoner:
         assert synthetic_execution.candidate is None
         assert synthetic_evaluation.meaningful_progress is False
 
-    def test_terminate_decision_ends_run_as_reasoner_exhausted(self):
+    def test_terminate_decision_ends_run_as_annatar_exhausted(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
         deps = _shared_dependencies(
             calls,
             overrides={
@@ -368,16 +368,16 @@ class TestSecondVetoRoutesThroughReasoner:
                 "resolve": [_goal(), _goal()],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
 
         assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "reasoner_exhausted"
+        assert result.reason == "annatar_exhausted"
 
     def test_repeat_decision_continues_the_loop_to_a_fresh_cycle_instead_of_ending_the_episode(self):
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"))
         deps = _shared_dependencies(
             calls,
             overrides={
@@ -389,7 +389,7 @@ class TestSecondVetoRoutesThroughReasoner:
                 "evaluate": [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True, reason="done")],
             },
         )
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=5)).run(WorkflowState(), {"grid": [[1]]})
 
@@ -400,20 +400,20 @@ class TestSecondVetoRoutesThroughReasoner:
         assert result.status == WorkflowStatus.TERMINATED
         assert result.reason == "done"
         assert mock_reason.call_count == 1
-        assert result.state.reasoner_anchor_hint.decision == "repeat_deepen"
+        assert result.state.annatar_anchor_hint.decision == "repeat_deepen"
         # The second-veto cycle never reached execute/evaluate, so only the
         # one real cycle after it counts toward completed_cycles.
         assert result.completed_cycles == 1
 
-    def test_first_veto_early_exit_also_routes_through_reasoner_when_limit_is_zero(self):
+    def test_first_veto_early_exit_also_routes_through_annatar_when_limit_is_zero(self):
         """The OTHER second_veto call site (the early-out fired when
         cycle_vetoes > max_replan_passes_per_cycle, only reachable with a
         0-configured limit) needs the identical treatment -- not just the
         far more common two-veto path."""
         calls: list[str] = []
-        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        mock_reason = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
         deps = _shared_dependencies(calls, overrides={"vet": [_vet(False, reason="first veto")]})
-        deps.reason = mock_reason
+        deps.annatar = mock_reason
 
         result = WorkflowOrchestrator(
             deps, limits=WorkflowLimits(max_cycles=3, max_replan_passes_per_cycle=0)
@@ -422,10 +422,10 @@ class TestSecondVetoRoutesThroughReasoner:
         assert calls == ["perceive", "resolve", "plan", "vet"]
         assert mock_reason.call_count == 1
         assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "reasoner_exhausted"
+        assert result.reason == "annatar_exhausted"
 
 
-# ── Unit tests: agents/arc4/reasoner_signals.compute_cycle_signals ──────
+# ── Unit tests: agents/arc4/annatar_signals.compute_cycle_signals ──────
 
 
 def _perception_snapshot(grid_hash: str = "h1") -> PerceptionSnapshot:
@@ -575,17 +575,17 @@ class TestComputeCycleSignals:
         assert signals.untested_remaining is False
 
 
-# ── Unit tests: agents/arc4/reasoner_signals.run_reasoner_cycle ─────────
+# ── Unit tests: agents/arc4/annatar_signals.run_annatar_cycle ─────────
 
 
-class TestRunReasonerCycleAnchorSelection:
+class TestRunAnnatarCycleAnchorSelection:
     def test_fresh_attempt_prefers_entity_ref_from_executed_candidate(self):
         candidate = PlanCandidate(action_id="ACTION6", goal_id="g1", metadata={"entity_ref": "e42"})
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
         execution = _execution_result(action_id="ACTION6", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         assert outcome.anchor_type == "entity"
         assert outcome.anchor_ref == "e42"
@@ -596,7 +596,7 @@ class TestRunReasonerCycleAnchorSelection:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         assert outcome.anchor_type == "goal"
         assert outcome.anchor_ref == "g7"
@@ -608,18 +608,18 @@ class TestRunReasonerCycleAnchorSelection:
         # meaningful_progress True -> SATISFIED -> ADVANCE
         evaluation = _evaluation_result(meaningful_progress=True, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         assert outcome.decision == "advance"
         assert state.active_investigation_anchor is None
 
 
-class TestRunReasonerCycleWholeEpisodeFutility:
+class TestRunAnnatarCycleWholeEpisodeFutility:
     """User-directed follow-up (2026-08-25) after live-smoke evidence showed
     a real gap: a 60-step run cycled through 4+ different goal anchors, all
     of them completely unproductive (meaningful_progress=False on every one
     of 120 evaluate snapshots, zero grid changes across 60 real ARC API
-    actions) -- and nothing in the Reasoner noticed the pattern across
+    actions) -- and nothing in Annatar noticed the pattern across
     anchors. The per-anchor state machine correctly recognizes "this one
     anchor is exhausted" and advances to a fresh anchor, but nothing
     aggregated "I've now tried N different anchors and every single one
@@ -629,8 +629,8 @@ class TestRunReasonerCycleWholeEpisodeFutility:
     integration layer [A202]... since it alone has visibility into 'is
     there anything left to advance to at all'") but which A202's actual
     implementation never built -- decision_for_state() never produces
-    "terminate", so state.reasoner_unproductive_anchor_streak +
-    run_reasoner_cycle's own override are what actually closes this gap.
+    "terminate", so state.annatar_unproductive_anchor_streak +
+    run_annatar_cycle's own override are what actually closes this gap.
     """
 
     def _unproductive_advance(self, state, stall_reason="stalled"):
@@ -642,7 +642,7 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         candidate = PlanCandidate(action_id="a1", goal_id="g1")
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
-        return run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason=stall_reason)
+        return run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason=stall_reason)
 
     def _productive_advance(self, state):
         """One cycle that concludes an anchor via SATISFIED->ADVANCE with
@@ -650,14 +650,14 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         candidate = PlanCandidate(action_id="a1", goal_id="g1")
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=True, grid_changed=True)
-        return run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        return run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
     def test_single_unproductive_anchor_increments_streak_without_terminating(self):
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
         outcome = self._unproductive_advance(state)
 
         assert outcome.decision == "advance"
-        assert state.reasoner_unproductive_anchor_streak == 1
+        assert state.annatar_unproductive_anchor_streak == 1
 
     def test_default_threshold_terminates_after_three_consecutive_unproductive_anchors(self):
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
@@ -669,7 +669,7 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         assert outcome1.decision == "advance"
         assert outcome2.decision == "advance"
         assert outcome3.decision == "terminate"
-        assert state.reasoner_unproductive_anchor_streak == 3
+        assert state.annatar_unproductive_anchor_streak == 3
         assert state.active_investigation_anchor is None
 
     def test_a_productive_anchor_resets_the_streak(self):
@@ -677,18 +677,18 @@ class TestRunReasonerCycleWholeEpisodeFutility:
 
         self._unproductive_advance(state)
         self._unproductive_advance(state)
-        assert state.reasoner_unproductive_anchor_streak == 2
+        assert state.annatar_unproductive_anchor_streak == 2
 
         productive = self._productive_advance(state)
         assert productive.decision == "advance"
-        assert state.reasoner_unproductive_anchor_streak == 0
+        assert state.annatar_unproductive_anchor_streak == 0
 
         # Confirms it's a genuine reset, not just "doesn't increment": two
         # more unproductive anchors after the reset must NOT terminate,
         # since the streak restarted from 0.
         outcome = self._unproductive_advance(state)
         assert outcome.decision == "advance"
-        assert state.reasoner_unproductive_anchor_streak == 1
+        assert state.annatar_unproductive_anchor_streak == 1
 
     def test_progress_partway_through_a_deepening_anchor_counts_as_productive(self):
         """An anchor that shows meaningful_progress on an earlier cycle but
@@ -709,7 +709,7 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         outcome = self._unproductive_advance(state)
 
         assert outcome.decision == "advance"
-        assert state.reasoner_unproductive_anchor_streak == 0
+        assert state.annatar_unproductive_anchor_streak == 0
 
     def test_max_unproductive_anchors_kwarg_overrides_default_threshold(self):
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
@@ -717,10 +717,10 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome1 = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason="stalled", max_unproductive_anchors=1)
+        outcome1 = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason="stalled", max_unproductive_anchors=1)
 
         assert outcome1.decision == "terminate"
-        assert state.reasoner_unproductive_anchor_streak == 1
+        assert state.annatar_unproductive_anchor_streak == 1
 
     def test_terminate_outcome_reports_no_anchor_ref(self):
         """A whole-episode terminate isn't "stay anchored on X" -- unlike
@@ -735,17 +735,17 @@ class TestRunReasonerCycleWholeEpisodeFutility:
         assert outcome.anchor_type is None
 
 
-class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
+class TestRunAnnatarCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
     """Regression test for a live-smoke-discovered crash (2026-08-25): when
     transition() itself produces InvestigationState.AWAITING_LLM as the new
     state within the *same* cycle (a DEEPENING thread whose
-    deepening_cycle_count has just reached ReasonerLimits.
-    max_deepening_cycles_before_llm), run_reasoner_cycle passed that
+    deepening_cycle_count has just reached AnnatarLimits.
+    max_deepening_cycles_before_llm), run_annatar_cycle passed that
     new_state straight to decision_for_state(), which explicitly raises
-    ValueError for AWAITING_LLM (per investigation_reasoner.py's own
+    ValueError for AWAITING_LLM (per annatar_state_machine.py's own
     docstring: it must be resolved via apply_llm_vote() first, never handed
     to decision_for_state() directly). Every existing AWAITING_LLM test
-    (above, and in test_a205_reasoner_error_handling.py) starts with the
+    (above, and in test_a205_annatar_error_handling.py) starts with the
     anchor already parked in AWAITING_LLM state -- none exercised the
     transition-into-AWAITING_LLM-this-cycle path, so this genuine
     integration-seam bug reached a real live run (crashed after 4 real
@@ -760,7 +760,7 @@ class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
                 "anchor_type": "goal",
                 "thread_id": None,
                 "state": InvestigationState.DEEPENING.value,
-                # ReasonerLimits.max_deepening_cycles_before_llm defaults to
+                # AnnatarLimits.max_deepening_cycles_before_llm defaults to
                 # 3 -- this is the exact cycle where transition() escalates
                 # DEEPENING -> AWAITING_LLM.
                 "deepening_cycle_count": 3,
@@ -778,7 +778,7 @@ class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
         # only remaining branch is the deepening-limit -> AWAITING_LLM one.
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         # Must not raise. Must not silently be treated as "advance" (that
         # would discard the thread mid-escalation). The only correct
@@ -793,7 +793,7 @@ class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
         """Companion to the test above: once AWAITING_LLM is correctly
         parked on the anchor, the *following* cycle must resolve it via
         resolve_llm_vote/apply_llm_vote exactly like the pre-existing
-        TestRunReasonerCycleAwaitingLLM coverage below -- proving the two
+        TestRunAnnatarCycleAwaitingLLM coverage below -- proving the two
         cycles compose correctly end-to-end, not just each in isolation."""
         state = WorkflowState(
             active_investigation_anchor={
@@ -809,14 +809,14 @@ class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=False)
 
-        with patch.object(reasoner_signals_module, "resolve_llm_vote", return_value=InvestigationState.DEEPENING):
-            outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        with patch.object(annatar_signals_module, "resolve_llm_vote", return_value=InvestigationState.DEEPENING):
+            outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         assert outcome.decision == "repeat_deepen"
         assert state.active_investigation_anchor["state"] == InvestigationState.DEEPENING.value
 
 
-class TestRunReasonerCycleAwaitingLLM:
+class TestRunAnnatarCycleAwaitingLLM:
     def test_awaiting_llm_calls_resolve_llm_vote_and_flows_through_apply_llm_vote(self):
         state = WorkflowState(
             active_investigation_anchor={
@@ -832,8 +832,8 @@ class TestRunReasonerCycleAwaitingLLM:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        with patch.object(reasoner_signals_module, "resolve_llm_vote", return_value=InvestigationState.SATISFIED) as mock_vote:
-            outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        with patch.object(annatar_signals_module, "resolve_llm_vote", return_value=InvestigationState.SATISFIED) as mock_vote:
+            outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         mock_vote.assert_called_once()
         assert outcome.decision == "advance"
@@ -844,7 +844,7 @@ class TestRunReasonerCycleAwaitingLLM:
         # own docstring above). A205 replaced it with the real bounded LLM
         # call; a missing llm_port is now one of its handled failure paths,
         # resolving to InvestigationState.EXPLORING (guaranteed outside
-        # permissible_llm_transitions -- see tests/test_a205_reasoner_error_
+        # permissible_llm_transitions -- see tests/test_a205_annatar_error_
         # handling.py for the full failure-mode suite), not an exception.
         signals = CycleSignals(
             meaningful_progress=False,

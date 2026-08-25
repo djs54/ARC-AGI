@@ -1,11 +1,11 @@
-"""A205: explicit, tested error handling for the trajectory Reasoner
+"""A205: explicit, tested error handling for the trajectory Annatar
 (docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md, section 8).
 
 Two failure modes:
   1. Graph unreachable mid-cycle -- must degrade to a safe, non-crashing
      decision, and the degradation must be visible in telemetry rather than
-     silently swallowed (ReasonerOutcome.degraded -> WorkflowState
-     .reasoner_degraded -> telemetry.py::_step_snapshot's "reasoner_degraded"
+     silently swallowed (AnnatarOutcome.degraded -> WorkflowState
+     .annatar_degraded -> telemetry.py::_step_snapshot's "annatar_degraded"
      field, mirroring the exact plumbing pattern A196/A197 already
      established for llm_escalated_plan/graph_grounded/exhaustion_source/
      capability_missing_count).
@@ -28,8 +28,8 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agents.arc4.investigation_reasoner import CycleSignals, InvestigationState, permissible_llm_transitions
-from agents.arc4.reasoner_signals import compute_cycle_signals, resolve_llm_vote, run_reasoner_cycle
+from agents.arc4.annatar_state_machine import CycleSignals, InvestigationState, permissible_llm_transitions
+from agents.arc4.annatar_signals import compute_cycle_signals, resolve_llm_vote, run_annatar_cycle
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import (
     EvaluationResult,
@@ -107,7 +107,7 @@ class TestGraphUnreachableDegradesSafely:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
 
         assert outcome.degraded is True
         assert outcome.decision in ("advance", "repeat_deepen", "repeat_retry", "terminate")
@@ -122,7 +122,7 @@ class TestGraphUnreachableDegradesSafely:
         execution = _execution_result()
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
 
         assert outcome.degraded is True
 
@@ -138,7 +138,7 @@ class TestGraphUnreachableDegradesSafely:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
 
         assert outcome.degraded is False
 
@@ -147,7 +147,7 @@ class TestGraphUnreachableDegradesSafely:
         execution = _execution_result()
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
         assert outcome.degraded is False
 
@@ -193,30 +193,30 @@ class TestGraphUnreachableDegradesSafely:
         assert signals.degraded is False
 
 
-class TestTelemetryReflectsReasonerDegraded:
-    def test_reasoner_degraded_true_in_step_snapshot(self):
+class TestTelemetryReflectsAnnatarDegraded:
+    def test_annatar_degraded_true_in_step_snapshot(self):
         telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
         state = WorkflowState()
-        state.reasoner_degraded = True
+        state.annatar_degraded = True
 
         snapshot = telemetry._step_snapshot((state,))
 
-        assert "reasoner_degraded" in snapshot
-        assert snapshot["reasoner_degraded"] is True
+        assert "annatar_degraded" in snapshot
+        assert snapshot["annatar_degraded"] is True
 
-    def test_reasoner_degraded_false_in_step_snapshot(self):
+    def test_annatar_degraded_false_in_step_snapshot(self):
         telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
         state = WorkflowState()
-        state.reasoner_degraded = False
+        state.annatar_degraded = False
 
         snapshot = telemetry._step_snapshot((state,))
 
-        assert "reasoner_degraded" in snapshot
-        assert snapshot["reasoner_degraded"] is False
+        assert "annatar_degraded" in snapshot
+        assert snapshot["annatar_degraded"] is False
 
-    def test_reasoner_degraded_defaults_false_when_no_reasoner_configured(self):
-        """No Reasoner means WorkflowState.reasoner_degraded is never touched
-        from its dataclass default -- the same "no Reasoner -> safe value"
+    def test_annatar_degraded_defaults_false_when_no_annatar_configured(self):
+        """No Annatar means WorkflowState.annatar_degraded is never touched
+        from its dataclass default -- the same "no Annatar -> safe value"
         degrade pattern A196/A197 already use for llm_escalated_plan/
         graph_grounded/exhaustion_source."""
         telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
@@ -224,14 +224,14 @@ class TestTelemetryReflectsReasonerDegraded:
 
         snapshot = telemetry._step_snapshot((state,))
 
-        assert snapshot["reasoner_degraded"] is False
+        assert snapshot["annatar_degraded"] is False
 
-    def test_reasoner_degraded_defaults_false_when_state_arg_missing(self):
+    def test_annatar_degraded_defaults_false_when_state_arg_missing(self):
         telemetry = ArcV2Telemetry(task_id="test_task", game_id="test_game", append_snapshot=None)
 
         snapshot = telemetry._step_snapshot(())
 
-        assert snapshot["reasoner_degraded"] is False
+        assert snapshot["annatar_degraded"] is False
 
 
 # ── Failure mode 2: AWAITING_LLM escalation failure ──────────────────────
@@ -298,7 +298,7 @@ class TestResolveLlmVoteFailureModes:
         graph_port = MagicMock()
         graph_port.fetch_untested_actions.return_value = []  # nothing untested -> EXHAUSTED permitted
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
 
         # EXHAUSTED -> decision_for_state -> "advance"
         assert outcome.decision == "advance"
@@ -323,7 +323,7 @@ class TestResolveLlmVoteFailureModes:
         graph_port = MagicMock()
         graph_port.fetch_untested_actions.return_value = ["ACTION1"]  # untested remains -> EXHAUSTED not permitted
 
-        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port)
 
         # DEEPENING -> decision_for_state -> "repeat_deepen"
         assert outcome.decision == "repeat_deepen"
@@ -341,7 +341,7 @@ class TestResolveLlmVoteSuccess:
         assert vote == InvestigationState.DEEPENING
         llm_port.chat.assert_called_once()
 
-    def test_successful_vote_flows_through_run_reasoner_cycle_without_degrading(self):
+    def test_successful_vote_flows_through_run_annatar_cycle_without_degrading(self):
         llm_port = MagicMock()
         llm_port.chat.return_value = '{"state": "satisfied", "reason": "confidence high"}'
         state = WorkflowState(
@@ -358,7 +358,7 @@ class TestResolveLlmVoteSuccess:
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
 
-        outcome = run_reasoner_cycle(
+        outcome = run_annatar_cycle(
             state, _perception_snapshot(), execution, evaluation, graph_port=None, llm_port=llm_port
         )
 
