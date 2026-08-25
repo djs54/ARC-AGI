@@ -60,18 +60,16 @@ Like `goal_resolver`, plan generation returns raw structured results (candidate 
 ### 1.4 Plan Vetting (`agents/arc4/plan_vetter.py`)
 
 **Current Status:**  
-Plan vetting is structurally isolated on the common (single-veto) path. When the vetter rejects a candidate on the *first* veto, the rejection reason and an alternative candidate are written to `state.latest_veto_reason` and `state.latest_veto_alternative`. These are consumed by a same-cycle local replan loop that never invokes Annatar. Only on a *second* consecutive veto does the path route through Annatar (via `_route_second_veto_through_annatar` in `workflow.py`, added by card A207). This is a deliberate two-tier structure, not accidental isolation.
+Plan vetting keeps its two-tier control-flow structure exactly as before: the local same-cycle resolve→plan→vet retry still owns the *decision* of what to do after a first veto, and only a *second* consecutive veto routes through Annatar with full decision authority (`_route_second_veto_through_annatar` in `workflow.py`, added by card A207). Card A212 (2026-08-25) closed the remaining gap: the first veto's `state.latest_veto_reason`/`state.latest_veto_alternative` are now also folded into `CycleSignals` (new `veto_reason`/`veto_alternative_action_id` fields, `agents/arc4/annatar_state_machine.py`) the next time Annatar is actually invoked in that same cycle — set by `WorkflowOrchestrator.run()` gated on the cycle's own local `cycle_vetoes` counter (not by reading `state.latest_veto_reason` directly, which is never reset and would otherwise leak a stale veto from an earlier cycle into a clean one). `transition()`/`decision_for_state()` never read either field — they carry zero decision weight, so Annatar's actual advance/repeat/terminate logic and the local replan's own control flow are both unchanged.
 
-**Files:** `agents/arc4/plan_vetter.py`, `agents/arc4/workflow.py` (lines ~237–250)
+**Files:** `agents/arc4/plan_vetter.py`, `agents/arc4/workflow.py` (the `self._dependencies.annatar(...)` call site inside `run()`), `agents/arc4/annatar_signals.py` (`compute_cycle_signals`, `run_annatar_cycle`), `agents/arc4/annatar_state_machine.py` (`CycleSignals`), `agents/arc4/ports.py` (`AnnatarPhase`), `arc_runtime/bundle.py`
 
 **Principle Verdict:**  
-⚠ **Identified Gap, Already Tracked**
+✓ **Fixed with visibility (informed, not empowered) — audit A212**
 
-On the first veto, plan_vetter's rejection is a deterministic signal (Shift A compliant) that *should* inform the decision-making process, but it independently triggers a replan without ever informing Annatar. This violates Shift B's end-to-end reasoning principle: a deterministic signal that ends or redirects an investigation (by forcing an immediate replan without Annatar's input) is the same structural problem as `second_veto` posed (fixed by A207).
+The audit found the first veto categorically different in kind from the second, not just in frequency: A207's own justification for the second-veto fix (`backlog/A207.md`) was specifically that the episode was about to *end* without Annatar's say ("the episode just silently ended... never got invoked for what is arguably the most strategically interesting moment in a cycle"). A first veto ends nothing — it triggers an in-cycle retry that, when it succeeds, still reaches Annatar normally later in the same cycle. Shift B's text supports informing rather than empowering here: "short-lived sub-agents... return raw results, never independent conclusions, **to the primary agent**" argues the veto's raw rationale should still reach Annatar, but plan_vetter is Shift-A deterministic pre-processing (`ARCHITECTURE.md` lists `plan_vetter.py` explicitly under Shift A), not an autonomous peer making an independent conclusion — so full escalation (A207's pattern) would overclaim decision-relevant stakes the first veto doesn't have. A209's `check_budget` precedent (informed-not-empowered, even for an episode-ending event) is the closer analog and the one this fix follows.
 
-However, this gap is acknowledged and documented in **card A212** (a separate audit, linked from `backlog/A210.md`), which will investigate whether first-veto rerouting through Annatar is correct or whether the current two-tier structure is justified by the control-flow economics.
-
-**Follow-up:** **A212** — confirmed-existing audit card.
+**Follow-up:** None — closed by A212.
 
 ---
 
@@ -304,7 +302,7 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 | 1.1 Perceive | Direct | ✓ Aligned | None |
 | 1.2 Goal Resolver | Indirect (via state) | ✓ Aligned | None |
 | 1.3 Plan Generator | Indirect (side effect) | ✓ Aligned | None |
-| 1.4 Plan Vetter | Partial (2nd veto only) | ⚠ Gap tracked | A212 |
+| 1.4 Plan Vetter | Partial decide (2nd veto), visibility (1st veto) | ✓ Fixed (A212) | None |
 | 1.5 Executor | Direct | ✓ Aligned | None |
 | 1.6 Evaluator | Direct (except env-term) | ✓ Aligned + Exempt | None |
 | 2.1 Env-Terminal | Exempt | ✓ Aligned | None |
@@ -319,9 +317,10 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 | 6 Offline Scoring | Not applicable | ✓ Exempt | None |
 | 7 LLM Escalation Tiers | Absorbed in phase result | ✓ Correct | None |
 
-**Real gaps identified:** A212 (first-veto routing audit).  
-**Correctly aligned:** All other components, including crash-safety/thread closure (A211 closed).  
+**Real gaps identified:** None open — both gaps found during A210's scoping are now closed.  
+**Correctly aligned:** All other components, including crash-safety/thread closure (A211 closed) and first-veto routing (A212 closed).  
 **Exempt by design:** Deprecated code, utilities, offline analysis.
+**Closed this pass:** A211 (crash-safety/thread closure — best-effort graph close-out, never masks the original crash) and A212 (first-veto routing audit — fixed with visibility, informed-not-empowered).
 
 ---
 
@@ -333,4 +332,4 @@ This is the exact shape Shift B intends: short-lived LLM sub-agents generate hyp
 - `backlog/A209.md`: Budget routing audit (correctly resolved)
 - `backlog/A210.md`: Annatar rename (this pass's parent card)
 - `backlog/A211.md`: Crash-safety close-out (closed gap)
-- `backlog/A212.md`: First-veto routing audit (open gap)
+- `backlog/A212.md`: First-veto routing audit (closed — fixed with visibility)

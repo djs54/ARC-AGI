@@ -48,6 +48,18 @@ class CycleSignals:
     # data field -- this module remains zero-I/O; it never sets this
     # itself, only carries what the caller computed.
     degraded: bool = False
+    # A212: visibility-only fields (audit conclusion: a first plan_vetter
+    # veto is a bounded, deterministic Shift-A signal -- like check_budget
+    # (A209) it should be *informed* to Annatar, not empowered to decide
+    # anything. Set by compute_cycle_signals from WorkflowState.latest_veto_
+    # reason/alternative exactly when a veto occurred earlier in the SAME
+    # cycle whose successful local resolve/plan/vet retry then let the cycle
+    # reach execute/evaluate/annatar normally. transition() below never
+    # reads either field -- they carry no decision weight, matching this
+    # card's requirement that visibility must not alter the local replan's
+    # own control flow or Annatar's decision logic.
+    veto_reason: str | None = None
+    veto_alternative_action_id: str | None = None
 
 
 @dataclass(slots=True)

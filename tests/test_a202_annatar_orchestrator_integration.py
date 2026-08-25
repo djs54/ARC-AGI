@@ -425,6 +425,114 @@ class TestSecondVetoRoutesThroughAnnatar:
         assert result.reason == "annatar_exhausted"
 
 
+class TestFirstVetoVisibilityFoldedIntoAnnatarCall:
+    """A212 audit (2026-08-25): unlike second_veto (A207, full escalation --
+    the episode is about to end without Annatar's say) and unlike
+    check_budget (A209, informed-not-empowered -- a hard ceiling Annatar
+    cannot override), a FIRST veto resolved by the same-cycle local
+    resolve/plan/vet retry is bounded and low-stakes: it doesn't end
+    anything, and the retry almost always succeeds. The audit's conclusion
+    was "visibility only" -- fold the veto's reason/alternative into the
+    very next Annatar invocation (which, in the retry-succeeds case, already
+    happens later in the SAME cycle -- no new call, no new branch), without
+    giving Annatar any decision authority over the local replan itself.
+    These tests pin: (1) the signal actually reaches Annatar, (2) it does
+    NOT leak forward into a later cycle that had no veto of its own (state.
+    latest_veto_reason is never reset, so a naive implementation reading it
+    directly would go stale), and (3) the local replan's own control flow
+    -- the exact phase-call sequence -- is unchanged from before this card."""
+
+    def test_first_veto_reason_and_alternative_reach_annatar_when_retry_succeeds(self):
+        calls: list[str] = []
+        mock_annatar = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "vet": [_vet(False, reason="action-1 attempted 3 times with weak evidence"), _vet(True)],
+                "plan": [_plan(), _plan()],
+                "resolve": [_goal(), _goal()],
+                "evaluate": [_evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat")],
+            },
+        )
+        deps.annatar = mock_annatar
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert mock_annatar.call_count == 1
+        call = mock_annatar.call_args_list[0]
+        assert call.kwargs["veto_reason"] == "action-1 attempted 3 times with weak evidence"
+        assert call.kwargs["veto_alternative_action_id"] == "action-2"
+        # Local replan's own control flow is byte-for-byte the same shape as
+        # before this card: resolve/plan/vet ran a second time within the
+        # same cycle (the local retry), then execute/evaluate proceeded
+        # normally -- no second-veto routing, no extra cycle, no change to
+        # what phases ran or in what order.
+        assert calls == ["perceive", "resolve", "plan", "vet", "resolve", "plan", "vet", "execute", "evaluate"]
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "annatar_exhausted"
+
+    def test_no_veto_this_cycle_passes_none_even_with_a_stale_veto_from_an_earlier_cycle(self):
+        calls: list[str] = []
+        outcomes = deque(
+            [
+                AnnatarOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"),
+                AnnatarOutcome(decision="terminate"),
+            ]
+        )
+        mock_annatar = MagicMock(side_effect=lambda *a, **k: outcomes.popleft())
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "perceive": [_perception("grid-1"), _perception("grid-2")],
+                "resolve": [_goal(), _goal(), _goal()],
+                "plan": [_plan(), _plan(), _plan()],
+                "vet": [_vet(False, reason="first cycle veto"), _vet(True), _vet(True)],
+                "execute": [_execute(grid_hash="grid-2"), _execute(grid_hash="grid-3")],
+                "evaluate": [
+                    _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat"),
+                    _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat again"),
+                ],
+            },
+        )
+        deps.annatar = mock_annatar
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=5)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert mock_annatar.call_count == 2
+        first_call, second_call = mock_annatar.call_args_list
+        assert first_call.kwargs["veto_reason"] == "first cycle veto"
+        assert first_call.kwargs["veto_alternative_action_id"] == "action-2"
+        # state.latest_veto_reason is never reset -- cycle 2 had no veto of
+        # its own, so this must read None, not the stale value left over
+        # from cycle 1.
+        assert second_call.kwargs["veto_reason"] is None
+        assert second_call.kwargs["veto_alternative_action_id"] is None
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "annatar_exhausted"
+
+    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
+        """Regression guard: with no Annatar wired in, a first veto followed
+        by a successful retry must behave exactly as it did before this
+        card -- this card only ever reads state.latest_veto_reason to build
+        a kwarg for an Annatar call that, with annatar=None, never
+        happens."""
+        calls: list[str] = []
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "vet": [_vet(False, reason="action-1 attempted 3 times with weak evidence"), _vet(True)],
+                "plan": [_plan(), _plan()],
+                "resolve": [_goal(), _goal()],
+            },
+        )
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert calls == ["perceive", "resolve", "plan", "vet", "resolve", "plan", "vet", "execute", "evaluate"]
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.state.latest_veto_reason == "action-1 attempted 3 times with weak evidence"
+
+
 # ── Unit tests: agents/arc4/annatar_signals.compute_cycle_signals ──────
 
 
@@ -573,6 +681,59 @@ class TestComputeCycleSignals:
         # the graph mock above -- stall_reason must override it.
         assert signals.all_falsified is True
         assert signals.untested_remaining is False
+
+    def test_veto_reason_and_alternative_pass_through_when_provided(self):
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+            veto_reason="action-1 has been falsified 2 times",
+            veto_alternative_action_id="action-2",
+        )
+        assert signals.veto_reason == "action-1 has been falsified 2 times"
+        assert signals.veto_alternative_action_id == "action-2"
+
+    def test_veto_reason_defaults_to_none(self):
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+        )
+        assert signals.veto_reason is None
+        assert signals.veto_alternative_action_id is None
+
+    def test_veto_reason_does_not_change_transition_decision(self):
+        """A212's core visibility-only constraint: veto_reason/
+        veto_alternative_action_id must carry zero decision weight.
+        transition() output must be identical whether or not they're set,
+        holding every other signal fixed."""
+        from agents.arc4.annatar_state_machine import transition
+
+        base_kwargs = dict(
+            meaningful_progress=False,
+            confidence=0.2,
+            untested_remaining=True,
+            all_falsified=False,
+            execution_inconclusive=False,
+            deepening_cycle_count=0,
+            already_retried=False,
+        )
+        without_veto = CycleSignals(**base_kwargs)
+        with_veto = CycleSignals(**base_kwargs, veto_reason="some rejection", veto_alternative_action_id="action-9")
+
+        assert transition(InvestigationState.EXPLORING, without_veto) == transition(InvestigationState.EXPLORING, with_veto)
 
 
 # ── Unit tests: agents/arc4/annatar_signals.run_annatar_cycle ─────────
