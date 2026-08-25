@@ -279,7 +279,24 @@ class PlanGenerator:
                     if fetch_neighborhood is not None:
                         try:
                             neighborhood = fetch_neighborhood(entity_ref)
-                            live_hypotheses = [h for h in neighborhood.get("hypotheses", []) if not h.get("falsified")]
+                            hypotheses = neighborhood.get("hypotheses", [])
+                            rules = neighborhood.get("rules", [])
+                            live_hypotheses = [h for h in hypotheses if not h.get("falsified")]
+                            live_rules = [r for r in rules if not r.get("falsified")]
+
+                            # A208: hard-exclusion when the graph has tested this entity
+                            # and found nothing that holds -- exclude the candidate
+                            # entirely, the same way A191 excludes a repeated_falsified
+                            # book_id. Requires the graph to have SOME record for this
+                            # entity (hypotheses or rules non-empty) where nothing live
+                            # remains -- an entity with no record at all (fresh,
+                            # ungrounded) is NOT excluded, since the graph hasn't said
+                            # anything, positive or negative, yet.
+                            had_any_record = bool(hypotheses) or bool(rules)
+                            nothing_live_remains = not live_hypotheses and not live_rules
+                            if had_any_record and nothing_live_remains:
+                                continue
+
                             if live_hypotheses:
                                 score += max(h.get("confidence", 0.0) for h in live_hypotheses) * self._limits.entity_neighborhood_weight
                                 # A196: flag this so graph_grounded telemetry
@@ -290,7 +307,6 @@ class PlanGenerator:
                             # evidence (ENTITY_RULE), additive and separate
                             # from the hypothesis boost above -- both can
                             # contribute if both exist for this entity.
-                            live_rules = [r for r in neighborhood.get("rules", []) if not r.get("falsified")]
                             if live_rules:
                                 score += max(r.get("confidence", 0.0) for r in live_rules) * self._limits.entity_rule_weight
                                 entity_neighborhood_grounded = True
