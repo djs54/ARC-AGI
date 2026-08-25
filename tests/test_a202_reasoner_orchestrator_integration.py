@@ -67,13 +67,18 @@ from test_arc4_workflow import (
 # taken immediately before this card's edits to agents/arc4/workflow.py, so
 # test 1 below compares against genuine pre-change behavior, not a
 # hand-typed guess at what it used to do.
-
-_BASELINE_PATH = (
-    Path("/private/tmp/claude-501/-Users-djshelton-Desktop-GitProjects-ARC-AGI")
-    / "663f0b9e-9c2a-44e1-85c8-4c23aa63bc65"
-    / "scratchpad"
-    / "workflow_pre_a202_baseline.py"
-)
+#
+# Fixed 2026-08-25 (A207 follow-up): this originally pointed at a path
+# inside one specific agent session's own /private/tmp scratchpad directory
+# -- it happened to work in every session run so far only because that
+# scratchpad file was never cleaned up, but it was never actually committed
+# to the repo. A fresh clone, a different machine, or real CI (which is
+# exactly what caught this: `make test-a`'s fixed file list never touches
+# this test, so only `make test-all`/full CI runs ever exercised the
+# collection failure) would hit `FileNotFoundError` on collection, taking
+# down every test in this file. Moved into the repo proper so the fixture
+# travels with the code that depends on it.
+_BASELINE_PATH = Path(__file__).resolve().parent / "fixtures" / "workflow_pre_a202_baseline.py"
 
 
 def _load_baseline_orchestrator_module():
