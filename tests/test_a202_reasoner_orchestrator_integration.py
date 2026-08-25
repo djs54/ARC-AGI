@@ -488,6 +488,87 @@ class TestRunReasonerCycleAnchorSelection:
         assert state.active_investigation_anchor is None
 
 
+class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
+    """Regression test for a live-smoke-discovered crash (2026-08-25): when
+    transition() itself produces InvestigationState.AWAITING_LLM as the new
+    state within the *same* cycle (a DEEPENING thread whose
+    deepening_cycle_count has just reached ReasonerLimits.
+    max_deepening_cycles_before_llm), run_reasoner_cycle passed that
+    new_state straight to decision_for_state(), which explicitly raises
+    ValueError for AWAITING_LLM (per investigation_reasoner.py's own
+    docstring: it must be resolved via apply_llm_vote() first, never handed
+    to decision_for_state() directly). Every existing AWAITING_LLM test
+    (above, and in test_a205_reasoner_error_handling.py) starts with the
+    anchor already parked in AWAITING_LLM state -- none exercised the
+    transition-into-AWAITING_LLM-this-cycle path, so this genuine
+    integration-seam bug reached a real live run (crashed after 4 real
+    ARC API steps: 'ValueError: no decision mapping for state:
+    awaiting_llm') before being caught here.
+    """
+
+    def test_transition_into_awaiting_llm_does_not_crash_and_repeats_instead_of_deciding(self):
+        state = WorkflowState(
+            active_investigation_anchor={
+                "anchor_ref": "g1",
+                "anchor_type": "goal",
+                "thread_id": None,
+                "state": InvestigationState.DEEPENING.value,
+                # ReasonerLimits.max_deepening_cycles_before_llm defaults to
+                # 3 -- this is the exact cycle where transition() escalates
+                # DEEPENING -> AWAITING_LLM.
+                "deepening_cycle_count": 3,
+                "already_retried": False,
+            }
+        )
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        # grid_changed=True keeps execution_inconclusive False (a RETRY
+        # would otherwise fire first and never reach the deepening-limit
+        # check) while meaningful_progress stays False and confidence stays
+        # 0.0 (below the 0.75 SATISFIED threshold) so SATISFIED doesn't fire
+        # either; untested_remaining defaults True and all_falsified
+        # defaults False (graph_port=None) so EXHAUSTED doesn't fire -- the
+        # only remaining branch is the deepening-limit -> AWAITING_LLM one.
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+
+        # Must not raise. Must not silently be treated as "advance" (that
+        # would discard the thread mid-escalation). The only correct
+        # decision here is to repeat -- the *next* cycle will see
+        # current_state == AWAITING_LLM and actually resolve it via
+        # resolve_llm_vote/apply_llm_vote.
+        assert outcome.decision == "repeat_deepen"
+        assert state.active_investigation_anchor is not None
+        assert state.active_investigation_anchor["state"] == InvestigationState.AWAITING_LLM.value
+
+    def test_next_cycle_resolves_the_parked_awaiting_llm_state_correctly(self):
+        """Companion to the test above: once AWAITING_LLM is correctly
+        parked on the anchor, the *following* cycle must resolve it via
+        resolve_llm_vote/apply_llm_vote exactly like the pre-existing
+        TestRunReasonerCycleAwaitingLLM coverage below -- proving the two
+        cycles compose correctly end-to-end, not just each in isolation."""
+        state = WorkflowState(
+            active_investigation_anchor={
+                "anchor_ref": "g1",
+                "anchor_type": "goal",
+                "thread_id": None,
+                "state": InvestigationState.AWAITING_LLM.value,
+                "deepening_cycle_count": 3,
+                "already_retried": False,
+            }
+        )
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=False)
+
+        with patch.object(reasoner_signals_module, "resolve_llm_vote", return_value=InvestigationState.DEEPENING):
+            outcome = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+
+        assert outcome.decision == "repeat_deepen"
+        assert state.active_investigation_anchor["state"] == InvestigationState.DEEPENING.value
+
+
 class TestRunReasonerCycleAwaitingLLM:
     def test_awaiting_llm_calls_resolve_llm_vote_and_flows_through_apply_llm_vote(self):
         state = WorkflowState(

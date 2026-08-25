@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from .investigation_reasoner import (
     CycleSignals,
     InvestigationState,
+    ReasonerDecision,
     apply_llm_vote,
     decision_for_state,
     permissible_llm_transitions,
@@ -293,7 +294,23 @@ def run_reasoner_cycle(
         except Exception:
             degraded = True  # decision-durability write failed -- the decision itself still stands
 
-    decision = decision_for_state(new_state)
+    if new_state == InvestigationState.AWAITING_LLM:
+        # Live-smoke-discovered regression (2026-08-25): transition() can
+        # itself produce AWAITING_LLM as new_state (a DEEPENING thread whose
+        # deepening_cycle_count just reached the limit) -- but
+        # decision_for_state() explicitly does not accept AWAITING_LLM as
+        # input (must be resolved via apply_llm_vote() first, per
+        # investigation_reasoner.py's own docstring) and raises ValueError
+        # if handed it directly. apply_llm_vote() itself never *returns*
+        # AWAITING_LLM (permissible_llm_transitions() never includes it), so
+        # this branch is only ever reached via a fresh transition()
+        # escalation, never via the current_state==AWAITING_LLM branch
+        # above. Treat it the same as DEEPENING for decision purposes:
+        # repeat, park the state, and let the *next* cycle's
+        # current_state==AWAITING_LLM branch actually resolve it.
+        decision = ReasonerDecision.REPEAT_DEEPEN
+    else:
+        decision = decision_for_state(new_state)
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
     else:
