@@ -41,6 +41,8 @@ def compute_cycle_signals(
     already_retried: bool,
     graph_port: GraphQueryPort | None = None,
     stall_reason: str | None = None,
+    veto_reason: str | None = None,
+    veto_alternative_action_id: str | None = None,
 ) -> CycleSignals:
     meaningful_progress = bool(evaluation.meaningful_progress)
 
@@ -108,6 +110,8 @@ def compute_cycle_signals(
         deepening_cycle_count=deepening_cycle_count,
         already_retried=already_retried,
         degraded=degraded,
+        veto_reason=veto_reason,
+        veto_alternative_action_id=veto_alternative_action_id,
     )
 
 
@@ -232,6 +236,8 @@ def run_annatar_cycle(
     graph_port: GraphQueryPort | None = None,
     llm_port: LLMPort | None = None,
     stall_reason: str | None = None,
+    veto_reason: str | None = None,
+    veto_alternative_action_id: str | None = None,
     max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
 ) -> AnnatarOutcome:
     """The actual AnnatarPhase: resolves the current investigation thread's
@@ -303,6 +309,8 @@ def run_annatar_cycle(
         already_retried=anchor["already_retried"],
         graph_port=graph_port,
         stall_reason=stall_reason,
+        veto_reason=veto_reason,
+        veto_alternative_action_id=veto_alternative_action_id,
     )
     degraded = degraded or signals.degraded
     anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress)

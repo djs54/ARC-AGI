@@ -253,12 +253,34 @@ class WorkflowOrchestrator:
                     # is folded in as one of its inputs (see
                     # annatar_signals.compute_cycle_signals) instead of
                     # independently ending the run in the `else` branch below.
+                    #
+                    # A212 (visibility-only, audit conclusion): if this
+                    # cycle's first plan_vetter rejection was resolved by the
+                    # local same-cycle retry (cycle_vetoes > 0 but we still
+                    # reached here -- a second veto would have routed through
+                    # _route_second_veto_through_annatar and `continue`d
+                    # instead), pass its reason/alternative along too.
+                    # Gating on the local `cycle_vetoes` counter (not
+                    # directly reading state.latest_veto_reason) matters:
+                    # that state field is never reset, so reading it
+                    # unconditionally would leak a stale veto from an earlier
+                    # cycle into a cycle that had no veto at all. Purely
+                    # informational -- see CycleSignals.veto_reason's
+                    # docstring for why this cannot change what happens next.
+                    veto_reason = state.latest_veto_reason if cycle_vetoes else None
+                    veto_alternative_action_id = (
+                        state.latest_veto_alternative.action_id
+                        if cycle_vetoes and state.latest_veto_alternative is not None
+                        else None
+                    )
                     outcome = self._dependencies.annatar(
                         state,
                         perception_payload,
                         execution_payload,
                         evaluation_payload,
                         stall_reason=stall_reason,
+                        veto_reason=veto_reason,
+                        veto_alternative_action_id=veto_alternative_action_id,
                     )
                     # A205 / spec section 8: make a degraded (graph-unreachable)
                     # Annatar cycle visible in telemetry rather than silently

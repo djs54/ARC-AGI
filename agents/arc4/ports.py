@@ -116,7 +116,17 @@ class AnnatarPhase(Protocol):
     check_stall signal, but WorkflowOrchestrator itself does not need to hold
     a graph_port reference: bundle.py wires a closure over graph_port the
     same way it already does for resolve/plan, so the orchestrator's call
-    site only ever needs to pass stall_reason explicitly."""
+    site only ever needs to pass stall_reason explicitly.
+
+    `veto_reason`/`veto_alternative_action_id` (A212, visibility-only): set
+    only when this cycle's first plan_vetter rejection was resolved by the
+    local same-cycle resolve/plan/vet retry (i.e. the cycle reached
+    execute/evaluate/annatar normally rather than routing through
+    `_route_second_veto_through_annatar`). Purely informational -- folded
+    into CycleSignals but never read by transition()/decision_for_state(),
+    so it carries no decision authority, matching the `check_budget`
+    (A209) informed-not-empowered precedent rather than `second_veto`'s
+    (A207) full escalation."""
 
     def __call__(
         self,
@@ -127,6 +137,8 @@ class AnnatarPhase(Protocol):
         *,
         graph_port: GraphQueryPort | None = None,
         stall_reason: str | None = None,
+        veto_reason: str | None = None,
+        veto_alternative_action_id: str | None = None,
     ) -> AnnatarOutcome: ...
 
 
