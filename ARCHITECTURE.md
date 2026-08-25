@@ -305,14 +305,14 @@ A192 and A194 before A196 (two of its four metrics have nothing to report otherw
 A195 before A197 (extends the module A195 introduces); A196 before A198 (extends its
 script directly). A190 has no hard dependency on the rest of the sequence.
 
-Trajectory Reasoner (2026-08-23, see
+Trajectory Annatar (2026-08-23, see
 `docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md` for the full design
 and `backlog/A206.md` for sequencing context) — the component that closes the Shift-B
 gap named above ("no agent... owns the trajectory"):
 
 - A200: pure investigation-thread state machine (no graph/LLM/I/O)
 - A201: hippocampy handoff doc + graph client stubs for investigation threads
-- A202: wire the Reasoner into `WorkflowOrchestrator`
+- A202: wire the Annatar into `WorkflowOrchestrator`
 - A203: anchor-biasing in `goal_resolver.py`/`plan_generator.py`
 - A204: resume/crash-safety — write-ahead cycles, real-observation reconciliation (P0)
 - A205: degraded-mode fallback + `AWAITING_LLM` failure handling
@@ -322,16 +322,18 @@ gap named above ("no agent... owns the trajectory"):
   graph evidence as "grounded," including purely negative evidence), whole-episode
   futility termination (an episode where every investigation anchor is completely
   unproductive now terminates cleanly instead of running to budget, live-verified),
-  and routing `second_veto` through the Reasoner instead of silently ending the
+  and routing `second_veto` through the Annatar instead of silently ending the
   episode without ever asking it — the last remaining episode-ending path (besides
-  the deliberately-exempt environment-terminal and `check_budget` cases) that had
-  bypassed the "one agent sees everything end-to-end" premise entirely
+  the deliberately-exempt environment-terminal case) that had bypassed the "one agent
+  sees everything end-to-end" premise entirely (A209 later concluded that `check_budget`,
+  while retaining its hard ceiling, now routes through the Annatar for visibility and
+  bookkeeping, per the same end-to-end reasoning principle)
 
 Ordering: A200 and A201 are the only safe parallel step (no file overlap, no
 dependency on each other). A202 depends on both. A203 depends on A202. A204 and A205
 both depend on A202 and have no logical dependency on each other, but are sequenced
 (A204 then A205) rather than run in parallel because both plausibly touch the same
-files (`types.py`, `workflow.py`'s Reasoner hook) — same file-conflict-safety
+files (`types.py`, `workflow.py`'s Annatar hook) — same file-conflict-safety
 reasoning as A196/A197 in the prior sequence. A207 depends on the whole A200-A206
 sequence being live and observable, not just landed.
 
@@ -372,7 +374,7 @@ The ARC v2 slice is organized around shared contracts and injected ports:
 
 **v1 retirement (A148, 2026-08-02):** The v1 agent (`agents/arc3/`, including `orchestrator.py`) was moved to `archive/agents-arc3/` along with its dedicated test suite and the v1-vs-v2 comparison harness. It is not runnable via the CLI anymore — kept for git history/reference only. See `archive/agents-arc3/README.md`.
 
-**`agents/arc4/temporal_workflows.py` — deprecated (2026-08-23), not deleted.** `ArcPuzzleWorkflow` was a Temporal.io-backed execution path (opt-in via `--temporal` / `ARC_TEMPORAL_ENABLED=1`, never the default), intended to be the durable orchestration layer for trajectory-level decisions. On inspection it never became that: it's a mechanical port of the exact same fixed phase sequence and the same narrow gates `WorkflowOrchestrator` already runs, with zero reasoning added — Temporal's replay/retry machinery, not decision-making. The Reasoner design being worked out for Shift B (see Decision Ownership and the Graph-Engineering Principles section above) puts durability and decision authority in the graph itself, not in Temporal's per-workflow event history — a fresh process resumes by querying the graph for an attempt's in-progress state, not by Temporal replay, and the one case that requires special care (a non-idempotent side effect against the real ARC API, e.g. a click, in flight when a crash happens) is resolved by checking the real observation/game state on resume, not by trusting either store's own bookkeeping. `temporal_workflows.py` is not being built on or extended by that work. Left in place, unused, not wired into the new design — a separate future decision whether to remove it.
+**`agents/arc4/temporal_workflows.py` — deprecated (2026-08-23), not deleted.** `ArcPuzzleWorkflow` was a Temporal.io-backed execution path (opt-in via `--temporal` / `ARC_TEMPORAL_ENABLED=1`, never the default), intended to be the durable orchestration layer for trajectory-level decisions. On inspection it never became that: it's a mechanical port of the exact same fixed phase sequence and the same narrow gates `WorkflowOrchestrator` already runs, with zero reasoning added — Temporal's replay/retry machinery, not decision-making. The Annatar design being worked out for Shift B (see Decision Ownership and the Graph-Engineering Principles section above) puts durability and decision authority in the graph itself, not in Temporal's per-workflow event history — a fresh process resumes by querying the graph for an attempt's in-progress state, not by Temporal replay, and the one case that requires special care (a non-idempotent side effect against the real ARC API, e.g. a click, in flight when a crash happens) is resolved by checking the real observation/game state on resume, not by trusting either store's own bookkeeping. `temporal_workflows.py` is not being built on or extended by that work. Left in place, unused, not wired into the new design — a separate future decision whether to remove it.
 
 ### ARC v2 MCP Rollout Status
 
