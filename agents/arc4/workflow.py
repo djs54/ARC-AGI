@@ -145,7 +145,10 @@ class WorkflowOrchestrator:
                     state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
                     state.replan_passes += 1
                     if cycle_vetoes > self._limits.max_replan_passes_per_cycle:
-                        return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
+                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
+                        if veto_result is not None:
+                            return veto_result
+                        continue
 
                     resolved_goal = self._invoke_phase("resolve", self._dependencies.resolve, state, perception_payload)
                     phase_results.append(resolved_goal)
@@ -175,7 +178,10 @@ class WorkflowOrchestrator:
                     if not vet_payload.approved or vet.status == PhaseStatus.VETO:
                         state.latest_veto_reason = vet_payload.reason or vet.reason
                         state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate
-                        return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
+                        veto_result = self._route_second_veto_through_reasoner(state, perception_payload, current_observation, phase_results)
+                        if veto_result is not None:
+                            return veto_result
+                        continue
 
                 execution = self._invoke_phase(
                     "execute",
@@ -281,6 +287,56 @@ class WorkflowOrchestrator:
                     phase_results,
                     traceback_text=traceback.format_exc(),
                 )
+
+    def _route_second_veto_through_reasoner(
+        self,
+        state: WorkflowState,
+        perception_payload: Any,
+        current_observation: Mapping[str, Any],
+        phase_results: list[PhaseResult[Any]],
+    ) -> WorkflowRunResult | None:
+        """Post-A206 fix (2026-08-25): a double veto previously ended the
+        episode directly, without ever giving the Reasoner a say -- the one
+        place the "one agent that sees everything end-to-end" was
+        structurally excluded from a real strategic decision ("the safety
+        layer just rejected our plan twice, what now"). `vet` fires before
+        `execute`/`evaluate`, so there's no real ExecutionResult/
+        EvaluationResult for this cycle -- a synthetic "nothing was
+        attempted" pair is fed to the Reasoner instead
+        (execution.candidate=None, meaningful_progress=False), plus
+        stall_reason="second_veto" (reusing the existing stall-fold
+        mechanism from compute_cycle_signals rather than inventing a
+        parallel one). A repeated-double-veto pathological case is bounded
+        by the same whole-episode-futility streak
+        (reasoner_signals.run_reasoner_cycle) built alongside this fix --
+        no new termination logic needed for that case specifically.
+
+        Returns a WorkflowRunResult if the episode should end now (no
+        Reasoner configured -- exact prior behavior -- or the Reasoner said
+        "terminate"); None if the caller should `continue` the outer loop
+        instead, letting the Reasoner's decision (a fresh anchor, or the
+        same one) drive the next cycle."""
+        if self._dependencies.reason is None:
+            return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
+
+        synthetic_execution = ExecutionResult(action_id="", candidate=None, observation=current_observation, metadata={})
+        synthetic_evaluation = EvaluationResult(
+            decision=WorkflowDecision.CONTINUE,
+            meaningful_progress=False,
+            reason="second_veto",
+            metadata={"grid_changed": False},
+        )
+        outcome = self._dependencies.reason(
+            state,
+            perception_payload,
+            synthetic_execution,
+            synthetic_evaluation,
+            stall_reason="second_veto",
+        )
+        if outcome.decision == "terminate":
+            return self._finish(state, WorkflowStatus.TERMINATED, "reasoner_exhausted", phase_results)
+        state.reasoner_anchor_hint = outcome if outcome.decision in ("repeat_deepen", "repeat_retry") else None
+        return None
 
     def _invoke_phase(self, name: str, phase_callable: Any, *args: Any) -> PhaseResult[Any]:
         result = phase_callable(*args)

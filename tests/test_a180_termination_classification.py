@@ -43,6 +43,20 @@ class TestTerminatedIsNotCrashByDefault:
         result = classify_v2_termination("terminated", "some_new_evaluator_reason")
         assert result != FailureTaxonomy.CRASH.value
 
+    def test_reasoner_exhausted_reports_strategy_exhausted_not_crash(self):
+        """Explicit case for the reason string workflow.py's
+        `if outcome.decision == "terminate": return self._finish(...,
+        WorkflowStatus.TERMINATED, "reasoner_exhausted", ...)` produces
+        (agents/arc4/reasoner_signals.py's whole-episode-futility fix,
+        2026-08-25) -- not in the mapping dict by name, so it falls through
+        to the "terminated" status-level entry (STRATEGY_EXHAUSTED), not the
+        CRASH default. This path was previously unreachable in production
+        (decision_for_state() never returned "terminate") and is now live
+        for the first time, so pin its classification explicitly rather
+        than relying only on the generic unrecognized-reason test above."""
+        result = classify_v2_termination("terminated", "reasoner_exhausted")
+        assert result == FailureTaxonomy.STRATEGY_EXHAUSTED.value
+
 
 class TestSolvedReasonsAreSuccessNotFailure:
     """evaluator.py::_terminal_reason can surface "solved"/"victory" as the

@@ -316,13 +316,24 @@ gap named above ("no agent... owns the trajectory"):
 - A203: anchor-biasing in `goal_resolver.py`/`plan_generator.py`
 - A204: resume/crash-safety — write-ahead cycles, real-observation reconciliation (P0)
 - A205: degraded-mode fallback + `AWAITING_LLM` failure handling
+- A206: docs-only parent/sequencing card for A200-A205
+- A207: whole-episode visibility fixes found via live-smoke verification (see
+  `backlog/A207.md`) — a corrected `graph_grounded` KPI (was counting any non-empty
+  graph evidence as "grounded," including purely negative evidence), whole-episode
+  futility termination (an episode where every investigation anchor is completely
+  unproductive now terminates cleanly instead of running to budget, live-verified),
+  and routing `second_veto` through the Reasoner instead of silently ending the
+  episode without ever asking it — the last remaining episode-ending path (besides
+  the deliberately-exempt environment-terminal and `check_budget` cases) that had
+  bypassed the "one agent sees everything end-to-end" premise entirely
 
 Ordering: A200 and A201 are the only safe parallel step (no file overlap, no
 dependency on each other). A202 depends on both. A203 depends on A202. A204 and A205
 both depend on A202 and have no logical dependency on each other, but are sequenced
 (A204 then A205) rather than run in parallel because both plausibly touch the same
 files (`types.py`, `workflow.py`'s Reasoner hook) — same file-conflict-safety
-reasoning as A196/A197 in the prior sequence.
+reasoning as A196/A197 in the prior sequence. A207 depends on the whole A200-A206
+sequence being live and observable, not just landed.
 
 ### ARC v2 Runtime (Production Default — A127)
 

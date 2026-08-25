@@ -299,6 +299,127 @@ class TestReasonerControlFlow:
         assert mock_reason.call_count == 0
 
 
+class TestSecondVetoRoutesThroughReasoner:
+    """User-directed follow-up (2026-08-25): a double veto previously ended
+    the episode directly via _finish(SKIPPED, "second_veto", ...) without
+    ever invoking the Reasoner -- exactly the strategic moment ("the safety
+    layer just rejected our plan twice, what now") the "one agent that sees
+    everything end-to-end" is supposed to own, structurally excluded from
+    it. `vet` fires before `execute`/`evaluate`, so no real
+    ExecutionResult/EvaluationResult exists for a second-veto cycle;
+    workflow.py now feeds the Reasoner a synthetic "nothing was attempted"
+    pair (candidate=None, meaningful_progress=False) plus
+    stall_reason="second_veto" (reusing the existing stall-fold mechanism
+    rather than inventing a parallel one)."""
+
+    def test_no_reasoner_configured_preserves_exact_prior_behavior(self):
+        """Regression guard, mirrors test_second_veto_skips_execution in
+        test_arc4_workflow.py exactly -- reason=None must be untouched."""
+        calls: list[str] = []
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto")],
+                "plan": [_plan(), _plan()],
+                "resolve": [_goal(), _goal()],
+            },
+        )
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert result.status == WorkflowStatus.SKIPPED
+        assert result.reason == "second_veto"
+
+    def test_reasoner_invoked_with_synthetic_inconclusive_signals_and_second_veto_stall_reason(self):
+        calls: list[str] = []
+        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto")],
+                "plan": [_plan(), _plan()],
+                "resolve": [_goal(), _goal()],
+            },
+        )
+        deps.reason = mock_reason
+
+        WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert mock_reason.call_count == 1
+        call = mock_reason.call_args_list[0]
+        assert call.kwargs["stall_reason"] == "second_veto"
+        synthetic_execution, synthetic_evaluation = call.args[2], call.args[3]
+        assert synthetic_execution.candidate is None
+        assert synthetic_evaluation.meaningful_progress is False
+
+    def test_terminate_decision_ends_run_as_reasoner_exhausted(self):
+        calls: list[str] = []
+        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto")],
+                "plan": [_plan(), _plan()],
+                "resolve": [_goal(), _goal()],
+            },
+        )
+        deps.reason = mock_reason
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "reasoner_exhausted"
+
+    def test_repeat_decision_continues_the_loop_to_a_fresh_cycle_instead_of_ending_the_episode(self):
+        calls: list[str] = []
+        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="repeat_deepen", anchor_ref="g1", anchor_type="goal"))
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "perceive": [_perception("grid-1"), _perception("grid-2")],
+                "resolve": [_goal(), _goal(), _goal()],
+                "plan": [_plan(), _plan(), _plan()],
+                "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto"), _vet(True)],
+                "execute": [_execute(grid_hash="grid-2")],
+                "evaluate": [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True, reason="done")],
+            },
+        )
+        deps.reason = mock_reason
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=5)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert calls == [
+            "perceive", "resolve", "plan", "vet", "resolve", "plan", "vet",
+            "perceive", "resolve", "plan", "vet", "execute", "evaluate",
+        ]
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "done"
+        assert mock_reason.call_count == 1
+        assert result.state.reasoner_anchor_hint.decision == "repeat_deepen"
+        # The second-veto cycle never reached execute/evaluate, so only the
+        # one real cycle after it counts toward completed_cycles.
+        assert result.completed_cycles == 1
+
+    def test_first_veto_early_exit_also_routes_through_reasoner_when_limit_is_zero(self):
+        """The OTHER second_veto call site (the early-out fired when
+        cycle_vetoes > max_replan_passes_per_cycle, only reachable with a
+        0-configured limit) needs the identical treatment -- not just the
+        far more common two-veto path."""
+        calls: list[str] = []
+        mock_reason = MagicMock(return_value=ReasonerOutcome(decision="terminate"))
+        deps = _shared_dependencies(calls, overrides={"vet": [_vet(False, reason="first veto")]})
+        deps.reason = mock_reason
+
+        result = WorkflowOrchestrator(
+            deps, limits=WorkflowLimits(max_cycles=3, max_replan_passes_per_cycle=0)
+        ).run(WorkflowState(), {"grid": [[1]]})
+
+        assert calls == ["perceive", "resolve", "plan", "vet"]
+        assert mock_reason.call_count == 1
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "reasoner_exhausted"
+
+
 # ── Unit tests: agents/arc4/reasoner_signals.compute_cycle_signals ──────
 
 
@@ -486,6 +607,127 @@ class TestRunReasonerCycleAnchorSelection:
 
         assert outcome.decision == "advance"
         assert state.active_investigation_anchor is None
+
+
+class TestRunReasonerCycleWholeEpisodeFutility:
+    """User-directed follow-up (2026-08-25) after live-smoke evidence showed
+    a real gap: a 60-step run cycled through 4+ different goal anchors, all
+    of them completely unproductive (meaningful_progress=False on every one
+    of 120 evaluate snapshots, zero grid changes across 60 real ARC API
+    actions) -- and nothing in the Reasoner noticed the pattern across
+    anchors. The per-anchor state machine correctly recognizes "this one
+    anchor is exhausted" and advances to a fresh anchor, but nothing
+    aggregated "I've now tried N different anchors and every single one
+    struck out" into a real whole-episode decision, so the run just burned
+    its full wall-clock budget. This is exactly the gap A200's own design
+    note anticipated ("Whole-episode TERMINATE is decided by the
+    integration layer [A202]... since it alone has visibility into 'is
+    there anything left to advance to at all'") but which A202's actual
+    implementation never built -- decision_for_state() never produces
+    "terminate", so state.reasoner_unproductive_anchor_streak +
+    run_reasoner_cycle's own override are what actually closes this gap.
+    """
+
+    def _unproductive_advance(self, state, stall_reason="stalled"):
+        """One cycle that concludes an anchor via EXHAUSTED->ADVANCE without
+        ever registering meaningful_progress (grid_changed=True keeps
+        execution_inconclusive False so RETRY doesn't intercept first;
+        stall_reason folds in all_falsified=True/untested_remaining=False
+        so EXHAUSTED fires immediately for a fresh EXPLORING anchor)."""
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+        return run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason=stall_reason)
+
+    def _productive_advance(self, state):
+        """One cycle that concludes an anchor via SATISFIED->ADVANCE with
+        real meaningful_progress registered."""
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=True, grid_changed=True)
+        return run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+
+    def test_single_unproductive_anchor_increments_streak_without_terminating(self):
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        outcome = self._unproductive_advance(state)
+
+        assert outcome.decision == "advance"
+        assert state.reasoner_unproductive_anchor_streak == 1
+
+    def test_default_threshold_terminates_after_three_consecutive_unproductive_anchors(self):
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+
+        outcome1 = self._unproductive_advance(state)
+        outcome2 = self._unproductive_advance(state)
+        outcome3 = self._unproductive_advance(state)
+
+        assert outcome1.decision == "advance"
+        assert outcome2.decision == "advance"
+        assert outcome3.decision == "terminate"
+        assert state.reasoner_unproductive_anchor_streak == 3
+        assert state.active_investigation_anchor is None
+
+    def test_a_productive_anchor_resets_the_streak(self):
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+
+        self._unproductive_advance(state)
+        self._unproductive_advance(state)
+        assert state.reasoner_unproductive_anchor_streak == 2
+
+        productive = self._productive_advance(state)
+        assert productive.decision == "advance"
+        assert state.reasoner_unproductive_anchor_streak == 0
+
+        # Confirms it's a genuine reset, not just "doesn't increment": two
+        # more unproductive anchors after the reset must NOT terminate,
+        # since the streak restarted from 0.
+        outcome = self._unproductive_advance(state)
+        assert outcome.decision == "advance"
+        assert state.reasoner_unproductive_anchor_streak == 1
+
+    def test_progress_partway_through_a_deepening_anchor_counts_as_productive(self):
+        """An anchor that shows meaningful_progress on an earlier cycle but
+        then concludes unproductively on a LATER cycle must still count as
+        productive overall -- any_progress is tracked across the anchor's
+        whole life, not just its final cycle."""
+        state = WorkflowState(
+            active_investigation_anchor={
+                "anchor_ref": "g1",
+                "anchor_type": "goal",
+                "thread_id": None,
+                "state": InvestigationState.DEEPENING.value,
+                "deepening_cycle_count": 0,
+                "already_retried": False,
+                "any_progress": True,  # this anchor registered progress on an earlier cycle
+            }
+        )
+        outcome = self._unproductive_advance(state)
+
+        assert outcome.decision == "advance"
+        assert state.reasoner_unproductive_anchor_streak == 0
+
+    def test_max_unproductive_anchors_kwarg_overrides_default_threshold(self):
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome1 = run_reasoner_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason="stalled", max_unproductive_anchors=1)
+
+        assert outcome1.decision == "terminate"
+        assert state.reasoner_unproductive_anchor_streak == 1
+
+    def test_terminate_outcome_reports_no_anchor_ref(self):
+        """A whole-episode terminate isn't "stay anchored on X" -- unlike
+        repeat_deepen/repeat_retry, it must not report an anchor_ref/type,
+        matching how "advance" already reports None for both."""
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        for _ in range(3):
+            outcome = self._unproductive_advance(state)
+
+        assert outcome.decision == "terminate"
+        assert outcome.anchor_ref is None
+        assert outcome.anchor_type is None
 
 
 class TestRunReasonerCycleDeepeningEscalatesToAwaitingLLMWithinOneCycle:
