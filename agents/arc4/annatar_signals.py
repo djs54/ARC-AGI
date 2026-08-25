@@ -16,17 +16,17 @@ import json
 import re
 from typing import Any, Mapping
 
-from .investigation_reasoner import (
+from .annatar_state_machine import (
     CycleSignals,
     InvestigationState,
-    ReasonerDecision,
+    AnnatarDecision,
     apply_llm_vote,
     decision_for_state,
     permissible_llm_transitions,
     transition,
 )
 from .ports import GraphQueryPort, LLMMessage, LLMPort
-from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, ReasonerOutcome, WorkflowState
+from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, AnnatarOutcome, WorkflowState
 
 
 def compute_cycle_signals(
@@ -223,7 +223,7 @@ DEFAULT_MAX_UNPRODUCTIVE_ANCHORS = 3
 # not a tuned value.
 
 
-def run_reasoner_cycle(
+def run_annatar_cycle(
     state: WorkflowState,
     perception: PerceptionSnapshot,
     execution: ExecutionResult,
@@ -233,8 +233,8 @@ def run_reasoner_cycle(
     llm_port: LLMPort | None = None,
     stall_reason: str | None = None,
     max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
-) -> ReasonerOutcome:
-    """The actual ReasonerPhase: resolves the current investigation thread's
+) -> AnnatarOutcome:
+    """The actual AnnatarPhase: resolves the current investigation thread's
     state via investigation_reasoner's pure functions, persists the result
     through A201's graph client, and returns the orchestrator-facing
     decision. If state.active_investigation_anchor is None (fresh attempt,
@@ -251,14 +251,14 @@ def run_reasoner_cycle(
     decision. `anchor["any_progress"]` tracks whether THIS anchor has ever
     registered meaningful_progress across its whole life; when an anchor
     concludes (ADVANCE) without ever having shown progress,
-    state.reasoner_unproductive_anchor_streak increments -- any anchor that
+    state.annatar_unproductive_anchor_streak increments -- any anchor that
     DOES show progress resets it to 0. Crossing max_unproductive_anchors
     overrides the decision to TERMINATE (an existing workflow.py code path
     that decision_for_state() itself was documented as never actually
     producing)."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
-    # ReasonerOutcome.degraded at the bottom of this function.
+    # AnnatarOutcome.degraded at the bottom of this function.
     degraded = False
     anchor = state.active_investigation_anchor
     if anchor is None:
@@ -334,21 +334,21 @@ def run_reasoner_cycle(
         # above. Treat it the same as DEEPENING for decision purposes:
         # repeat, park the state, and let the *next* cycle's
         # current_state==AWAITING_LLM branch actually resolve it.
-        decision = ReasonerDecision.REPEAT_DEEPEN
+        decision = AnnatarDecision.REPEAT_DEEPEN
     else:
         decision = decision_for_state(new_state)
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
         if anchor.get("any_progress"):
-            state.reasoner_unproductive_anchor_streak = 0
+            state.annatar_unproductive_anchor_streak = 0
         else:
-            state.reasoner_unproductive_anchor_streak += 1
-        if state.reasoner_unproductive_anchor_streak >= max_unproductive_anchors:
+            state.annatar_unproductive_anchor_streak += 1
+        if state.annatar_unproductive_anchor_streak >= max_unproductive_anchors:
             # Whole-episode futility: every anchor tried in a row has been
             # completely dead. Override the per-anchor ADVANCE with a real
             # episode-level decision instead of silently starting yet
             # another anchor that's likely to fare the same.
-            decision = ReasonerDecision.TERMINATE
+            decision = AnnatarDecision.TERMINATE
     else:
         anchor["state"] = new_state.value
         if new_state == InvestigationState.DEEPENING:
@@ -357,7 +357,7 @@ def run_reasoner_cycle(
         state.active_investigation_anchor = anchor
 
     reports_anchor = decision.value in ("repeat_deepen", "repeat_retry")
-    return ReasonerOutcome(
+    return AnnatarOutcome(
         decision=decision.value,
         anchor_ref=anchor["anchor_ref"] if reports_anchor else None,
         anchor_type=anchor["anchor_type"] if reports_anchor else None,
@@ -367,4 +367,4 @@ def run_reasoner_cycle(
     )
 
 
-__all__ = ["compute_cycle_signals", "resolve_llm_vote", "run_reasoner_cycle"]
+__all__ = ["compute_cycle_signals", "resolve_llm_vote", "run_annatar_cycle"]

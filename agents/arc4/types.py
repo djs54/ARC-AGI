@@ -316,14 +316,14 @@ class EvaluationResult:
 
 
 @dataclass(slots=True)
-class ReasonerOutcome:
-    """A202: the orchestrator-facing result of one Reasoner cycle (see
-    agents/arc4/investigation_reasoner.py for the pure state machine this
-    wraps, and agents/arc4/reasoner_signals.py for the glue that produces
+class AnnatarOutcome:
+    """A202: the orchestrator-facing result of one Annatar cycle (see
+    agents/arc4/annatar_state_machine.py for the pure state machine this
+    wraps, and agents/arc4/annatar_signals.py for the glue that produces
     this). Lives in types.py (not ports.py, matching where PlanningResult/
     VetDecision/etc. already live) and carries `decision` as a plain str
-    (investigation_reasoner.ReasonerDecision's value) rather than importing
-    that enum here, so the dependency direction stays one-way: reasoner
+    (annatar_state_machine.AnnatarDecision's value) rather than importing
+    that enum here, so the dependency direction stays one-way: annatar
     modules may import types.py, never the reverse."""
 
     decision: str  # one of "advance" | "repeat_deepen" | "repeat_retry" | "terminate"
@@ -349,7 +349,7 @@ class ReasonerOutcome:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> ReasonerOutcome:
+    def from_dict(cls, d: dict) -> AnnatarOutcome:
         return cls(
             decision=d["decision"],
             anchor_ref=d.get("anchor_ref"),
@@ -448,38 +448,38 @@ class WorkflowState:
     active_investigation_anchor: dict[str, Any] | None = None
     # A202: the most recent REPEAT_DEEPEN/REPEAT_RETRY outcome, consumed by a
     # later card (A203) to bias goal_resolver/plan_generator toward the
-    # Reasoner's chosen anchor. None whenever the last outcome was
+    # Annatar's chosen anchor. None whenever the last outcome was
     # advance/terminate (nothing to bias toward).
-    reasoner_anchor_hint: ReasonerOutcome | None = None
-    # A205: whether the most recent Reasoner cycle degraded (a graph-client
-    # call raised during that cycle -- see ReasonerOutcome.degraded). Set by
-    # WorkflowOrchestrator.run() right after invoking the `reason` dependency,
+    annatar_anchor_hint: AnnatarOutcome | None = None
+    # A205: whether the most recent Annatar cycle degraded (a graph-client
+    # call raised during that cycle -- see AnnatarOutcome.degraded). Set by
+    # WorkflowOrchestrator.run() right after invoking the `annatar` dependency,
     # each cycle, mirroring how world_model_node_writes/edge_writes are also
     # mutated after their owning phase runs and read by telemetry.py's
     # _step_snapshot on the *next* step's snapshot (same one-cycle-lagged
     # characteristic this telemetry system already has for post-evaluate
     # state mutations -- not something A205 introduces). Stays at its default
-    # False for the whole episode whenever no Reasoner is configured at all.
-    reasoner_degraded: bool = False
+    # False for the whole episode whenever no Annatar is configured at all.
+    annatar_degraded: bool = False
     # Post-A206 fix (2026-08-25, user-directed live-smoke follow-up): how
     # many investigation-thread anchors in a row have concluded (ADVANCE)
     # without ever once registering meaningful_progress. Tracks whole-
     # episode futility across DIFFERENT anchors -- the per-anchor state
-    # machine (investigation_reasoner.py) already handles "this one anchor
+    # machine (annatar_state_machine.py) already handles "this one anchor
     # is going nowhere" via its own EXHAUSTED/RETRY transitions, but nothing
     # aggregated "I've now tried N completely different anchors and NONE of
     # them showed any sign of life" into a real whole-episode decision.
     # Confirmed live: a 60-step smoke run cycled through 4+ different goal
     # anchors, every one totally unproductive (meaningful_progress=False on
     # all 120 evaluate snapshots), and nothing noticed -- the run just burned
-    # its full step budget. reasoner_signals.py::run_reasoner_cycle
+    # its full step budget. annatar_signals.py::run_annatar_cycle
     # increments this on every unproductive ADVANCE and resets it to 0 the
     # moment any anchor shows real progress; once it crosses
-    # run_reasoner_cycle's max_unproductive_anchors threshold, the Reasoner
-    # emits ReasonerDecision.TERMINATE (an existing, already-wired
+    # run_annatar_cycle's max_unproductive_anchors threshold, the Annatar
+    # emits AnnatarDecision.TERMINATE (an existing, already-wired
     # workflow.py code path that decision_for_state itself was documented,
     # in A202's own review notes, as never actually producing).
-    reasoner_unproductive_anchor_streak: int = 0
+    annatar_unproductive_anchor_streak: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -502,9 +502,9 @@ class WorkflowState:
             "world_model_node_writes": self.world_model_node_writes,
             "world_model_edge_writes": self.world_model_edge_writes,
             "active_investigation_anchor": self.active_investigation_anchor,
-            "reasoner_anchor_hint": self.reasoner_anchor_hint.to_dict() if self.reasoner_anchor_hint else None,
-            "reasoner_degraded": self.reasoner_degraded,
-            "reasoner_unproductive_anchor_streak": self.reasoner_unproductive_anchor_streak,
+            "annatar_anchor_hint": self.annatar_anchor_hint.to_dict() if self.annatar_anchor_hint else None,
+            "annatar_degraded": self.annatar_degraded,
+            "annatar_unproductive_anchor_streak": self.annatar_unproductive_anchor_streak,
         }
 
     @classmethod
@@ -529,9 +529,9 @@ class WorkflowState:
             world_model_node_writes=d.get("world_model_node_writes", 0),
             world_model_edge_writes=d.get("world_model_edge_writes", 0),
             active_investigation_anchor=d.get("active_investigation_anchor"),
-            reasoner_anchor_hint=ReasonerOutcome.from_dict(d["reasoner_anchor_hint"]) if d.get("reasoner_anchor_hint") else None,
-            reasoner_degraded=d.get("reasoner_degraded", False),
-            reasoner_unproductive_anchor_streak=d.get("reasoner_unproductive_anchor_streak", 0),
+            annatar_anchor_hint=AnnatarOutcome.from_dict(d["annatar_anchor_hint"]) if d.get("annatar_anchor_hint") else None,
+            annatar_degraded=d.get("annatar_degraded", False),
+            annatar_unproductive_anchor_streak=d.get("annatar_unproductive_anchor_streak", 0),
         )
 
 
