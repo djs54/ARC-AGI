@@ -33,6 +33,23 @@ def _has_positive_graph_evidence(graph_evidence: Any) -> bool:
     return False
 
 
+def _has_graph_evidence_at_all(graph_evidence: Any) -> bool:
+    """True when graph_evidence shows any history (attempts > 0), positive or negative.
+    A214: complementary metric to _has_positive_graph_evidence, for near-term KPI visibility.
+    This counts any candidate that the graph has seen before, regardless of net support/contradiction
+    balance. Useful for a near-term "is the graph accumulating evidence" signal that CAN move
+    within a single unsolved puzzle, unlike graph_grounded_decision_rate which requires net-positive."""
+    if isinstance(graph_evidence, Mapping):
+        attempts = graph_evidence.get("attempts") or 0
+        supports = graph_evidence.get("supports") or 0
+        contradictions = graph_evidence.get("contradictions") or 0
+        # Any sign of history: attempts recorded, or accumulated evidence either way
+        return bool(attempts > 0 or supports > 0 or contradictions > 0)
+    if isinstance(graph_evidence, (list, tuple)):
+        return any(_has_graph_evidence_at_all(item) for item in graph_evidence)
+    return False
+
+
 @dataclass(slots=True)
 class ArcV2Telemetry:
     """Collect phase-level snapshots and final run artifacts for one task."""
@@ -206,11 +223,13 @@ class ArcV2Telemetry:
 
         llm_escalated_plan = False
         graph_grounded = False
+        graph_informed = False
         if execution is not None and execution.candidate is not None and isinstance(execution.candidate.metadata, Mapping):
             cand_meta = execution.candidate.metadata
             llm_escalated_plan = bool(cand_meta.get("llm_guidance"))
             graph_evidence = cand_meta.get("graph_evidence")
             graph_grounded = _has_positive_graph_evidence(graph_evidence) or bool(cand_meta.get("entity_neighborhood_grounded"))
+            graph_informed = _has_graph_evidence_at_all(graph_evidence) or bool(cand_meta.get("entity_neighborhood_grounded"))
 
         exhaustion_source = None
         if evaluation is not None and isinstance(evaluation.metadata, Mapping):
@@ -272,6 +291,7 @@ class ArcV2Telemetry:
             # .py). getattr(..., False) also covers state being None (no
             # WorkflowState found in this phase call's args at all).
             "annatar_degraded": bool(getattr(state, "annatar_degraded", False)),
+            "graph_informed": graph_informed,
         }
 
         if evaluation is not None:
