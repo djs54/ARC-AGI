@@ -236,6 +236,8 @@ class ArcV2Telemetry:
             exhaustion_source = evaluation.metadata.get("exhaustion_source")
 
         capability_missing_count = 0
+        hypothesis_confirm_contradict_attempted_count = 0
+        goal_confidence_write_attempted_count = 0
         if self._graph_query_port is not None:
             pop = getattr(self._graph_query_port, "pop_capability_missing_count", None)
             if pop is not None:
@@ -243,6 +245,18 @@ class ArcV2Telemetry:
                     capability_missing_count = pop()
                 except Exception:
                     capability_missing_count = 0
+            pop_hyp = getattr(self._graph_query_port, "pop_hypothesis_confirm_contradict_count", None)
+            if pop_hyp is not None:
+                try:
+                    hypothesis_confirm_contradict_attempted_count = pop_hyp()
+                except Exception:
+                    hypothesis_confirm_contradict_attempted_count = 0
+            pop_goal = getattr(self._graph_query_port, "pop_goal_confidence_write_count", None)
+            if pop_goal is not None:
+                try:
+                    goal_confidence_write_attempted_count = pop_goal()
+                except Exception:
+                    goal_confidence_write_attempted_count = 0
 
         snapshot = {
             "snapshot_type": "step",
@@ -283,6 +297,8 @@ class ArcV2Telemetry:
             "graph_grounded": graph_grounded,
             "exhaustion_source": exhaustion_source,
             "capability_missing_count": capability_missing_count,
+            "hypothesis_confirm_contradict_attempted_count": hypothesis_confirm_contradict_attempted_count,
+            "goal_confidence_write_attempted_count": goal_confidence_write_attempted_count,
             # A205: mirrors llm_escalated_plan/graph_grounded/exhaustion_source's
             # own "no Annatar configured -> safe default" degrade pattern --
             # WorkflowState.annatar_degraded defaults to False and is only

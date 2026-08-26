@@ -35,6 +35,8 @@ def report(steps: list[dict]) -> dict:
     llm_plan = sum(1 for s in steps if s.get("llm_escalated_plan"))
     grounded = sum(1 for s in steps if s.get("graph_grounded"))
     informed = sum(1 for s in steps if s.get("graph_informed"))
+    hypothesis_confirm_contradict_steps = sum(1 for s in steps if s.get("hypothesis_confirm_contradict_attempted_count", 0) > 0)
+    goal_confidence_write_steps = sum(1 for s in steps if s.get("goal_confidence_write_attempted_count", 0) > 0)
     cap_missing = sum(s.get("capability_missing_count", 0) for s in steps)
     violations = sum(s.get("compliance_violation_count", 0) for s in steps)
     exhaustion_sources: dict[str, int] = {}
@@ -48,6 +50,8 @@ def report(steps: list[dict]) -> dict:
         "llm_escalation_rate_plan_per_100": round(100 * llm_plan / total, 2),
         "graph_grounded_decision_rate": round(100 * grounded / total, 2),
         "graph_informed_decision_rate": round(100 * informed / total, 2),
+        "hypothesis_confirm_contradict_rate_per_100": round(100 * hypothesis_confirm_contradict_steps / total, 2),
+        "goal_confidence_write_rate_per_100": round(100 * goal_confidence_write_steps / total, 2),
         "capability_missing_total": cap_missing,
         "compliance_violation_total": violations,
         "exhaustion_source_breakdown": exhaustion_sources,
@@ -81,6 +85,8 @@ def show_history(history_path: Path, last: int | None) -> int:
             f"llm_plan={row.get('llm_escalation_rate_plan_per_100')}  "
             f"grounded={row.get('graph_grounded_decision_rate')}  "
             f"informed={row.get('graph_informed_decision_rate')}  "
+            f"hyp_confirm_contradict={row.get('hypothesis_confirm_contradict_rate_per_100')}  "
+            f"goal_conf_write={row.get('goal_confidence_write_rate_per_100')}  "
             f"cap_missing={row.get('capability_missing_total')}  "
             f"violations={row.get('compliance_violation_total')}"
         )

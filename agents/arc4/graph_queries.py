@@ -74,6 +74,8 @@ class ArcGraphQueryPort:
     strict: bool = True
     tool_names: Mapping[str, str] = field(default_factory=lambda: dict(ARC_V2_TOOL_NAMES))
     _capability_missing_count: int = field(default=0)
+    _hypothesis_confirm_contradict_count: int = field(default=0)
+    _goal_confidence_write_count: int = field(default=0)
 
     def ingest_perception(self, perception: PerceptionSnapshot) -> dict[str, Any]:
         payload = {
@@ -541,6 +543,20 @@ class ArcGraphQueryPort:
         self._capability_missing_count = 0
         return count
 
+    def pop_hypothesis_confirm_contradict_count(self) -> int:
+        """Returns the hypothesis_confirm_contradict call count accumulated since the last call,
+        then resets it."""
+        count = self._hypothesis_confirm_contradict_count
+        self._hypothesis_confirm_contradict_count = 0
+        return count
+
+    def pop_goal_confidence_write_count(self) -> int:
+        """Returns the goal_confidence_write call count accumulated since the last call,
+        then resets it."""
+        count = self._goal_confidence_write_count
+        self._goal_confidence_write_count = 0
+        return count
+
     @staticmethod
     def _preconditions_for_entity(entities: Sequence[Any], entity_ref: Any) -> list[str]:
         """A186: locate the entity _attribute_entity resolved (if any) and
@@ -665,6 +681,12 @@ class ArcGraphQueryPort:
 
     def _call_tool(self, tool_key: str, payload: Mapping[str, Any]) -> Any:
         tool_name = self.tool_names[tool_key]
+
+        # Track call attempts for hypothesis confirmation/contradiction and goal confidence updates
+        if tool_key in ("confirm_hypothesis", "contradict_hypothesis"):
+            self._hypothesis_confirm_contradict_count += 1
+        elif tool_key == "update_goal_confidence":
+            self._goal_confidence_write_count += 1
 
         try:
             if hasattr(self.brain_client, "call_tool"):
