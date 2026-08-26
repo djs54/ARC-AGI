@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, Mapping, Sequence
 
 
 class InvestigationState(StrEnum):
@@ -27,6 +28,48 @@ class AnnatarDecision(StrEnum):
     REPEAT_DEEPEN = "repeat_deepen"
     REPEAT_RETRY = "repeat_retry"
     TERMINATE = "terminate"
+
+
+class CynefinDomain(StrEnum):
+    """A217: Cynefin sense-making domain read off already-fetched
+    rule/hypothesis evidence for one investigation anchor (A216 Part 3's
+    constraint-based mapping: governing constraint = CONVERGED, enabling
+    constraint = COMPLEX, no constraint = CHAOTIC, no evidence at all =
+    DISORDER)."""
+
+    DISORDER = "disorder"    # no evidence yet for this anchor
+    CONVERGED = "converged"  # live evidence agrees (Clear/Complicated collapsed to one bucket for v1 --
+                              # Snowden's distinction between them is about whether expertise was needed
+                              # to see an obvious-in-hindsight cause, which doesn't change patience here)
+    COMPLEX = "complex"      # live evidence disagrees -- enabling constraint, more probes sense real shape
+    CHAOTIC = "chaotic"      # evidence exists but everything's falsified -- no constraint survived
+
+
+def classify_domain(evidence: Sequence[Mapping[str, Any]]) -> CynefinDomain:
+    """Cynefin domain read from already-fetched rule/hypothesis evidence for
+    one anchor. Pure, zero-I/O -- mirrors plan_generator.py::_voi_bonus's
+    existing agree/disagree check (lines 408-429) but named and reusable,
+    not a one-off inline computation.
+
+    Evidence shape note (confirmed against graph_queries.py::
+    fetch_entity_neighborhood's actual pass-through and its real fixtures in
+    tests/test_a192_entity_neighborhood_candidate_seeding.py): Rule items
+    (rule_extraction.py) carry `to_color` as their causal-outcome field;
+    Hypothesis items never carry `to_color` at all -- only `hypothesis_id`/
+    `claim`/`confidence`/`falsified`. Comparing every item purely on
+    `to_color` would collapse all `to_color`-less hypotheses onto a shared
+    None bucket, silently reporting CONVERGED even when their `claim`s
+    genuinely disagree. So the outcome-comparison key prefers `to_color`
+    when present (rules) and falls back to `claim` (hypotheses) -- an item
+    with neither field falls back to None uniformly, an acceptable
+    degenerate case when no comparison field exists at all."""
+    if not evidence:
+        return CynefinDomain.DISORDER
+    live = [e for e in evidence if not e.get("falsified")]
+    if not live:
+        return CynefinDomain.CHAOTIC
+    distinct_outcomes = {e.get("to_color", e.get("claim")) for e in live}
+    return CynefinDomain.CONVERGED if len(distinct_outcomes) <= 1 else CynefinDomain.COMPLEX
 
 
 @dataclass(slots=True)
@@ -60,6 +103,13 @@ class CycleSignals:
     # own control flow or Annatar's decision logic.
     veto_reason: str | None = None
     veto_alternative_action_id: str | None = None
+    # A217: Cynefin domain read off the same fetch_entity_neighborhood
+    # evidence compute_cycle_signals already fetches for `confidence` above
+    # -- no new graph query. Defaults to DISORDER (the conservative "we
+    # don't actually know" case), matching what the I/O layer sets whenever
+    # anchor_type != "entity" or the graph call fails/degrades. transition()
+    # reads this to scale DEEPENING patience; it carries no other weight.
+    domain: CynefinDomain = CynefinDomain.DISORDER
 
 
 @dataclass(slots=True)
@@ -69,6 +119,13 @@ class AnnatarLimits:
 
     satisfied_confidence_threshold: float = 0.75
     max_deepening_cycles_before_llm: int = 3
+    # A217: COMPLEX-domain anchors (live rule/hypothesis evidence genuinely
+    # disagrees) get this much more deepening patience before escalating to
+    # AWAITING_LLM -- CONVERGED/CHAOTIC/DISORDER anchors are unaffected and
+    # keep today's flat max_deepening_cycles_before_llm behavior exactly.
+    # Starting-point value, no empirical basis yet -- same honest-gap
+    # treatment as every other new threshold in this class.
+    complex_domain_deepening_multiplier: float = 2.0
 
 
 def transition(
@@ -93,9 +150,17 @@ def transition(
             return InvestigationState.SATISFIED
         if signals.all_falsified and not signals.untested_remaining:
             return InvestigationState.EXHAUSTED
+        # A217: COMPLEX-domain anchors (live evidence genuinely disagrees)
+        # get scaled-up patience before escalating out of DEEPENING.
+        # CONVERGED/CHAOTIC/DISORDER all use the flat default, unchanged.
+        effective_deepening_limit = limits.max_deepening_cycles_before_llm
+        if signals.domain == CynefinDomain.COMPLEX:
+            effective_deepening_limit = int(
+                limits.max_deepening_cycles_before_llm * limits.complex_domain_deepening_multiplier
+            )
         if (
             current_state == InvestigationState.DEEPENING
-            and signals.deepening_cycle_count >= limits.max_deepening_cycles_before_llm
+            and signals.deepening_cycle_count >= effective_deepening_limit
         ):
             return InvestigationState.AWAITING_LLM
         return InvestigationState.DEEPENING
@@ -146,6 +211,8 @@ def decision_for_state(new_state: InvestigationState) -> AnnatarDecision:
 __all__ = [
     "InvestigationState",
     "AnnatarDecision",
+    "CynefinDomain",
+    "classify_domain",
     "CycleSignals",
     "AnnatarLimits",
     "transition",
