@@ -299,11 +299,20 @@ review, see `backlog/A193.md` for full context and ordering):
   compliance_checks.py rather than a second parallel mechanism
 - A198: persist each compliance report to a JSONL history file so rates can be
   trended over time, not just inspected one run at a time
+- A214: audit `meaningful_progress` overrides and add complementary near-term KPI. All
+  four progress-determination overrides (stale-repeat, grid-unchanged, causal-path-confidence,
+  weak-prediction) are correctly calibrated against their original design rationales; the
+  four override-fired flags are already persisted in `EvaluationResult.metadata`. Added
+  `graph_informed_decision_rate`: a near-term complement to `graph_grounded_decision_rate`
+  that counts any candidate with any graph history (attempts > 0), not just net-positive
+  evidence. Operationally useful for single-puzzle runs where grounded can be structurally
+  stuck at zero but informed can move as the graph accumulates attempt records.
 
 Ordering: A191 before A195 (the invariant A195 checks is only real once A191 exists);
 A192 and A194 before A196 (two of its four metrics have nothing to report otherwise);
 A195 before A197 (extends the module A195 introduces); A196 before A198 (extends its
-script directly). A190 has no hard dependency on the rest of the sequence.
+script directly). A190 has no hard dependency on the rest of the sequence. A214 depends
+on A195-A198 (extends their telemetry infrastructure).
 
 Trajectory Annatar (2026-08-23, see
 `docs/superpowers/specs/2026-08-23-trajectory-reasoner-design.md` for the full design
