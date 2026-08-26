@@ -67,11 +67,18 @@ class TestRecordTransitionWritePayload:
         assert {"from": 1, "to": 9, "count": 1} in payload["color_transitions"]
 
     def test_no_changes_skips_the_call_entirely(self):
+        """A213: no-op action (empty changed_cells) now sends a minimal record instead of skipping."""
         stub = _StubBrainClient()
         port = ArcGraphQueryPort(stub, task_id="task-1", session_id="session-1", strict=False)
         result = port.record_transition(_execution(), {"changed_cells": [], "changed_count": 0, "truncated": False})
-        assert result == {"status": "no_changes", "recorded": False}
-        assert stub.calls == []
+        # A213: now makes a call with empty color_transitions to signal "tried, zero effect"
+        assert result["status"] == "ok"
+        assert len(stub.calls) == 1
+        tool_name, payload = stub.calls[0]
+        assert tool_name == "record_transition"
+        assert payload["changed_count"] == 0
+        assert payload["color_transitions"] == []
+        assert payload["entity_ref"] is None
 
     def test_attributes_transition_to_entity_whose_bbox_contains_changed_cells(self):
         stub = _StubBrainClient()
