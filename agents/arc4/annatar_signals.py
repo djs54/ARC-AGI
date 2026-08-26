@@ -18,9 +18,11 @@ from typing import Any, Mapping
 
 from .annatar_state_machine import (
     CycleSignals,
+    CynefinDomain,
     InvestigationState,
     AnnatarDecision,
     apply_llm_vote,
+    classify_domain,
     decision_for_state,
     permissible_llm_transitions,
     transition,
@@ -54,19 +56,24 @@ def compute_cycle_signals(
     # behavior on exception (confidence stays 0.0, untested_remaining stays
     # True) is unchanged; this only adds visibility on top of it.
     degraded = False
+    # A217: Cynefin domain read off the same fetch_entity_neighborhood
+    # evidence fetched below for `confidence` -- no new graph query. Stays
+    # DISORDER (the conservative "we don't actually know" default) whenever
+    # anchor_type != "entity", fetch_neighborhood is unavailable, or the
+    # graph call raises.
+    domain = CynefinDomain.DISORDER
     if graph_port is not None:
         fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
         if anchor_type == "entity" and fetch_neighborhood is not None:
             try:
                 neighborhood = fetch_neighborhood(anchor_ref)
-                live_items = [
-                    h
-                    for h in neighborhood.get("hypotheses", []) + neighborhood.get("rules", [])
-                    if not h.get("falsified")
-                ]
+                combined_evidence = neighborhood.get("hypotheses", []) + neighborhood.get("rules", [])
+                live_items = [h for h in combined_evidence if not h.get("falsified")]
                 confidence = max((h.get("confidence", 0.0) for h in live_items), default=0.0)
+                domain = classify_domain(combined_evidence)
             except Exception:
                 degraded = True
+                domain = CynefinDomain.DISORDER
         fetch_untested = getattr(graph_port, "fetch_untested_actions", None)
         if fetch_untested is not None:
             try:
@@ -112,6 +119,7 @@ def compute_cycle_signals(
         degraded=degraded,
         veto_reason=veto_reason,
         veto_alternative_action_id=veto_alternative_action_id,
+        domain=domain,
     )
 
 
