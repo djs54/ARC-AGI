@@ -368,20 +368,29 @@ class ArcGraphQueryPort:
         """A176: persist A170's before/after cell diff as a graph State Node,
         summarized as a bounded color-transition histogram (not per-cell --
         see backlog/A176.md Step 0) and attributed to the A175 entity_ref
-        whose bbox contains the most changed cells, when determinable."""
-        changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
-        if not changed_cells:
-            return {"status": "no_changes", "recorded": False}
+        whose bbox contains the most changed cells, when determinable.
 
-        color_transitions = self._summarize_color_transitions(changed_cells)
+        A213: when changed_cells is empty (no-op action), still send a minimal
+        record with empty color_transitions to distinguish "tried, zero effect"
+        from "never attempted" (cf. fetch_rules_for_action, fetch_causal_path,
+        fetch_entity_neighborhood). Server accepts empty color_transitions."""
+        changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
+
+        if changed_cells:
+            color_transitions = self._summarize_color_transitions(changed_cells)
+            changed_count = int(grid_diff.get("changed_count", len(changed_cells)) or 0)
+        else:
+            # A213: no-op action — send minimal record marking "tried, zero effect"
+            color_transitions = []
+            changed_count = 0
 
         payload = {
             "task_id": self.task_id,
             "step": self._execution_step(execution),
             "action_id": execution.action_id,
-            "changed_count": int(grid_diff.get("changed_count", len(changed_cells)) or 0),
+            "changed_count": changed_count,
             "color_transitions": color_transitions,
-            "entity_ref": self._attribute_entity(changed_cells, entities),
+            "entity_ref": self._attribute_entity(changed_cells, entities) if changed_cells else None,
         }
         return self._normalize_write_result(self._call_tool("record_transition", payload), tool_key="record_transition")
 
@@ -394,17 +403,27 @@ class ArcGraphQueryPort:
         """A177: extract candidate rule signatures (deterministic, see
         rule_extraction.py) from this step's observed color-transition
         histogram and send them for the server to confirm/falsify existing
-        Rule nodes against, or create new ones."""
+        Rule nodes against, or create new ones.
+
+        A213: when changed_cells is empty (no-op action), still send a minimal
+        record with empty candidate_signatures to distinguish "tried, zero effect"
+        from "never attempted" (cf. fetch_rules_for_action, fetch_causal_path,
+        fetch_entity_neighborhood). Server accepts empty candidate_signatures."""
         changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
-        if not changed_cells:
-            return {"status": "no_changes", "recorded": False}
 
-        color_transitions = self._summarize_color_transitions(changed_cells)
-        signatures = extract_candidate_signatures(execution.action_id, color_transitions)
-        if not signatures:
-            return {"status": "no_changes", "recorded": False}
+        if changed_cells:
+            color_transitions = self._summarize_color_transitions(changed_cells)
+            signatures = extract_candidate_signatures(execution.action_id, color_transitions)
+            if not signatures:
+                return {"status": "no_changes", "recorded": False}
+            changed_count = int(grid_diff.get("changed_count", len(changed_cells)) or 0)
+            entity_ref = self._attribute_entity(changed_cells, entities)
+        else:
+            # A213: no-op action — send minimal record marking "tried, zero effect"
+            signatures = []
+            changed_count = 0
+            entity_ref = None
 
-        entity_ref = self._attribute_entity(changed_cells, entities)
         payload: dict[str, Any] = {
             "task_id": self.task_id,
             "step": self._execution_step(execution),
@@ -419,14 +438,14 @@ class ArcGraphQueryPort:
             # magnitude), not by literal, non-transferable color values.
             "fingerprint": compute_fingerprint(
                 execution.action_id,
-                int(grid_diff.get("changed_count", len(changed_cells)) or 0),
+                changed_count,
             ).key(),
             # A186: palette-invariant feature tags describing the entity this
             # rule fired on, for cross-game structure-layer matching in
             # mechanic_fusion.py. Not yet stored/returned by hippocampy (see
             # docs/handoff/B278-mechanic-fusion.md); sending it now is
             # forward-compatible and harmless if the server ignores it.
-            "preconditions": self._preconditions_for_entity(entities, entity_ref),
+            "preconditions": self._preconditions_for_entity(entities, entity_ref) if entity_ref else [],
         }
         # B359 follow-up (2026-08-23): surface entity_ref at the top level too,
         # not just buried in preconditions tags -- record_rule now merges an
