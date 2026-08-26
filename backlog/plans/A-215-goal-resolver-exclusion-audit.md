@@ -11,7 +11,9 @@
 
 `plan_generator.py` has real graph-driven exclusion (A208); `goal_resolver.py` only ever boosts confidence from graph evidence, never demotes/excludes. The one live goal-level graph signal (`VictoryCondition.confidence`, kept current every cycle via `record_evaluation` → `arc_update_goal_confidence`) is read back by `goal_resolver.py` but merged via `confidence=max(hypothesis.confidence, boost)` (`goal_resolver.py:304`) — structurally one-directional, so a low graph confidence can never pull a hypothesis's score down. Audit whether this asymmetry is a real, uncovered gap or whether local state (`_apply_grounding_gate`/`_apply_failure_decay`) already handles it.
 
-**This card is written to be executable as two parallel, independently-dispatchable investigation tracks.** If executing via subagent fan-out, dispatch Track A and Track B as separate agents on separate branches (mirroring how A213/A214 were fanned out), then have the primary session synthesize both findings into the card's Outcome section itself — do not have either track-agent write the Synthesis section, since it needs both tracks' results.
+**This card is written to be executable as three parallel, independently-dispatchable tracks.** If executing via subagent fan-out:
+- Track A and Track B are read-only investigation agents that report their findings back to the primary session (no branch, no commit) — the primary session synthesizes both into the card's Outcome section itself. Do not have either track-agent write the Synthesis section, since it needs both tracks' results.
+- Track C is independent, unconditional implementation work (new KPI telemetry) that does not depend on Tracks A/B's conclusions — dispatch it on its own branch, mirroring how A213/A214 were fanned out as separate parallel branches. It can be reviewed and merged on its own timeline, separate from whatever Tracks A/B's synthesis produces.
 
 ## Track A: is the graph-side signal itself trustworthy?
 
@@ -52,9 +54,52 @@ Investigation using real trace evidence where possible, touching `agents/arc4/go
 
 5. Write up Track B's finding as a self-contained block of prose (2-4 paragraphs), citing exact file:line references and any real trace evidence used (with its source/timestamp named explicitly). Do NOT edit `backlog/A215.md` yourself if working as a fanned-out track-agent — report your finding back to the primary session instead.
 
-## Reporting back (both tracks)
+## Track C: KPI instrumentation for `arc_confirm_hypothesis`/`arc_contradict_hypothesis`/`arc_update_goal_confidence` usage
 
-If dispatched as a subagent, do not push a branch or open a PR — this card's plan expects both tracks' findings to be synthesized by the primary session into a single Outcome section before anything is committed. Report your status as DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED with your track's finding written out in full (ready to paste), all file:line citations, and anything you're not fully confident about.
+### Scope
+
+Independent, unconditional implementation work — not gated on Track A/B's findings, can be worked and merged separately. Same KPI family as `scripts/graph_compliance_report.py`'s existing metrics (A196/A198/A214) — read `agents/arc4/telemetry.py`'s `_has_positive_graph_evidence`/`graph_grounded` and `_has_graph_evidence_at_all`/`graph_informed` (A214) first as the established pattern to mirror exactly. Touches `agents/arc4/graph_queries.py`, `agents/arc4/telemetry.py`, `scripts/graph_compliance_report.py`.
+
+### Steps
+
+1. Read `agents/arc4/graph_queries.py`'s existing `_capability_missing_count`/`pop_capability_missing_count()` mechanism (A196) in full — find where `_capability_missing_count` is declared (an instance attribute on `ArcGraphQueryPort`), where it's incremented (inside `_call_tool`, the single choke point every graph call passes through), and how `pop_capability_missing_count()` returns-and-resets it. This is the exact pattern to mirror.
+
+2. Add two new counters to `ArcGraphQueryPort`, same shape as `_capability_missing_count`:
+   - `_hypothesis_confirm_contradict_count: int` — increment inside `_call_tool` (or at the two specific call sites in `record_vet`, whichever matches the existing capability-missing counter's own increment location more closely — check this, don't guess) whenever the tool name being called is `confirm_hypothesis` or `contradict_hypothesis`.
+   - `_goal_confidence_write_count: int` — increment whenever the tool name being called is `update_goal_confidence`.
+   - Add `pop_hypothesis_confirm_contradict_count()` and `pop_goal_confidence_write_count()`, each returning the current count and resetting to 0, exactly mirroring `pop_capability_missing_count()`'s signature and behavior.
+
+3. In `agents/arc4/telemetry.py::_step_snapshot`, find where `capability_missing_count` is currently popped (search for `pop_capability_missing_count`) and add the same pattern for the two new counters, adding two new keys to the step snapshot dict: `hypothesis_confirm_contradict_attempted_count` and `goal_confidence_write_attempted_count` (integer counts, not booleans — mirror `capability_missing_count`'s own type exactly, do not deviate to booleans without checking why capability_missing_count is an int and matching that reasoning).
+
+4. In `scripts/graph_compliance_report.py::report()`, add two new rate calculations alongside the existing ones (`llm_goal`, `llm_plan`, `grounded`, `informed`):
+   ```python
+   hypothesis_confirm_contradict_steps = sum(1 for s in steps if s.get("hypothesis_confirm_contradict_attempted_count", 0) > 0)
+   goal_confidence_write_steps = sum(1 for s in steps if s.get("goal_confidence_write_attempted_count", 0) > 0)
+   ```
+   and add to the returned dict:
+   ```python
+   "hypothesis_confirm_contradict_rate_per_100": round(100 * hypothesis_confirm_contradict_steps / total, 2),
+   "goal_confidence_write_rate_per_100": round(100 * goal_confidence_write_steps / total, 2),
+   ```
+   Place them near `graph_informed_decision_rate` in the returned dict (same section of the KPI family), not scattered elsewhere.
+
+5. Update `show_history()`'s printed row format (search for the existing `f"...informed={row.get('graph_informed_decision_rate')}..."` line A214 added) to also print `hyp_confirm_contradict=` and `goal_conf_write=` in the same style.
+
+### Tests
+
+New test file (or added to a shared `tests/test_a215_*.py`):
+1. `ArcGraphQueryPort`: calling `record_vet` with `vet.approved=True` and `vet.approved=False` both increment `_hypothesis_confirm_contradict_count`; calling `record_evaluation` with a `goal_id` present increments `_goal_confidence_write_count`; `pop_*` methods return-and-reset correctly (mirror the existing `pop_capability_missing_count` tests in `tests/test_a196_shift_a_c_trend_telemetry.py`'s `TestGraphQueryPortCapabilityMissingCounter` class exactly, same shape, two new counters).
+2. `telemetry.py::_step_snapshot`: the two new fields appear in the snapshot dict with the correct popped values.
+3. `report()`: unit tests with synthetic step lists confirming both new rates compute correctly, including the zero-steps-with-the-field-present case (mirror A214's `test_missing_graph_informed_key_defaults_to_not_informed` pattern for backward compatibility with older trace snapshots that won't have these two new keys at all).
+4. A regression test confirming `graph_grounded_decision_rate`/`graph_informed_decision_rate`'s existing output is unaffected by these two additions.
+
+### Commit and branch
+
+This track gets its own branch (e.g. `feat/a215-track-c-hypothesis-confidence-kpis`), separate from whatever branch Tracks A/B's synthesis produces — it's independent, unconditional work. Follow this repo's standard branch+PR discipline (never commit to master). Stage precisely: `agents/arc4/graph_queries.py`, `agents/arc4/telemetry.py`, `scripts/graph_compliance_report.py`, the new test file. Do not touch `backlog/A215.md` or `backlog/masterBacklogTracker.md` from this track — the primary session updates those once all tracks report.
+
+## Reporting back (Tracks A and B only)
+
+If dispatched as a subagent, Track A and Track B do not push a branch or open a PR — this card's plan expects both tracks' findings to be synthesized by the primary session into a single Outcome section before anything is committed. Report your status as DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED with your track's finding written out in full (ready to paste), all file:line citations, and anything you're not fully confident about. (Track C, by contrast, does push its own branch — see its own section above.)
 
 ## Synthesis (primary session, after both tracks report)
 
@@ -63,12 +108,17 @@ Combine Track A + Track B into one of the three outcomes described in `backlog/A
 ## Validation commands
 
 ```bash
-# If a fix lands:
+# Track C (always):
 .venv/bin/python -m pytest tests/test_a215_*.py -v
 .venv/bin/python -m pytest tests/ -q
 make test-a
 make test-all
-# If no fix lands:
+# Tracks A/B synthesis, if a fix lands:
+.venv/bin/python -m pytest tests/test_a215_*.py -v
+.venv/bin/python -m pytest tests/ -q
+make test-a
+make test-all
+# Tracks A/B synthesis, if no fix lands:
 make test-a
 make test-all
 ```
@@ -78,3 +128,4 @@ make test-all
 - Same discipline as A209/A212/A214: if the evidence doesn't clearly support a fix, document why and leave the code alone. "No change needed, here's the specific reasoning from both tracks" is a complete, valid outcome.
 - Do not propose reviving `record_vet`/`confirm_hypothesis`/`contradict_hypothesis` for the action/rule case — A199 already decided against that, for reasons unrelated to this card's scope (goal-level `VictoryCondition.confidence`, not action-level `Hypothesis.status`).
 - If Track A finds the `goal_id` wiring is actually broken (write and read never connect for the same goal), that is itself the headline finding and takes priority over the `max()` asymmetry question — a broken pipe upstream makes the merge-direction question moot until the pipe is fixed.
+- Track C's `hypothesis_confirm_contradict_rate_per_100` reading 0.0 in every real run is the *expected, correct* result today (per A199) — do not treat a 0.0 reading as a bug in the instrumentation itself; the KPI's job is to make that zero visible and trended, not to force it nonzero.
