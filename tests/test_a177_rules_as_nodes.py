@@ -55,16 +55,16 @@ class TestRecordRuleEvidence:
         assert payload["candidate_signatures"] == [{"action_family": "ACTION6", "from_color": 2, "to_color": 5}]
 
     def test_no_changes_skips_the_call(self):
-        """A213: no-op action (empty changed_cells) now sends a minimal record instead of skipping."""
+        """A213 (investigated, reverted on review): unlike record_transition,
+        record_rule's server-side loop over candidate_signatures does nothing
+        for an empty list -- no node, no edge, no distinguishable trace -- so
+        a no-op call here would be a wasted round-trip, not real signal.
+        Keeps the original skip-the-call behavior."""
         stub = _StubBrainClient()
         port = ArcGraphQueryPort(stub, task_id="task-1", session_id="session-1", strict=False)
         result = port.record_rule_evidence(_execution(), {"changed_cells": [], "changed_count": 0, "truncated": False})
-        # A213: now makes a call with empty candidate_signatures to signal "tried, zero effect"
-        assert result["status"] == "ok"
-        assert len(stub.calls) == 1
-        tool_name, payload = stub.calls[0]
-        assert tool_name == "record_rule"
-        assert payload["candidate_signatures"] == []
+        assert result == {"status": "no_changes", "recorded": False}
+        assert stub.calls == []
 
 
 class TestFetchRulesForAction:

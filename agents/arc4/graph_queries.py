@@ -405,25 +405,31 @@ class ArcGraphQueryPort:
         histogram and send them for the server to confirm/falsify existing
         Rule nodes against, or create new ones.
 
-        A213: when changed_cells is empty (no-op action), still send a minimal
-        record with empty candidate_signatures to distinguish "tried, zero effect"
-        from "never attempted" (cf. fetch_rules_for_action, fetch_causal_path,
-        fetch_entity_neighborhood). Server accepts empty candidate_signatures."""
+        A213 (investigated, not applied here): a no-op-signal branch mirroring
+        record_transition's was tried but reverted on review -- hippocampy's
+        record_rule (campy/brain/thalamus/tools/arc_queries.py) loops over
+        candidate_signatures and writes nothing when the list is empty
+        (`for sig in signatures: ...` with signatures=[] is a true no-op,
+        unlike record_transition's unconditional Transition-node MERGE). A
+        Rule is inherently a from_color->to_color transition; there is no
+        natural "null rule" to write when nothing changed, and sending an
+        empty-signatures call is genuinely indistinguishable server-side from
+        never calling it at all -- it would just be a wasted round-trip, not
+        an information gain. record_transition's own no-op record (below)
+        already closes the "tried, zero effect" visibility gap this card
+        cared about; a real "no-op Rule" would need a hippocampy schema
+        change, left as a possible future ask rather than built speculatively
+        here (see backlog/A213.md's Outcome)."""
         changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
+        if not changed_cells:
+            return {"status": "no_changes", "recorded": False}
 
-        if changed_cells:
-            color_transitions = self._summarize_color_transitions(changed_cells)
-            signatures = extract_candidate_signatures(execution.action_id, color_transitions)
-            if not signatures:
-                return {"status": "no_changes", "recorded": False}
-            changed_count = int(grid_diff.get("changed_count", len(changed_cells)) or 0)
-            entity_ref = self._attribute_entity(changed_cells, entities)
-        else:
-            # A213: no-op action — send minimal record marking "tried, zero effect"
-            signatures = []
-            changed_count = 0
-            entity_ref = None
+        color_transitions = self._summarize_color_transitions(changed_cells)
+        signatures = extract_candidate_signatures(execution.action_id, color_transitions)
+        if not signatures:
+            return {"status": "no_changes", "recorded": False}
 
+        entity_ref = self._attribute_entity(changed_cells, entities)
         payload: dict[str, Any] = {
             "task_id": self.task_id,
             "step": self._execution_step(execution),
@@ -438,14 +444,14 @@ class ArcGraphQueryPort:
             # magnitude), not by literal, non-transferable color values.
             "fingerprint": compute_fingerprint(
                 execution.action_id,
-                changed_count,
+                int(grid_diff.get("changed_count", len(changed_cells)) or 0),
             ).key(),
             # A186: palette-invariant feature tags describing the entity this
             # rule fired on, for cross-game structure-layer matching in
             # mechanic_fusion.py. Not yet stored/returned by hippocampy (see
             # docs/handoff/B278-mechanic-fusion.md); sending it now is
             # forward-compatible and harmless if the server ignores it.
-            "preconditions": self._preconditions_for_entity(entities, entity_ref) if entity_ref else [],
+            "preconditions": self._preconditions_for_entity(entities, entity_ref),
         }
         # B359 follow-up (2026-08-23): surface entity_ref at the top level too,
         # not just buried in preconditions tags -- record_rule now merges an

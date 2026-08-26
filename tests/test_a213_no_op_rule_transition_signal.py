@@ -117,133 +117,81 @@ class TestRecordTransitionNoOp:
         assert payload["color_transitions"] == []
 
 
-class TestRecordRuleEvidenceNoOp:
-    """record_rule_evidence behavior for no-op actions."""
+class TestRecordRuleEvidenceStillSkipsNoOp:
+    """record_rule_evidence behavior for no-op actions -- investigated for a
+    no-op-signal branch mirroring record_transition's, but reverted on
+    review: hippocampy's server-side record_rule loops over
+    candidate_signatures and writes nothing when the list is empty (no node,
+    no edge), unlike record_transition's unconditional Transition-node
+    MERGE. Sending an empty-signatures call would be a wasted round-trip,
+    not real signal, so this path deliberately keeps its original
+    skip-the-call behavior. See backlog/A213.md's Outcome."""
 
-    def test_no_op_action_sends_minimal_record(self, graph_port, execution, mock_brain_client):
-        """A213: no-op action (empty changed_cells) sends record with empty candidate_signatures."""
-        mock_brain_client.call_tool.return_value = {"ok": True, "results": []}
-
-        # Call with empty changed_cells
+    def test_no_op_action_skips_the_call(self, graph_port, execution, mock_brain_client):
         grid_diff = {"changed_cells": []}
         result = graph_port.record_rule_evidence(execution, grid_diff)
 
-        # Verify tool was called
-        assert mock_brain_client.call_tool.called
-        call_args = mock_brain_client.call_tool.call_args
+        assert result == {"status": "no_changes", "recorded": False}
+        assert not mock_brain_client.call_tool.called
 
-        # Verify payload structure (note: server-side tool name is "record_rule", not "record_rule_evidence")
-        assert call_args[0][0] == "record_rule"
-        payload = call_args[0][1]
-        assert payload["task_id"] == "test_task"
-        assert payload["action_id"] == "ACTION1"
-        assert payload["candidate_signatures"] == []
-        # No entity_ref key when entity_ref is None (not added to payload)
-        assert "entity_ref" not in payload
-
-    def test_no_op_action_with_none_changed_cells(self, graph_port, execution, mock_brain_client):
-        """A213: None changed_cells also sends minimal no-op record."""
-        mock_brain_client.call_tool.return_value = {"ok": True, "results": []}
-
-        # Call with None changed_cells
+    def test_none_changed_cells_skips_the_call(self, graph_port, execution, mock_brain_client):
         grid_diff = {"changed_cells": None}
         result = graph_port.record_rule_evidence(execution, grid_diff)
 
-        # Verify tool was called with no-op record
-        assert mock_brain_client.call_tool.called
-        call_args = mock_brain_client.call_tool.call_args
-        payload = call_args[0][1]
-        assert payload["candidate_signatures"] == []
+        assert result == {"status": "no_changes", "recorded": False}
+        assert not mock_brain_client.call_tool.called
 
     def test_normal_action_unchanged(self, graph_port, execution, mock_brain_client):
-        """A213 regression: action with non-empty changed_cells behaves exactly as before."""
+        """Regression: action with non-empty changed_cells still calls through as before this card."""
         mock_brain_client.call_tool.return_value = {"ok": True, "results": [{"rule_id": "r1", "status": "created"}]}
 
-        # Call with actual changed cells (dict with from/to color info)
         grid_diff = {
             "changed_cells": [{"from": 1, "to": 2}, {"from": 1, "to": 2}],
             "changed_count": 2,
         }
         result = graph_port.record_rule_evidence(execution, grid_diff, entities=[])
 
-        # Verify tool was called
         assert mock_brain_client.call_tool.called
         call_args = mock_brain_client.call_tool.call_args
-
         payload = call_args[0][1]
-        # Should have extracted signatures (or empty if extraction logic filters them out)
         assert "candidate_signatures" in payload
         assert isinstance(payload["candidate_signatures"], list)
 
-    def test_no_op_with_grid_diff_missing_keys(self, graph_port, execution, mock_brain_client):
-        """A213: grid_diff missing required keys is treated as no-op."""
-        mock_brain_client.call_tool.return_value = {"ok": True, "results": []}
-
-        # Call with grid_diff that has changed_cells key but it's None
-        grid_diff = {"changed_cells": None}
-        result = graph_port.record_rule_evidence(execution, grid_diff)
-
-        # Should call tool with no-op record
-        assert mock_brain_client.call_tool.called
-        payload = mock_brain_client.call_tool.call_args[0][1]
-        assert payload["candidate_signatures"] == []
-
-    def test_invalid_grid_diff_format(self, graph_port, execution, mock_brain_client):
-        """A213: invalid grid_diff format (not a Mapping) triggers no-op path."""
-        mock_brain_client.call_tool.return_value = {"ok": True, "results": []}
-
-        # Call with invalid format (not a dict)
+    def test_invalid_grid_diff_format_skips_the_call(self, graph_port, execution, mock_brain_client):
         grid_diff = None
         result = graph_port.record_rule_evidence(execution, grid_diff)
 
-        # Should treat as no-op and call tool
-        assert mock_brain_client.call_tool.called
-        call_args = mock_brain_client.call_tool.call_args
-        payload = call_args[0][1]
-        assert payload["candidate_signatures"] == []
+        assert result == {"status": "no_changes", "recorded": False}
+        assert not mock_brain_client.call_tool.called
 
 
 class TestNoOpBehaviorIntegration:
-    """Integration tests for no-op behavior across both methods."""
+    """Integration tests spanning both methods -- they deliberately diverge:
+    record_transition sends a no-op record (effective, per its class above);
+    record_rule_evidence still skips the call entirely (ineffective if sent,
+    per the class above)."""
 
-    def test_both_methods_handle_empty_changed_cells(self, graph_port, execution, mock_brain_client):
-        """A213: both record_transition and record_rule_evidence handle empty changed_cells."""
-        mock_brain_client.call_tool.return_value = {"ok": True, "results": []}
-
+    def test_transition_calls_while_rule_evidence_skips(self, graph_port, execution, mock_brain_client):
+        mock_brain_client.call_tool.return_value = {"ok": True, "transition_id": "t1"}
         grid_diff = {"changed_cells": []}
 
-        # Both methods should call the tool
         result_transition = graph_port.record_transition(execution, grid_diff)
+        assert mock_brain_client.call_tool.call_count == 1
+
+        mock_brain_client.reset_mock()
         result_rule = graph_port.record_rule_evidence(execution, grid_diff)
+        assert mock_brain_client.call_tool.call_count == 0
+        assert result_rule == {"status": "no_changes", "recorded": False}
 
-        # Both should have called the tool
-        assert mock_brain_client.call_tool.call_count >= 2
-
-    def test_no_op_records_have_required_fields(self, graph_port, execution, mock_brain_client):
-        """A213: no-op records include all required fields for server processing."""
+    def test_no_op_transition_record_has_required_fields(self, graph_port, execution, mock_brain_client):
         mock_brain_client.call_tool.return_value = {"ok": True}
-
         grid_diff = {"changed_cells": []}
 
-        # Test record_transition no-op
-        mock_brain_client.reset_mock()
         graph_port.record_transition(execution, grid_diff)
         assert mock_brain_client.call_tool.called
-        call_args = mock_brain_client.call_tool.call_args
-        payload = call_args[0][1]
+        payload = mock_brain_client.call_tool.call_args[0][1]
         assert "task_id" in payload
         assert "step" in payload
         assert "action_id" in payload
         assert "changed_count" in payload
         assert "color_transitions" in payload
-
-        # Test record_rule_evidence no-op
-        mock_brain_client.reset_mock()
-        graph_port.record_rule_evidence(execution, grid_diff)
-        assert mock_brain_client.call_tool.called
-        call_args = mock_brain_client.call_tool.call_args
-        payload = call_args[0][1]
-        assert "task_id" in payload
-        assert "step" in payload
-        assert "action_id" in payload
-        assert "candidate_signatures" in payload
