@@ -320,6 +320,11 @@ class ArcV2Telemetry:
             )
         if perception is not None:
             snapshot["grid_hash"] = perception.grid_hash
+            # A219: entity-level effect-type classification (translation/
+            # growth/shrink/appearance/disappearance/unchanged), computed in
+            # perceive.py and carried here read-only -- not consumed by any
+            # scoring/graph-write path in this card, see backlog/A219.md.
+            snapshot["entity_effects"] = perception.metadata.get("entity_effects", []) if isinstance(perception.metadata, Mapping) else []
         return snapshot
 
     def _compute_compliance_violation_count(self, evaluation: EvaluationResult | None) -> int:

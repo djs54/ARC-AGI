@@ -9,6 +9,7 @@ from collections import deque
 from typing import Any, Mapping, Sequence
 
 from .ports import GraphQueryPort
+from .rule_extraction import classify_effect_type
 from .types import PerceivedEntity, PerceptionSnapshot, PhaseResult, WorkflowPhase, WorkflowState
 
 
@@ -29,7 +30,17 @@ class PerceiveAgent:
         grid_hash = self._hash_grid(normalized_grid)
         grid_shape = self._grid_shape(normalized_grid)
         raw_entities = self._extract_entities(normalized_grid)
+        previous_entities = state.previous_entities or ()
         entities = self._assign_correspondence(state, raw_entities)
+        # A219: disappearance detection and per-entity effect-type
+        # classification, computed here (not in `_assign_correspondence`
+        # itself) while both the old `previous_entities` and the new
+        # `entities` are both in hand -- see `_find_disappeared_entities`
+        # and `_compute_entity_effects` docstrings for why this is a
+        # sibling computation rather than a change to
+        # `_assign_correspondence`'s own return contract.
+        disappeared_entities = self._find_disappeared_entities(previous_entities, entities)
+        entity_effects = self._compute_entity_effects(previous_entities, entities, disappeared_entities)
         grid_text = self._encode_grid_text(normalized_grid)
         grid_diff = self._diff_grids(state.previous_grid, normalized_grid)
 
@@ -59,6 +70,11 @@ class PerceiveAgent:
                 "grid_source": self._grid_source_key(normalized_observation),
                 "grid_text": grid_text,
                 "grid_diff": grid_diff,
+                # A219: telemetry-only entity-level effect classification
+                # (translation/growth/shrink/appearance/disappearance/
+                # unchanged) -- not consumed by scoring or graph writes in
+                # this card, see backlog/A219.md.
+                "entity_effects": entity_effects,
             },
         )
 
@@ -109,6 +125,74 @@ class PerceiveAgent:
             new_attributes["entity_ref"] = entity_ref
             updated.append(PerceivedEntity(kind=entity.kind, value=entity.value, attributes=new_attributes))
         return tuple(updated)
+
+    @staticmethod
+    def _find_disappeared_entities(
+        previous: tuple[PerceivedEntity, ...],
+        current: tuple[PerceivedEntity, ...],
+    ) -> tuple[PerceivedEntity, ...]:
+        """A219: which of the *previous* frame's entities went unclaimed this
+        frame -- not computed anywhere before this card (A216 Part 2's gap:
+        "there's no explicit 'this entity went unclaimed' pass").
+
+        Added as a sibling that post-hoc diffs `entity_ref` sets, rather than
+        changing `_assign_correspondence`'s own return contract or internals:
+        `_assign_correspondence` has exactly one call site (`perceive()`,
+        directly above), so changing its signature was a viable option too,
+        but this wrapper approach is strictly lower-risk (zero chance of an
+        accidental behavior change to the existing greedy-matching logic,
+        which several other tests pin byte-for-byte) and is just as correct.
+        It relies on an invariant `_assign_correspondence` already guarantees:
+        `entity_ref` values are unique both within one frame's entities and
+        across frames (each previous entity is claimed by at most one current
+        entity via its internal `claimed` set, and freshly-minted refs come
+        from a monotonic `state.next_entity_ref` counter that never repeats
+        an in-use value) -- so a previous entity is "unclaimed" this frame
+        iff its `entity_ref` does not appear among the current frame's
+        `entity_ref` values.
+        """
+        current_refs = {entity.attributes.get("entity_ref") for entity in current}
+        return tuple(entity for entity in previous if entity.attributes.get("entity_ref") not in current_refs)
+
+    @staticmethod
+    def _compute_entity_effects(
+        previous: tuple[PerceivedEntity, ...],
+        current: tuple[PerceivedEntity, ...],
+        disappeared: tuple[PerceivedEntity, ...],
+    ) -> list[dict[str, Any]]:
+        """A219: classify every entity touched this frame -- matched/new
+        entities in `current`, plus `disappeared` entities from
+        `_find_disappeared_entities` -- via `classify_effect_type()`, and
+        return a plain-dict list suitable for telemetry (see
+        `telemetry.py::_step_snapshot`, which mirrors this into the step
+        trace). Read-only: nothing here is consumed by scoring or graph
+        writes in this card.
+        """
+        previous_by_ref = {entity.attributes.get("entity_ref"): entity.attributes for entity in previous}
+        effects: list[dict[str, Any]] = []
+        for entity in current:
+            entity_ref = entity.attributes.get("entity_ref")
+            previous_attributes = previous_by_ref.get(entity_ref)
+            effect_type = classify_effect_type(previous_attributes, entity.attributes)
+            effects.append(
+                {
+                    "entity_ref": entity_ref,
+                    "kind": entity.kind,
+                    "value": entity.value,
+                    "effect_type": effect_type.value,
+                }
+            )
+        for entity in disappeared:
+            effect_type = classify_effect_type(entity.attributes, None)
+            effects.append(
+                {
+                    "entity_ref": entity.attributes.get("entity_ref"),
+                    "kind": entity.kind,
+                    "value": entity.value,
+                    "effect_type": effect_type.value,
+                }
+            )
+        return effects
 
     def _ingest_snapshot(self, snapshot: PerceptionSnapshot, state: WorkflowState) -> str:
         if self._graph_query_port is None:

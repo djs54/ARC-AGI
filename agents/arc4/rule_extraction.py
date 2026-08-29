@@ -15,7 +15,9 @@ naming/generalizing/choosing among these structured candidates.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, Mapping, Sequence
 
 
@@ -180,3 +182,93 @@ def entity_preconditions(kind: str, cell_count: int | None, bbox: Sequence[int] 
         min_row, min_col, max_row, max_col = bbox
         features.append(f"shape_class:{shape_class(max_row - min_row + 1, max_col - min_col + 1)}")
     return features
+
+
+# ── A219: entity-level effect-type classification (perception layer, v1) ──
+#
+# `perceive.py::_assign_correspondence` (A175) already matches entities
+# frame-to-frame via nearest-centroid, same-color matching, assigning a
+# stable `entity_ref` -- but only ever used that for ID assignment, never
+# to classify *what* changed. This turns that already-computed before/after
+# pairing into a real (if coarse) effect-type classification, entity by
+# entity, where today the only classification anywhere in this codebase is
+# evaluator.py's crude 4-bucket `observed_kind` (no_change/grid_change/
+# level_gain/state_change) -- `grid_change` is a catch-all that can't tell
+# "one pixel flipped" from "an object translated across the board." See
+# backlog/A216.md Part 2 for the full taxonomy discussion and
+# backlog/A219.md for this v1 slice's explicit scope.
+#
+# v1 deliberately omits RECOLOR, MERGE, and SPLIT: RECOLOR would need
+# relaxing `_assign_correspondence`'s color-locked matching (a load-bearing
+# function everything depending on entity_ref stability relies on -- too
+# risky to bundle here), and MERGE/SPLIT need many-to-one/one-to-many
+# matching, a structurally bigger change to the same function. GLOBAL is
+# left to `magnitude_class` above, which already covers it. All four are
+# explicitly deferred to a future card (backlog/A219.md's Scope note).
+
+
+class EffectType(StrEnum):
+    TRANSLATION = "translation"
+    GROWTH = "growth"
+    SHRINK = "shrink"
+    APPEARANCE = "appearance"
+    DISAPPEARANCE = "disappearance"
+    UNCHANGED = "unchanged"
+
+
+def classify_effect_type(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any] | None,
+    *,
+    translation_threshold: float = 2.0,
+    size_delta_threshold: int = 1,
+) -> EffectType:
+    """Pure, deterministic entity-level effect classification (Shift-A
+    compliant, no LLM) from a matched entity's previous/current attribute
+    dicts (a `PerceivedEntity.attributes` mapping -- expects `centroid`
+    and/or `cell_count` keys when present, both optional so this degrades
+    gracefully if either is missing).
+
+    `previous`/`current` follow `_assign_correspondence`'s own correspondence:
+    `previous is None` means this `entity_ref` has no predecessor (a fresh
+    appearance this frame); `current is None` means a previous-frame entity
+    went unclaimed this frame (a disappearance -- see
+    `perceive.py::PerceiveAgent._find_disappeared_entities`, new in A219,
+    since nothing computed this before). When both are present, they're
+    assumed to be the same `entity_ref`.
+
+    `translation_threshold`/`size_delta_threshold` are unvalidated starting
+    points -- no empirical basis yet, matching this repo's established
+    "no empirical basis yet, tune with real data" convention (A217's
+    `AnnatarLimits.complex_domain_deepening_multiplier` is the most recent
+    precedent). Translation is checked before growth/shrink when an entity
+    both moved and resized in the same step -- an arbitrary but documented
+    tie-break, not derived from evidence.
+    """
+    if previous is None and current is None:
+        # Degenerate input -- neither an appearance, disappearance, nor a
+        # real correspondence. Not expected from `_assign_correspondence`'s
+        # own call sites, but treated as a no-op rather than raising.
+        return EffectType.UNCHANGED
+    if previous is None:
+        return EffectType.APPEARANCE
+    if current is None:
+        return EffectType.DISAPPEARANCE
+
+    prev_centroid = previous.get("centroid")
+    cur_centroid = current.get("centroid")
+    if prev_centroid is not None and cur_centroid is not None:
+        distance = math.dist(prev_centroid, cur_centroid)
+        if distance > translation_threshold:
+            return EffectType.TRANSLATION
+
+    prev_cell_count = previous.get("cell_count")
+    cur_cell_count = current.get("cell_count")
+    if prev_cell_count is not None and cur_cell_count is not None:
+        delta = cur_cell_count - prev_cell_count
+        if delta > size_delta_threshold:
+            return EffectType.GROWTH
+        if delta < -size_delta_threshold:
+            return EffectType.SHRINK
+
+    return EffectType.UNCHANGED
