@@ -34,6 +34,7 @@ jobs:
           tests/test_trace_durability.py
           tests/test_import_boundary.py
           tests/test_a140_cycle_policy.py
+          tests/test_a222_shift_a_static_boundary.py
 
   test-all:
     name: test-all (informational, non-blocking)
