@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
+from .annatar_state_machine import CynefinDomain, classify_domain
 from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, PlanCandidate, PlanningResult, ResolvedGoal, WorkflowPhase, WorkflowState
 
@@ -273,6 +274,15 @@ class PlanGenerator:
                 # when action_id == "ACTION6", entity_ref is present (not the fallback
                 # sentinel), and graph_port supports the query.
                 entity_neighborhood_grounded = False
+                # A220: visibility-only Cynefin domain read, reusing A217's
+                # classify_domain() against the same entity-neighborhood
+                # evidence already fetched below for entity_neighborhood_grounded.
+                # Defaults to DISORDER (the conservative "we don't know" case)
+                # for every candidate that never reaches/completes the lookup
+                # below -- mirrors entity_neighborhood_grounded's own
+                # always-present-defaults-to-False convention. Must never
+                # affect `score`.
+                cynefin_domain: CynefinDomain = CynefinDomain.DISORDER
                 entity_ref = target_info.get("entity_ref")
                 if entity_ref is not None and graph_port is not None:
                     fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
@@ -283,6 +293,12 @@ class PlanGenerator:
                             rules = neighborhood.get("rules", [])
                             live_hypotheses = [h for h in hypotheses if not h.get("falsified")]
                             live_rules = [r for r in rules if not r.get("falsified")]
+
+                            # A220: classify_domain() does its own live-filtering
+                            # internally, so pass the full (not pre-filtered)
+                            # combined list -- same convention A217's
+                            # compute_cycle_signals already established.
+                            cynefin_domain = classify_domain(hypotheses + rules)
 
                             # A208: hard-exclusion when the graph has tested this entity
                             # and found nothing that holds -- exclude the candidate
@@ -354,6 +370,7 @@ class PlanGenerator:
                             "replan_passes": state.replan_passes,
                             "mechanic_prior_source": action_id in mechanic_action_set,
                             "entity_neighborhood_grounded": entity_neighborhood_grounded,
+                            "cynefin_domain": cynefin_domain.value,
                             **target_info,
                         },
                     )
