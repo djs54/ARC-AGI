@@ -19,12 +19,13 @@ smoke-compare: ## RETIRED (A148): v1 was archived to archive/agents-arc3/; see t
 test: ## run the full pytest suite
 	$(PYTHON) -m pytest -q
 
-test-a: ## fast pre-commit subset: observability, trace durability, import boundary, cycle policy
+test-a: ## fast pre-commit subset: observability, trace durability, import boundary, cycle policy, shift-a boundary
 	$(PYTHON) -m pytest -q \
 	  tests/test_observability.py \
 	  tests/test_trace_durability.py \
 	  tests/test_import_boundary.py \
-	  tests/test_a140_cycle_policy.py
+	  tests/test_a140_cycle_policy.py \
+	  tests/test_a222_shift_a_static_boundary.py
 
 test-all: ## run full test suite baseline
 	$(PYTHON) -m pytest tests/ -q
