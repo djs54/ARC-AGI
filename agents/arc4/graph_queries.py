@@ -375,16 +375,34 @@ class ArcGraphQueryPort:
         A213: when changed_cells is empty (no-op action), still send a minimal
         record with empty color_transitions to distinguish "tried, zero effect"
         from "never attempted" (cf. fetch_rules_for_action, fetch_causal_path,
-        fetch_entity_neighborhood). Server accepts empty color_transitions."""
+        fetch_entity_neighborhood). Server accepts empty color_transitions.
+
+        A218: on that same no-op path, entity_ref used to be hardcoded None --
+        _attribute_entity's only attribution mechanism is bbox-overlap-with-
+        changed-cells, which is empty by definition when there's nothing to
+        attribute. But for a click-shaped action (ACTION6), the ARC side
+        already knows exactly which entity was targeted (plan_generator.py
+        stamps entity_ref onto the click candidate's metadata) independent of
+        whether anything visibly changed. Falling back to that known target
+        on the no-op path means a repeatedly-clicked, confirmed-inert entity
+        accumulates real (changed_count=0) Transition history keyed to its
+        own entity_ref instead of "none" -- the fact
+        fetch_entity_history(entity_ref) needs to ever report anything for
+        it. See backlog/A218.md's Outcome for the live-graph evidence this
+        closes."""
         changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
 
         if changed_cells:
             color_transitions = self._summarize_color_transitions(changed_cells)
             changed_count = int(grid_diff.get("changed_count", len(changed_cells)) or 0)
+            entity_ref = self._attribute_entity(changed_cells, entities)
         else:
             # A213: no-op action — send minimal record marking "tried, zero effect"
             color_transitions = []
             changed_count = 0
+            # A218: attribute to the action's own known target when bbox
+            # attribution has nothing to work with.
+            entity_ref = self._targeted_entity_ref(execution)
 
         payload = {
             "task_id": self.task_id,
@@ -392,7 +410,7 @@ class ArcGraphQueryPort:
             "action_id": execution.action_id,
             "changed_count": changed_count,
             "color_transitions": color_transitions,
-            "entity_ref": self._attribute_entity(changed_cells, entities) if changed_cells else None,
+            "entity_ref": entity_ref,
         }
         return self._normalize_write_result(self._call_tool("record_transition", payload), tool_key="record_transition")
 
@@ -602,6 +620,23 @@ class ArcGraphQueryPort:
                 best_count = count
                 best_ref = attributes.get("entity_ref")
         return best_ref
+
+    @staticmethod
+    def _targeted_entity_ref(execution: ExecutionResult) -> Any:
+        """A218: the entity a click-shaped candidate targeted, read straight
+        from the candidate's own metadata (plan_generator.py's ACTION6
+        click-target generation stamps `entity_ref` there) -- independent of
+        whether the click produced any visible change. Used by
+        record_transition's no-op path, where _attribute_entity's
+        bbox-overlap mechanism has nothing to attribute (no changed_cells to
+        overlap a bbox against)."""
+        candidate = execution.candidate
+        if candidate is None:
+            return None
+        metadata = candidate.metadata
+        if not isinstance(metadata, Mapping):
+            return None
+        return metadata.get("entity_ref")
 
     def record_evaluation(self, evaluation: Any) -> dict[str, Any]:
         metadata = evaluation.metadata if isinstance(getattr(evaluation, "metadata", None), Mapping) else {}

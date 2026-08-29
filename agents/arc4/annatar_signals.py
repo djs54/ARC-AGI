@@ -74,6 +74,41 @@ def compute_cycle_signals(
             except Exception:
                 degraded = True
                 domain = CynefinDomain.DISORDER
+
+            # A218: rule/hypothesis evidence (fetch_entity_neighborhood, above)
+            # stays structurally empty for an entity that's been clicked
+            # repeatedly but never produced a visible change -- record_rule_
+            # evidence's write path (A213, deliberately kept) only ever
+            # writes a Rule when changed_cells is non-empty, so such an
+            # entity reads DISORDER ("no evidence yet") forever, indistinguishable
+            # from one that's never been touched. fetch_entity_history reads a
+            # DIFFERENT graph fact -- A176's Transition nodes, which (as of
+            # A218) get entity-attributed even on a no-op action (see
+            # graph_queries.py::record_transition's _targeted_entity_ref
+            # fallback) -- so a confirmed-inert entity now has real,
+            # queryable (changed_count=0) history under its own entity_ref.
+            # Only queried when domain would otherwise be DISORDER: this is
+            # specifically the "we don't know yet" case that's ambiguous
+            # between "never tried" and "tried repeatedly, confirmed inert" --
+            # CONVERGED/COMPLEX/CHAOTIC already have real rule/hypothesis
+            # evidence and don't need this second read.
+            if domain == CynefinDomain.DISORDER:
+                fetch_history = getattr(graph_port, "fetch_entity_history", None)
+                if fetch_history is not None:
+                    try:
+                        history = fetch_history(anchor_ref)
+                        transitions = history.get("transitions", []) if isinstance(history, Mapping) else []
+                        changed_count_total = history.get("changed_count_total", 0) if isinstance(history, Mapping) else 0
+                        # A187-style repeated-not-single threshold (matches
+                        # plan_generator.py's own `falsifications >= 2`
+                        # "repeated_falsified" convention) -- one no-op
+                        # sample is barely more informative than zero;
+                        # requiring at least two guards against
+                        # over-reacting to a single unlucky/early attempt.
+                        if len(transitions) >= 2 and not changed_count_total:
+                            domain = CynefinDomain.CHAOTIC
+                    except Exception:
+                        degraded = True
         fetch_untested = getattr(graph_port, "fetch_untested_actions", None)
         if fetch_untested is not None:
             try:
