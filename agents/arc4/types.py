@@ -9,6 +9,7 @@ from typing import Any, Generic, Mapping, TypeVar
 
 class WorkflowPhase(StrEnum):
     PERCEIVE = "perceive"
+    READINESS_GATE = "readiness_gate"
     RESOLVE = "resolve"
     PLAN = "plan"
     VET = "vet"
@@ -480,6 +481,21 @@ class WorkflowState:
     # workflow.py code path that decision_for_state itself was documented,
     # in A202's own review notes, as never actually producing).
     annatar_unproductive_anchor_streak: int = 0
+    # A224: whether the Cynefin readiness gate has already reached a
+    # terminal decision (READY/PARTIAL_FALLTHROUGH) this episode. Once set,
+    # WorkflowOrchestrator.run() skips calling readiness_gate on later
+    # cycles -- the gate's own graph_port.fetch_entity_neighborhood/
+    # fetch_entity_history calls aren't free, and re-deciding "ready" every
+    # remaining cycle of a long episode would be pure waste.
+    readiness_gate_resolved: bool = False
+    # A224: the budget safety valve fired -- the readiness phase consumed
+    # its budget fraction without every entity mapped, and fell through to
+    # the normal path with a partial world-model rather than hard-blocking.
+    # Telemetered as a real, queryable fact per the plan's own acceptance
+    # criteria, not left as a silent failure.
+    readiness_gate_partial: bool = False
+    readiness_gate_entities_mapped: int | None = None
+    readiness_gate_entities_total: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -505,6 +521,10 @@ class WorkflowState:
             "annatar_anchor_hint": self.annatar_anchor_hint.to_dict() if self.annatar_anchor_hint else None,
             "annatar_degraded": self.annatar_degraded,
             "annatar_unproductive_anchor_streak": self.annatar_unproductive_anchor_streak,
+            "readiness_gate_resolved": self.readiness_gate_resolved,
+            "readiness_gate_partial": self.readiness_gate_partial,
+            "readiness_gate_entities_mapped": self.readiness_gate_entities_mapped,
+            "readiness_gate_entities_total": self.readiness_gate_entities_total,
         }
 
     @classmethod
@@ -532,6 +552,10 @@ class WorkflowState:
             annatar_anchor_hint=AnnatarOutcome.from_dict(d["annatar_anchor_hint"]) if d.get("annatar_anchor_hint") else None,
             annatar_degraded=d.get("annatar_degraded", False),
             annatar_unproductive_anchor_streak=d.get("annatar_unproductive_anchor_streak", 0),
+            readiness_gate_resolved=d.get("readiness_gate_resolved", False),
+            readiness_gate_partial=d.get("readiness_gate_partial", False),
+            readiness_gate_entities_mapped=d.get("readiness_gate_entities_mapped"),
+            readiness_gate_entities_total=d.get("readiness_gate_entities_total"),
         )
 
 

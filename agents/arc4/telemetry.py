@@ -308,6 +308,15 @@ class ArcV2Telemetry:
             # WorkflowState found in this phase call's args at all).
             "annatar_degraded": bool(getattr(state, "annatar_degraded", False)),
             "graph_informed": graph_informed,
+            # A224: the Cynefin readiness gate's own telemetry, per the
+            # plan's acceptance criteria -- a real, queryable fact rather
+            # than a silent budget-safety-valve failure. Same
+            # getattr(..., default) degrade pattern as annatar_degraded
+            # above: defaults are correct both when no readiness gate is
+            # configured at all and before the gate has run its first cycle.
+            "readiness_gate_partial": bool(getattr(state, "readiness_gate_partial", False)),
+            "readiness_gate_entities_mapped": getattr(state, "readiness_gate_entities_mapped", None),
+            "readiness_gate_entities_total": getattr(state, "readiness_gate_entities_total", None),
         }
 
         if evaluation is not None:
