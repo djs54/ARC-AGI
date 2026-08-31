@@ -1,6 +1,6 @@
 # A225 — Fix `_execution_step` Always Returning 0: Plan
 
-> Superseded 2026-08-31: this plan originally covered probe-selection diversity. That diagnosis was replaced after a real graph-guided investigation (querying `get_entity_history` live, not reading telemetry) found the actual bug is upstream and more fundamental. See `backlog/A225.md`'s Problem section for the full corrected diagnosis. This plan file is rewritten to match; the old file's name is kept so the card/plan ID pairing (`BacklogRules.md` rule 1) still holds.
+> Superseded 2026-08-31, then renamed 2026-08-31: this plan originally covered probe-selection diversity (under the filename `A-225-readiness-probe-diversity.md`). That diagnosis was replaced after a real graph-guided investigation (querying `get_entity_history` live, not reading telemetry) found the actual bug is upstream and more fundamental. The file was renamed to match its real content once the fix landed, rather than keeping a probe-diversity filename around a fix that has nothing to do with probe diversity — see `backlog/A225.md`'s Problem/Outcome sections for the full corrected diagnosis and live verification.
 
 ## Card metadata
 
