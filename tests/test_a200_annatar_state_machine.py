@@ -81,6 +81,27 @@ class TestExploringTransitions:
         signals = _signals(execution_inconclusive=True)
         assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.RETRY
 
+    def test_known_chaotic_anchor_skips_retry_goes_straight_to_exhausted(self):
+        """A221 Finding 5: a known-CHAOTIC anchor (e.g. resumed via B369's
+        thread-resume with prior confirmed-dead history) shouldn't waste a
+        RETRY cycle just because this cycle's own click also happened to be
+        inconclusive -- the graph already answered the question RETRY exists
+        to explore. Mirrors Finding 1's "no wasted cycle" reasoning, applied
+        to this second exit-to-EXHAUSTED path."""
+        signals = _signals(execution_inconclusive=True, domain=CynefinDomain.CHAOTIC)
+        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.EXHAUSTED
+
+    def test_meaningful_progress_wins_even_if_domain_reads_stale_chaotic(self):
+        """Safety property: the CHAOTIC-skips-RETRY check must never be able
+        to steal a legitimate SATISFIED outcome. In real production code
+        execution_inconclusive=True guarantees meaningful_progress=False (see
+        annatar_signals.py::compute_cycle_signals's own construction), but
+        this test constructs the "impossible" combination directly against
+        transition() in isolation to prove the ordering is safe on its own
+        terms, not just safe because of an invariant enforced elsewhere."""
+        signals = _signals(execution_inconclusive=True, domain=CynefinDomain.CHAOTIC, meaningful_progress=True)
+        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.SATISFIED
+
 
 class TestDeepeningTransitions:
     def test_confidence_threshold_crossed_goes_to_satisfied(self):
@@ -117,6 +138,30 @@ class TestRetryTransitions:
 
     def test_second_inconclusive_result_exhausts_not_retries_again(self):
         signals = _signals(execution_inconclusive=True, already_retried=True)
+        assert transition(InvestigationState.RETRY, signals) == InvestigationState.EXHAUSTED
+
+    def test_second_inconclusive_result_on_complex_domain_falls_through_to_deepening(self):
+        """A221 Finding 5: a COMPLEX anchor (genuine, live, disagreeing
+        evidence -- the domain complex_domain_deepening_multiplier exists
+        specifically to protect) shouldn't be killed by two raw inconclusive
+        clicks. Falls through to the same EXPLORING/DEEPENING patience logic
+        instead of a hard EXHAUSTED -- deepening_cycle_count=0 here confirms
+        it lands on DEEPENING, not immediately re-triggering RETRY (already_
+        retried=True blocks that) or wrongly escalating."""
+        signals = _signals(
+            execution_inconclusive=True, already_retried=True,
+            domain=CynefinDomain.COMPLEX, deepening_cycle_count=0,
+        )
+        assert transition(InvestigationState.RETRY, signals) == InvestigationState.DEEPENING
+
+    def test_second_inconclusive_result_on_non_complex_domain_still_exhausts(self):
+        """Regression: the COMPLEX carve-out is specific to COMPLEX, not a
+        general softening of RETRY's exhaustion -- DISORDER (the default,
+        no special evidence) still exhausts exactly as before."""
+        signals = _signals(
+            execution_inconclusive=True, already_retried=True,
+            domain=CynefinDomain.DISORDER,
+        )
         assert transition(InvestigationState.RETRY, signals) == InvestigationState.EXHAUSTED
 
 

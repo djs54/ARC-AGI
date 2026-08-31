@@ -141,10 +141,42 @@ def transition(
     if current_state == InvestigationState.RETRY:
         if not signals.execution_inconclusive:
             return transition(InvestigationState.EXPLORING, signals, limits)
+        # A221 Finding 5: a COMPLEX anchor (genuine, live, disagreeing
+        # evidence) shouldn't be killed by two raw inconclusive clicks --
+        # execution_inconclusive is about this single click's own outcome,
+        # a different, narrower layer than the accumulated graph evidence
+        # domain reads. Recurse into the richer EXPLORING/DEEPENING patience
+        # logic instead of a hard exit; already_retried=True (set on
+        # entering RETRY) blocks that recursive call from re-triggering
+        # RETRY itself, so this can't loop.
+        if signals.domain == CynefinDomain.COMPLEX:
+            return transition(InvestigationState.EXPLORING, signals, limits)
         return InvestigationState.EXHAUSTED
 
     if current_state in (InvestigationState.EXPLORING, InvestigationState.DEEPENING):
         if signals.execution_inconclusive and not signals.already_retried:
+            # A221 Finding 5: a known-CHAOTIC anchor (e.g. resumed via B369's
+            # thread-resume with prior confirmed-dead history) shouldn't
+            # waste a RETRY cycle just because this cycle's own click also
+            # happened to be inconclusive -- the graph already answered the
+            # question RETRY exists to explore.
+            #
+            # Must not steal a legitimate SATISFIED outcome first. Confidence
+            # is provably safe to ignore here: it's always 0.0 whenever
+            # domain==CHAOTIC (both derive from the same live-evidence
+            # filter in compute_cycle_signals), so the confidence half of
+            # SATISFIED's condition could never fire in this branch anyway.
+            # meaningful_progress is NOT provably safe the same way -- it's
+            # an independent signal from evaluator.py, not derived from graph
+            # evidence at all. In real production code
+            # execution_inconclusive=True guarantees meaningful_progress=
+            # False (compute_cycle_signals's own construction), but this
+            # function shouldn't rely on a caller-side invariant it can't see
+            # -- check it explicitly instead of assuming it.
+            if signals.meaningful_progress:
+                return InvestigationState.SATISFIED
+            if signals.domain == CynefinDomain.CHAOTIC:
+                return InvestigationState.EXHAUSTED
             return InvestigationState.RETRY
         if signals.confidence >= limits.satisfied_confidence_threshold or signals.meaningful_progress:
             return InvestigationState.SATISFIED
