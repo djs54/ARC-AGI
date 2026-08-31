@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .annatar_state_machine import (
@@ -31,33 +32,60 @@ from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, AnnatarOutcome, WorkflowState
 
 
-def classify_entity_domain(entity_ref: Any, graph_port: GraphQueryPort | None) -> CynefinDomain:
-    """A224: single-entity Cynefin classification, extracted as a shared
-    helper for the new whole-perception readiness gate (classify_all_entity_
-    domains, below) -- the same fetch_entity_neighborhood + A218's
-    fetch_entity_history-boost logic compute_cycle_signals has always had
-    inline for its one active anchor, now reusable for classifying every
-    currently-visible entity at once. Not retrofitted into compute_
-    cycle_signals's own inline copy or plan_generator.py's separate Task 2
-    copy -- both are already merged and tested; unifying all three is real
-    follow-up work, not attempted here under this task's own time
-    constraints (see A224's Outcome).
+@dataclass(slots=True)
+class EntityNeighborhoodClassification:
+    """A226: the full result of classifying one entity's graph evidence --
+    classify_entity_domain (below) exposes just `.domain` for callers that
+    only need the Cynefin classification (classify_all_entity_domains, the
+    readiness gate); compute_cycle_signals and plan_generator.py's
+    _build_candidates need the raw live hypotheses/rules too (for confidence
+    scoring and A208's hard-exclusion respectively), and previously each
+    re-implemented the whole fetch+classify sequence independently just to
+    get at them -- three copies of the same logic. One fetch_entity_
+    neighborhood + conditional one fetch_entity_history per entity, same as
+    every one of the three pre-consolidation copies -- no new query."""
+    domain: CynefinDomain
+    live_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    live_rules: list[dict[str, Any]] = field(default_factory=list)
+    had_any_record: bool = False
+    degraded: bool = False
+
+
+def classify_entity_domain_detailed(
+    entity_ref: Any, graph_port: GraphQueryPort | None
+) -> EntityNeighborhoodClassification:
+    """A226: the consolidated implementation -- classify_entity_domain,
+    compute_cycle_signals, and plan_generator.py's _build_candidates all
+    delegate here instead of each independently re-fetching and
+    re-classifying (previously three separate copies of this exact
+    sequence). See EntityNeighborhoodClassification's own docstring for why
+    the richer return shape exists.
 
     Degrades to DISORDER on a missing graph_port, an entity_ref with no
     real evidence, or any graph-client exception -- same conservative
     default as every other Cynefin read in this codebase.
     """
     domain = CynefinDomain.DISORDER
+    live_hypotheses: list[dict[str, Any]] = []
+    live_rules: list[dict[str, Any]] = []
+    had_any_record = False
+    degraded = False
+
     if graph_port is None:
-        return domain
+        return EntityNeighborhoodClassification(domain=domain)
 
     fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
     if fetch_neighborhood is not None:
         try:
             neighborhood = fetch_neighborhood(entity_ref)
-            combined_evidence = neighborhood.get("hypotheses", []) + neighborhood.get("rules", [])
-            domain = classify_domain(combined_evidence)
+            hypotheses = neighborhood.get("hypotheses", [])
+            rules = neighborhood.get("rules", [])
+            had_any_record = bool(hypotheses) or bool(rules)
+            live_hypotheses = [h for h in hypotheses if not h.get("falsified")]
+            live_rules = [r for r in rules if not r.get("falsified")]
+            domain = classify_domain(hypotheses + rules)
         except Exception:
+            degraded = True
             domain = CynefinDomain.DISORDER
 
     if domain == CynefinDomain.DISORDER:
@@ -70,9 +98,25 @@ def classify_entity_domain(entity_ref: Any, graph_port: GraphQueryPort | None) -
                 if len(transitions) >= 2 and not changed_count_total:
                     domain = CynefinDomain.CHAOTIC
             except Exception:
-                pass
+                degraded = True
 
-    return domain
+    return EntityNeighborhoodClassification(
+        domain=domain,
+        live_hypotheses=live_hypotheses,
+        live_rules=live_rules,
+        had_any_record=had_any_record,
+        degraded=degraded,
+    )
+
+
+def classify_entity_domain(entity_ref: Any, graph_port: GraphQueryPort | None) -> CynefinDomain:
+    """A224 (consolidated in A226): single-entity Cynefin classification.
+    Thin wrapper over classify_entity_domain_detailed -- kept for callers
+    that only need the domain value (classify_all_entity_domains, the
+    readiness gate). Degrades to DISORDER on a missing graph_port, an
+    entity_ref with no real evidence, or any graph-client exception -- same
+    conservative default as every other Cynefin read in this codebase."""
+    return classify_entity_domain_detailed(entity_ref, graph_port).domain
 
 
 def classify_all_entity_domains(
@@ -119,59 +163,31 @@ def compute_cycle_signals(
     # behavior on exception (confidence stays 0.0, untested_remaining stays
     # True) is unchanged; this only adds visibility on top of it.
     degraded = False
-    # A217: Cynefin domain read off the same fetch_entity_neighborhood
-    # evidence fetched below for `confidence` -- no new graph query. Stays
-    # DISORDER (the conservative "we don't actually know" default) whenever
-    # anchor_type != "entity", fetch_neighborhood is unavailable, or the
-    # graph call raises.
+    # A217: Cynefin domain, read via classify_entity_domain_detailed (A226)
+    # off the same graph evidence `confidence` below is derived from -- no
+    # new graph query. Stays DISORDER (the conservative "we don't actually
+    # know" default) whenever anchor_type != "entity", fetch_neighborhood is
+    # unavailable, or the graph call raises.
     domain = CynefinDomain.DISORDER
     if graph_port is not None:
-        fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
-        if anchor_type == "entity" and fetch_neighborhood is not None:
-            try:
-                neighborhood = fetch_neighborhood(anchor_ref)
-                combined_evidence = neighborhood.get("hypotheses", []) + neighborhood.get("rules", [])
-                live_items = [h for h in combined_evidence if not h.get("falsified")]
-                confidence = max((h.get("confidence", 0.0) for h in live_items), default=0.0)
-                domain = classify_domain(combined_evidence)
-            except Exception:
+        # A226: consolidated into classify_entity_domain_detailed -- this
+        # used to be its own independent copy of the fetch_entity_
+        # neighborhood -> classify_domain -> (if DISORDER) fetch_entity_
+        # history -> upgrade-to-CHAOTIC sequence (A217/A218 original),
+        # duplicated a second time in plan_generator.py. `confidence` is
+        # still derived the same way (max confidence across live hypotheses
+        # + live rules) -- classify_entity_domain_detailed exposes those
+        # lists precisely so this call site can compute it without
+        # re-fetching.
+        if anchor_type == "entity":
+            classification = classify_entity_domain_detailed(anchor_ref, graph_port)
+            domain = classification.domain
+            confidence = max(
+                (h.get("confidence", 0.0) for h in classification.live_hypotheses + classification.live_rules),
+                default=0.0,
+            )
+            if classification.degraded:
                 degraded = True
-                domain = CynefinDomain.DISORDER
-
-            # A218: rule/hypothesis evidence (fetch_entity_neighborhood, above)
-            # stays structurally empty for an entity that's been clicked
-            # repeatedly but never produced a visible change -- record_rule_
-            # evidence's write path (A213, deliberately kept) only ever
-            # writes a Rule when changed_cells is non-empty, so such an
-            # entity reads DISORDER ("no evidence yet") forever, indistinguishable
-            # from one that's never been touched. fetch_entity_history reads a
-            # DIFFERENT graph fact -- A176's Transition nodes, which (as of
-            # A218) get entity-attributed even on a no-op action (see
-            # graph_queries.py::record_transition's _targeted_entity_ref
-            # fallback) -- so a confirmed-inert entity now has real,
-            # queryable (changed_count=0) history under its own entity_ref.
-            # Only queried when domain would otherwise be DISORDER: this is
-            # specifically the "we don't know yet" case that's ambiguous
-            # between "never tried" and "tried repeatedly, confirmed inert" --
-            # CONVERGED/COMPLEX/CHAOTIC already have real rule/hypothesis
-            # evidence and don't need this second read.
-            if domain == CynefinDomain.DISORDER:
-                fetch_history = getattr(graph_port, "fetch_entity_history", None)
-                if fetch_history is not None:
-                    try:
-                        history = fetch_history(anchor_ref)
-                        transitions = history.get("transitions", []) if isinstance(history, Mapping) else []
-                        changed_count_total = history.get("changed_count_total", 0) if isinstance(history, Mapping) else 0
-                        # A187-style repeated-not-single threshold (matches
-                        # plan_generator.py's own `falsifications >= 2`
-                        # "repeated_falsified" convention) -- one no-op
-                        # sample is barely more informative than zero;
-                        # requiring at least two guards against
-                        # over-reacting to a single unlucky/early attempt.
-                        if len(transitions) >= 2 and not changed_count_total:
-                            domain = CynefinDomain.CHAOTIC
-                    except Exception:
-                        degraded = True
         fetch_untested = getattr(graph_port, "fetch_untested_actions", None)
         if fetch_untested is not None:
             try:

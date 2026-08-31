@@ -4,10 +4,12 @@ touching the most load-bearing file in the runtime.
 
 Covers, in order:
 1. classify_entity_domain / classify_all_entity_domains (annatar_signals.py)
-   -- new shared helpers, extracted so the whole-perception readiness check
-   doesn't duplicate A218's fetch_entity_history-boost logic a third time
-   (plan_generator.py's Task 2 addition already has its own inline copy;
-   not retrofitted here, out of scope for this task -- see A224's Outcome).
+   -- shared helpers for the whole-perception readiness check. As of A226,
+   classify_entity_domain is a thin wrapper over classify_entity_domain_
+   detailed, the single consolidated implementation compute_cycle_signals
+   and plan_generator.py's _build_candidates both also delegate to (see
+   TestClassifyEntityDomainDetailed below) -- no longer three independent
+   copies of the same fetch/classify/upgrade-to-CHAOTIC sequence.
 2. WorkflowOrchestrator routing via a NEW `readiness_gate` dependency
    (WorkflowDependencies has no graph_port of its own -- it's only ever
    captured via closures at bundle-construction time, same pattern as
@@ -33,7 +35,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agents.arc4.annatar_signals import classify_all_entity_domains, classify_entity_domain
+from agents.arc4.annatar_signals import (
+    classify_all_entity_domains,
+    classify_entity_domain,
+    classify_entity_domain_detailed,
+)
 from agents.arc4.annatar_state_machine import CynefinDomain, ReadinessStatus
 from agents.arc4.types import (
     EvaluationResult,
@@ -94,6 +100,94 @@ class TestClassifyEntityDomain:
         graph_port = MagicMock()
         graph_port.fetch_entity_neighborhood.side_effect = RuntimeError("boom")
         assert classify_entity_domain(1, graph_port) == CynefinDomain.DISORDER
+
+
+class TestClassifyEntityDomainDetailed:
+    """A226: the consolidated implementation classify_entity_domain,
+    compute_cycle_signals, and plan_generator.py's _build_candidates all now
+    delegate to -- exercises the richer return shape (live_hypotheses,
+    live_rules, had_any_record, degraded) those two consumers need but the
+    domain-only classify_entity_domain wrapper doesn't expose."""
+
+    def test_no_graph_port_returns_disorder_with_empty_lists(self):
+        result = classify_entity_domain_detailed(1, None)
+        assert result.domain == CynefinDomain.DISORDER
+        assert result.live_hypotheses == []
+        assert result.live_rules == []
+        assert result.had_any_record is False
+        assert result.degraded is False
+
+    def test_live_and_falsified_evidence_split_correctly(self):
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [{"confidence": 0.4, "falsified": True}],
+            "rules": [
+                {"confidence": 0.6, "falsified": False, "to_color": 3},
+                {"confidence": 0.5, "falsified": False, "to_color": 7},
+            ],
+        }
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.domain == CynefinDomain.COMPLEX
+        assert result.live_hypotheses == []
+        assert len(result.live_rules) == 2
+        assert result.had_any_record is True
+
+    def test_all_falsified_sets_had_any_record_true_with_no_live_evidence(self):
+        """The A208 hard-exclusion signal: had_any_record=True with empty
+        live_hypotheses/live_rules is exactly the "graph tested this and
+        found nothing that holds" case plan_generator.py excludes on."""
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [{"confidence": 0.4, "falsified": True}],
+            "rules": [],
+        }
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.had_any_record is True
+        assert result.live_hypotheses == []
+        assert result.live_rules == []
+
+    def test_no_record_at_all_leaves_had_any_record_false(self):
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.had_any_record is False
+
+    def test_confirmed_inert_via_transition_history_is_chaotic(self):
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.return_value = {
+            "transitions": [{"step": 1}, {"step": 2}],
+            "changed_count_total": 0,
+        }
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.domain == CynefinDomain.CHAOTIC
+
+    def test_neighborhood_exception_sets_degraded(self):
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.side_effect = RuntimeError("boom")
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.domain == CynefinDomain.DISORDER
+        assert result.degraded is True
+
+    def test_history_exception_sets_degraded(self):
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.side_effect = RuntimeError("boom")
+        result = classify_entity_domain_detailed(1, graph_port)
+        assert result.domain == CynefinDomain.DISORDER
+        assert result.degraded is True
+
+    def test_classify_entity_domain_wrapper_matches_detailed_domain(self):
+        """classify_entity_domain must stay a pure passthrough -- same
+        domain value as classify_entity_domain_detailed(...).domain for any
+        given graph_port/entity_ref."""
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [],
+            "rules": [{"confidence": 0.6, "falsified": False, "to_color": 3}],
+        }
+        assert classify_entity_domain(1, graph_port) == classify_entity_domain_detailed(1, graph_port).domain
 
 
 class TestClassifyAllEntityDomains:
