@@ -80,6 +80,13 @@ class Executor:
             metadata={
                 **metadata,
                 "game_context": self._compact_context(context),
+                # A225: ArcGraphQueryPort._execution_step reads this key to
+                # stamp the real cycle number onto record_transition/
+                # record_rule_evidence/record_action_effect graph writes --
+                # it was never set here, so every write silently defaulted
+                # to step 0, MERGE-overwriting each entity's prior attempt
+                # instead of accumulating history. See backlog/A225.md.
+                "step": context.get("step"),
             },
         )
         return PhaseResult(phase=WorkflowPhase.EXECUTE, payload=execution)
@@ -95,6 +102,9 @@ class Executor:
         metadata: dict[str, Any] = {
             "game_context": self._compact_context(context),
             "failure_reason": reason,
+            # A225: same treatment as _success -- keeps metadata["step"] a
+            # reliable invariant regardless of phase-result status.
+            "step": context.get("step"),
         }
         traceback_text = None
         if exception is not None:
