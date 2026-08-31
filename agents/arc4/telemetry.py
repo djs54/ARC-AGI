@@ -447,6 +447,13 @@ class ArcV2Telemetry:
             # full trace -- how many investigation anchors in a row ended
             # without ever showing meaningful_progress, as of episode end.
             "annatar_unproductive_anchor_streak": state.annatar_unproductive_anchor_streak,
+            # A227: readiness-gate fields (A224/A225) -- previously absent
+            # from this end-of-episode summary even though _step_snapshot
+            # already carried them correctly per-step.
+            "readiness_gate_resolved": state.readiness_gate_resolved,
+            "readiness_gate_partial": state.readiness_gate_partial,
+            "readiness_gate_entities_mapped": state.readiness_gate_entities_mapped,
+            "readiness_gate_entities_total": state.readiness_gate_entities_total,
         }
 
     @staticmethod
