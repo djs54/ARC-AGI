@@ -797,13 +797,29 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
     def _unproductive_advance(self, state, stall_reason="stalled"):
         """One cycle that concludes an anchor via EXHAUSTED->ADVANCE without
         ever registering meaningful_progress (grid_changed=True keeps
-        execution_inconclusive False so RETRY doesn't intercept first;
-        stall_reason folds in all_falsified=True/untested_remaining=False
-        so EXHAUSTED fires immediately for a fresh EXPLORING anchor)."""
-        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        execution_inconclusive False so RETRY doesn't intercept first).
+
+        A221 Finding 1: this used to reach EXHAUSTED via stall_reason folding
+        into all_falsified=True/untested_remaining=False -- that path was
+        removed (all_falsified was never graph-derived; see
+        annatar_state_machine.py::transition()'s updated comment). Reaching
+        EXHAUSTED now requires a graph-grounded CynefinDomain.CHAOTIC anchor
+        instead: the candidate carries an entity_ref (so anchor_type
+        resolves to "entity", the only type compute_cycle_signals computes
+        domain for) and graph_port returns all-falsified rule evidence.
+        stall_reason is still passed and still folds into all_falsified for
+        realism (matching a genuinely stalled episode) but no longer does
+        any work toward reaching EXHAUSTED itself -- CHAOTIC does that now."""
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
-        return run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason=stall_reason)
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [],
+            "rules": [{"confidence": 0.0, "falsified": True, "to_color": 5}],
+        }
+        graph_port.fetch_untested_actions.return_value = []
+        return run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port, stall_reason=stall_reason)
 
     def _productive_advance(self, state):
         """One cycle that concludes an anchor via SATISFIED->ADVANCE with
@@ -858,8 +874,15 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
         whole life, not just its final cycle."""
         state = WorkflowState(
             active_investigation_anchor={
-                "anchor_ref": "g1",
-                "anchor_type": "goal",
+                "anchor_ref": "e1",
+                # A221 Finding 1: must be "entity", not "goal" -- domain
+                # (and therefore CHAOTIC->EXHAUSTED) is only ever computed
+                # for entity-type anchors (compute_cycle_signals gates on
+                # anchor_type == "entity"). A pre-existing anchor skips the
+                # anchor-init block entirely, so this can't be fixed up by
+                # _unproductive_advance's candidate metadata -- it has to be
+                # set here directly.
+                "anchor_type": "entity",
                 "thread_id": None,
                 "state": InvestigationState.DEEPENING.value,
                 "deepening_cycle_count": 0,
@@ -874,11 +897,20 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
 
     def test_max_unproductive_anchors_kwarg_overrides_default_threshold(self):
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
-        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        # A221 Finding 1: entity_ref candidate + CHAOTIC-shaped graph_port,
+        # same reasoning as _unproductive_advance -- reaching EXHAUSTED no
+        # longer works via all_falsified/stall_reason alone.
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [],
+            "rules": [{"confidence": 0.0, "falsified": True, "to_color": 5}],
+        }
+        graph_port.fetch_untested_actions.return_value = []
 
-        outcome1 = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None, stall_reason="stalled", max_unproductive_anchors=1)
+        outcome1 = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=graph_port, stall_reason="stalled", max_unproductive_anchors=1)
 
         assert outcome1.decision == "terminate"
         assert state.annatar_unproductive_anchor_streak == 1

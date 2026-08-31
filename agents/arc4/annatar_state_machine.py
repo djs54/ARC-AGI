@@ -148,7 +148,25 @@ def transition(
             return InvestigationState.RETRY
         if signals.confidence >= limits.satisfied_confidence_threshold or signals.meaningful_progress:
             return InvestigationState.SATISFIED
-        if signals.all_falsified and not signals.untested_remaining:
+        # A221 Finding 1: signals.all_falsified (check_stall, cycle_policy.py)
+        # is NOT graph-derived -- it's 100% local WorkflowState counters, a
+        # different code path than A194's actual graph-aware fix
+        # (evaluator.py::_action_space_exhausted). It used to exit here, but
+        # could override a live COMPLEX anchor's own evidence on nothing but
+        # unrelated global attempt-fatigue -- backwards from Shift C. Removed
+        # from this decision; check_stall's signal remains the sole
+        # termination path for the legacy no-Annatar fallback in workflow.py,
+        # a separate consumer this change does not touch.
+        #
+        # CynefinDomain.CHAOTIC (classify_domain(): all rule/hypothesis
+        # evidence for this anchor falsified, or A218's confirmed-inert-via-
+        # transition-history extension) replaces it -- unlike all_falsified,
+        # this genuinely is graph-grounded. Not gated on untested_remaining:
+        # that flag is episode-wide (fetch_untested_actions, other action
+        # families), unrelated to whether THIS anchor's own evidence is dead;
+        # EXHAUSTED here is anchor-scoped (decision_for_state -> ADVANCE,
+        # pick a fresh anchor next cycle), not an episode-wide claim.
+        if signals.domain == CynefinDomain.CHAOTIC:
             return InvestigationState.EXHAUSTED
         # A217: COMPLEX-domain anchors (live evidence genuinely disagrees)
         # get scaled-up patience before escalating out of DEEPENING.

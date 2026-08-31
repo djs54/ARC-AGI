@@ -6,6 +6,7 @@ import pytest
 
 from agents.arc4.annatar_state_machine import (
     CycleSignals,
+    CynefinDomain,
     InvestigationState,
     AnnatarDecision,
     AnnatarLimits,
@@ -43,13 +44,38 @@ class TestExploringTransitions:
         signals = _signals(confidence=0.0, meaningful_progress=True)
         assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.SATISFIED
 
-    def test_immediately_falsified_no_alternatives_goes_to_exhausted(self):
+    def test_all_falsified_alone_no_longer_exhausts(self):
+        """A221 Finding 1: CycleSignals.all_falsified (check_stall, 100% local
+        WorkflowState counters -- not graph-derived, see cycle_policy.py) no
+        longer triggers EXHAUSTED on its own. Only a graph-grounded signal
+        (CynefinDomain.CHAOTIC, see below) or the existing deepening_cycle_count
+        ceiling may exit EXPLORING/DEEPENING now."""
         signals = _signals(all_falsified=True, untested_remaining=False)
-        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.EXHAUSTED
+        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.DEEPENING
 
     def test_falsified_but_untested_remain_does_not_exhaust(self):
         signals = _signals(all_falsified=True, untested_remaining=True)
         assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.DEEPENING
+
+    def test_chaotic_domain_goes_to_exhausted_from_exploring(self):
+        """A221 Finding 1: classify_domain()'s CHAOTIC branch (all rule/
+        hypothesis evidence for this anchor falsified, or A218's confirmed-
+        inert-via-transition-history extension) IS graph-grounded -- unlike
+        all_falsified, this is a legitimate "nothing left for this anchor"
+        signal. Applies from EXPLORING too (not just DEEPENING): B369's
+        thread-resume means an anchor can reopen already knowing its own
+        history, no wasted cycle needed before exiting on it."""
+        signals = _signals(domain=CynefinDomain.CHAOTIC)
+        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.EXHAUSTED
+
+    def test_chaotic_domain_overrides_untested_remaining(self):
+        """Unlike the old all_falsified check (gated on `not untested_remaining`),
+        CHAOTIC is anchor-specific: other action families being untested
+        elsewhere doesn't make THIS anchor's confirmed-dead evidence any less
+        dead. decision_for_state(EXHAUSTED) -> ADVANCE picks a fresh anchor
+        next cycle, where untested_remaining's information is used instead."""
+        signals = _signals(domain=CynefinDomain.CHAOTIC, untested_remaining=True)
+        assert transition(InvestigationState.EXPLORING, signals) == InvestigationState.EXHAUSTED
 
     def test_inconclusive_execution_goes_to_retry(self):
         signals = _signals(execution_inconclusive=True)
@@ -61,8 +87,13 @@ class TestDeepeningTransitions:
         signals = _signals(confidence=0.8)
         assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.SATISFIED
 
-    def test_all_falsified_no_untested_goes_to_exhausted(self):
+    def test_all_falsified_alone_no_longer_exhausts(self):
+        """A221 Finding 1: see the EXPLORING-side test of the same name."""
         signals = _signals(all_falsified=True, untested_remaining=False)
+        assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.DEEPENING
+
+    def test_chaotic_domain_goes_to_exhausted_from_deepening(self):
+        signals = _signals(domain=CynefinDomain.CHAOTIC, deepening_cycle_count=1)
         assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.EXHAUSTED
 
     def test_still_ambiguous_below_llm_threshold_stays_deepening(self):

@@ -44,16 +44,13 @@ Graph fit:
   inference are less important than bounded traversal, causal edge metadata,
   contradiction tracking, and fast operational summaries.
 
-### Graph-Engineering Principles (Shift A/B/C)
+### Graph-Engineering Principles
 
-Adopted 2026-08-23 from a graph-engineering review (a real-world case study of a
-multi-agent commercial-analytics system that failed under distributed judgment
-and was rebuilt around a graph control plane). These three shifts are the
-doctrine the rest of this section's schema, compiler loop, and Decision
+These are the core principles of the architecture. The rest of this section's schema, compiler loop, and Decision
 Ownership table exist to implement — treat them as the standard to evaluate
 any future agent-architecture change against, not just historical context.
 
-**Shift A — separate deterministic pre-processing from agentic work.**
+**1 — separate deterministic pre-processing from agentic work.**
 Signal detection, threshold monitoring, anomaly identification, and
 prioritization are handled by a standard deterministic pipeline before any
 LLM is invoked. Signals are pushed to a queue; the agent wakes up to
@@ -64,7 +61,7 @@ only when a deterministic gate (ambiguity, low confidence, sustained
 no-progress) decides escalation is warranted. A196/A197 (below) made this
 measurable instead of aspirational.
 
-**Shift B — consolidate reasoning into a single core agent.** Eliminate
+**2 — consolidate reasoning into a single core agent.** Eliminate
 distributed judgment across autonomous peers. A single primary agent owns
 end-to-end reasoning and decision logic; short-lived sub-agents are spawned
 only for isolated, bounded data-gathering tasks and return raw results, never
@@ -87,8 +84,8 @@ substrate of that continuity per this document's own mission statement, but
 today it is queried reactively, per-candidate, never consulted as "here's the
 whole episode so far, what's the strategy."
 
-**Shift C — the knowledge graph as a control plane, not just RAG.** Domain
-entities, relationships, and causal hierarchies are mapped into a structured
+**3 — the knowledge graph as a control plane** 
+Domain entities, relationships, and causal hierarchies are mapped into a structured
 graph that is not a passive retrieval database — it functions as the agent's
 control plane and search graph. Every graph edge represents an explicit
 testable hypothesis. The graph bounds the permissible paths the agent can
@@ -99,7 +96,7 @@ A191/A192 (candidate exclusion at construction, entity-neighborhood seeding)
 for concrete cases of moving from "graph scores an option" to "graph excludes
 or admits an option."
 
-#### The Graph-Guided Investigation Loop
+**4 — the Graph-Guided Investigation Loop**
 
 1. **Anchor on Entity** — the agent begins at the entity/object of interest
    (in this codebase: A175's stable, cross-frame `entity_ref`).
