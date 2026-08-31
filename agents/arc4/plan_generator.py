@@ -45,6 +45,20 @@ class PlanGeneratorLimits:
     # rule is stronger evidence than a still-under-test hypothesis -- same
     # starting default for now, no empirical basis yet for a different ratio.
     entity_rule_weight: float = 0.2
+    # A224: cynefin_domain (A220) actually driving scoring, closing the gap
+    # A220 shipped visibility-only. COMPLEX (live evidence disagrees) is
+    # worth more probing -- mirrors A217's own domain-aware DEEPENING-
+    # patience reasoning, applied to candidate scoring instead. CHAOTIC
+    # (confirmed dead, either via all-falsified rule/hypothesis evidence or
+    # A218's repeated-no-op-transition extension) gets a penalty, extending
+    # A208's hard-exclusion into a soft signal for the transition-history
+    # CHAOTIC case specifically -- the rule/hypothesis CHAOTIC case is
+    # already hard-excluded by A208 before reaching this code (A221
+    # Finding 3), so this penalty is only reachable via the transition-
+    # history path. Starting-point magnitudes, no empirical basis yet --
+    # same honest-gap treatment as every other new threshold this session.
+    cynefin_complex_bonus: float = 0.15
+    cynefin_chaotic_penalty: float = 0.15
     replan_feedback_bonus: float = 0.3
     llm_low_score_threshold: float = 0.4
     llm_patience_steps: int = 2
@@ -274,14 +288,16 @@ class PlanGenerator:
                 # when action_id == "ACTION6", entity_ref is present (not the fallback
                 # sentinel), and graph_port supports the query.
                 entity_neighborhood_grounded = False
-                # A220: visibility-only Cynefin domain read, reusing A217's
+                # A220/A224: Cynefin domain read, reusing A217's
                 # classify_domain() against the same entity-neighborhood
                 # evidence already fetched below for entity_neighborhood_grounded.
                 # Defaults to DISORDER (the conservative "we don't know" case)
                 # for every candidate that never reaches/completes the lookup
                 # below -- mirrors entity_neighborhood_grounded's own
-                # always-present-defaults-to-False convention. Must never
-                # affect `score`.
+                # always-present-defaults-to-False convention. A224: now
+                # actually affects `score` (see cynefin_complex_bonus/
+                # cynefin_chaotic_penalty above) -- A220's own "must never
+                # affect score" constraint is deliberately superseded here.
                 cynefin_domain: CynefinDomain = CynefinDomain.DISORDER
                 entity_ref = target_info.get("entity_ref")
                 if entity_ref is not None and graph_port is not None:
@@ -326,6 +342,29 @@ class PlanGenerator:
                             if live_rules:
                                 score += max(r.get("confidence", 0.0) for r in live_rules) * self._limits.entity_rule_weight
                                 entity_neighborhood_grounded = True
+
+                            # A224: A218's fetch_entity_history extension,
+                            # mirrored here (annatar_signals.py had it,
+                            # plan_generator.py didn't) -- without this, the
+                            # rule/hypothesis-CHAOTIC case is already
+                            # hard-excluded by A208 just above, so
+                            # cynefin_chaotic_penalty would be unreachable
+                            # dead code. Only queried when domain would
+                            # otherwise be DISORDER, same bound as A218's
+                            # original.
+                            if cynefin_domain == CynefinDomain.DISORDER:
+                                fetch_history = getattr(graph_port, "fetch_entity_history", None)
+                                if fetch_history is not None:
+                                    history = fetch_history(entity_ref)
+                                    transitions = history.get("transitions", []) if isinstance(history, Mapping) else []
+                                    changed_count_total = history.get("changed_count_total", 0) if isinstance(history, Mapping) else 0
+                                    if len(transitions) >= 2 and not changed_count_total:
+                                        cynefin_domain = CynefinDomain.CHAOTIC
+
+                            if cynefin_domain == CynefinDomain.COMPLEX:
+                                score += self._limits.cynefin_complex_bonus
+                            elif cynefin_domain == CynefinDomain.CHAOTIC:
+                                score -= self._limits.cynefin_chaotic_penalty
                         except Exception:
                             pass
 
