@@ -31,6 +31,69 @@ from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import EvaluationResult, ExecutionResult, PerceptionSnapshot, AnnatarOutcome, WorkflowState
 
 
+def classify_entity_domain(entity_ref: Any, graph_port: GraphQueryPort | None) -> CynefinDomain:
+    """A224: single-entity Cynefin classification, extracted as a shared
+    helper for the new whole-perception readiness gate (classify_all_entity_
+    domains, below) -- the same fetch_entity_neighborhood + A218's
+    fetch_entity_history-boost logic compute_cycle_signals has always had
+    inline for its one active anchor, now reusable for classifying every
+    currently-visible entity at once. Not retrofitted into compute_
+    cycle_signals's own inline copy or plan_generator.py's separate Task 2
+    copy -- both are already merged and tested; unifying all three is real
+    follow-up work, not attempted here under this task's own time
+    constraints (see A224's Outcome).
+
+    Degrades to DISORDER on a missing graph_port, an entity_ref with no
+    real evidence, or any graph-client exception -- same conservative
+    default as every other Cynefin read in this codebase.
+    """
+    domain = CynefinDomain.DISORDER
+    if graph_port is None:
+        return domain
+
+    fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
+    if fetch_neighborhood is not None:
+        try:
+            neighborhood = fetch_neighborhood(entity_ref)
+            combined_evidence = neighborhood.get("hypotheses", []) + neighborhood.get("rules", [])
+            domain = classify_domain(combined_evidence)
+        except Exception:
+            domain = CynefinDomain.DISORDER
+
+    if domain == CynefinDomain.DISORDER:
+        fetch_history = getattr(graph_port, "fetch_entity_history", None)
+        if fetch_history is not None:
+            try:
+                history = fetch_history(entity_ref)
+                transitions = history.get("transitions", []) if isinstance(history, Mapping) else []
+                changed_count_total = history.get("changed_count_total", 0) if isinstance(history, Mapping) else 0
+                if len(transitions) >= 2 and not changed_count_total:
+                    domain = CynefinDomain.CHAOTIC
+            except Exception:
+                pass
+
+    return domain
+
+
+def classify_all_entity_domains(
+    perception: Any,
+    graph_port: GraphQueryPort | None,
+) -> dict[Any, CynefinDomain]:
+    """A224: the readiness gate's own data source -- classify_entity_domain()
+    for every entity `perception.entities` currently has an entity_ref for
+    (A175's stable, cross-frame correspondence id). Entities without a real
+    entity_ref (should not happen in practice post-A175, but not assumed)
+    are skipped, not defaulted -- the caller's readiness_status() only cares
+    about entities it can actually re-probe."""
+    domains: dict[Any, CynefinDomain] = {}
+    for entity in getattr(perception, "entities", ()) or ():
+        entity_ref = (getattr(entity, "attributes", None) or {}).get("entity_ref")
+        if entity_ref is None:
+            continue
+        domains[entity_ref] = classify_entity_domain(entity_ref, graph_port)
+    return domains
+
+
 def compute_cycle_signals(
     state: WorkflowState,
     perception: PerceptionSnapshot,
@@ -418,4 +481,10 @@ def run_annatar_cycle(
     )
 
 
-__all__ = ["compute_cycle_signals", "resolve_llm_vote", "run_annatar_cycle"]
+__all__ = [
+    "compute_cycle_signals",
+    "resolve_llm_vote",
+    "run_annatar_cycle",
+    "classify_entity_domain",
+    "classify_all_entity_domains",
+]

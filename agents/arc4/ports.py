@@ -152,3 +152,13 @@ class WorkflowDependencies:
     evaluate: EvaluatePhase
     annatar: AnnatarPhase | None = None  # None means "no Annatar, run exactly as today"
     on_crash_cleanup: callable | None = None  # A211: best-effort thread closure on crash (no-op if None)
+    # A224: the Cynefin readiness gate, called right after perceive, before
+    # resolve. None means "no readiness gate, run exactly as today" -- same
+    # backward-compat convention `annatar` already established.
+    # WorkflowOrchestrator itself holds no graph_port (by design, see
+    # wrap_execute_with_write_ahead's own docstring) -- this callable is a
+    # closure over graph_port captured at bundle-construction time, the same
+    # pattern resolve/plan/execute already use. Takes (state, perception),
+    # returns PhaseResult with payload {"status": ReadinessStatus,
+    # "entity_domains": dict, "entities_mapped": int, "entities_total": int}.
+    readiness_gate: callable | None = None

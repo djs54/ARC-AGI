@@ -16,7 +16,8 @@ from agents.arc4.perceive import PerceiveAgent
 from agents.arc4.plan_generator import PlanGenerator, PlanGeneratorLimits
 from agents.arc4.plan_vetter import PlanVetter
 from agents.arc4.ports import WorkflowDependencies
-from agents.arc4.annatar_signals import run_annatar_cycle
+from agents.arc4.annatar_signals import classify_all_entity_domains, run_annatar_cycle
+from agents.arc4.annatar_state_machine import CynefinDomain, ReadinessStatus, readiness_status
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import PhaseResult, PhaseStatus, WorkflowPhase
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator, wrap_execute_with_write_ahead
@@ -204,6 +205,34 @@ def build_arc_v2_bundle(
 
     execute = telemetry.wrap_phase("execute", _execute_phase)
     evaluate = telemetry.wrap_phase("evaluate", Evaluator(graph_query_port=graph_port).evaluate)
+
+    # A224: the Cynefin readiness gate, called right after perceive, before
+    # resolve. Reuses classify_domain() (via annatar_signals'
+    # classify_all_entity_domains) -- no new classification mechanism --
+    # and plan_agent's own _select_readiness_probe for the "not ready"
+    # probe path, so the gate doesn't duplicate plan_generator's salience
+    # ordering. Lives in Annatar's own module home
+    # (annatar_state_machine.readiness_status), not a new rival component,
+    # per A224's explicit "no rival gate" constraint.
+    def _readiness_gate(state, perception):
+        entity_domains = classify_all_entity_domains(perception, graph_port)
+        status = readiness_status(entity_domains, step_index=state.step_index, max_cycles=max_cycles)
+        probe_candidate = None
+        if status == ReadinessStatus.NOT_READY:
+            probe_candidate = plan_agent._select_readiness_probe(perception, entity_domains)
+        return PhaseResult(
+            phase=WorkflowPhase.READINESS_GATE,
+            status=PhaseStatus.OK,
+            payload={
+                "status": status,
+                "entity_domains": entity_domains,
+                "entities_mapped": sum(1 for d in entity_domains.values() if d != CynefinDomain.DISORDER),
+                "entities_total": len(entity_domains),
+                "probe_candidate": probe_candidate,
+            },
+        )
+
+    readiness_gate = telemetry.wrap_phase("readiness_gate", _readiness_gate)
     # A202: annatar is always-on once wired -- mirrors how every other phase
     # closure above already captures graph_port/llm_port at bundle-build
     # time rather than the orchestrator holding its own reference, so
@@ -238,6 +267,7 @@ def build_arc_v2_bundle(
         evaluate=evaluate,
         annatar=annatar,
         on_crash_cleanup=_on_crash_cleanup,
+        readiness_gate=readiness_gate,
     )
     orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=max_cycles))
     return ArcV2Bundle(graph_port=graph_port, telemetry=telemetry, dependencies=dependencies, orchestrator=orchestrator, llm_port=llm_port)

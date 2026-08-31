@@ -6,14 +6,17 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .annatar_state_machine import ReadinessStatus
 from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, stall_threshold, termination_from_evaluation
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
     ExecutionResult,
+    GoalHypothesis,
     PhaseResult,
     PhaseStatus,
     ResolvedGoal,
+    VetDecision,
     WorkflowDecision,
     WorkflowPhase,
     WorkflowRunResult,
@@ -115,6 +118,86 @@ class WorkflowOrchestrator:
                 state.previous_grid_hash = perception_payload.grid_hash
                 state.loop_history.append(perception_payload.grid_hash)
                 state.loop_history_pointer = len(state.loop_history) - 1
+
+                if self._dependencies.readiness_gate is not None and not state.readiness_gate_resolved:
+                    readiness_result = self._invoke_phase(
+                        "readiness_gate", self._dependencies.readiness_gate, state, perception_payload
+                    )
+                    phase_results.append(readiness_result)
+                    readiness_payload = self._require_payload(readiness_result, WorkflowPhase.READINESS_GATE)
+                    readiness_status = readiness_payload.get("status")
+                    state.readiness_gate_entities_mapped = readiness_payload.get("entities_mapped")
+                    state.readiness_gate_entities_total = readiness_payload.get("entities_total")
+                    state.readiness_gate_partial = readiness_status == ReadinessStatus.PARTIAL_FALLTHROUGH
+
+                    probe_candidate = (
+                        readiness_payload.get("probe_candidate")
+                        if readiness_status == ReadinessStatus.NOT_READY
+                        else None
+                    )
+                    if probe_candidate is not None:
+                        # A224 Task 5: the dedicated, deterministic probe path
+                        # -- skips resolve/plan/vet entirely (no LLM
+                        # escalation, no RETRY/deepening-bias machinery,
+                        # which is tuned for an already-anchored
+                        # investigation and would prematurely abandon
+                        # anchors during broad initial mapping). A synthetic
+                        # goal/vet pair wraps the probe candidate so it
+                        # reaches execute/evaluate through their existing,
+                        # unmodified signatures -- confirmed by direct read
+                        # that neither callable's real implementation
+                        # branches on `goal` beyond a metadata `goal_id`
+                        # field (evaluator.py) or not at all (bundle.py's
+                        # execute wrapper).
+                        probe_goal = ResolvedGoal(
+                            selected=GoalHypothesis(
+                                goal_id="readiness_probe",
+                                description="Cynefin readiness probe",
+                                confidence=0.0,
+                            ),
+                        )
+                        state.active_goal = probe_goal
+                        probe_vet = VetDecision(approved=True, candidate=probe_candidate)
+
+                        execution = self._invoke_phase(
+                            "execute", self._dependencies.execute, state, perception_payload, probe_goal, probe_vet
+                        )
+                        phase_results.append(execution)
+                        execution_payload = self._require_payload(execution, WorkflowPhase.EXECUTE)
+
+                        evaluation = self._invoke_phase(
+                            "evaluate",
+                            self._dependencies.evaluate,
+                            state,
+                            perception_payload,
+                            probe_goal,
+                            execution_payload,
+                        )
+                        phase_results.append(evaluation)
+                        evaluation_payload = self._require_payload(evaluation, WorkflowPhase.EVALUATE)
+
+                        self._record_execution_attempt(state, execution_payload)
+                        self._record_evaluation_state(state, execution_payload, evaluation_payload)
+                        state.step_index += 1
+
+                        termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
+                        if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
+                            return self._finish(
+                                state,
+                                WorkflowStatus.TERMINATED,
+                                evaluation_payload.reason or "terminated",
+                                phase_results,
+                            )
+
+                        current_observation = execution_payload.observation
+                        continue
+
+                    # NOT_READY with nothing left to probe this cycle, or
+                    # READY/PARTIAL_FALLTHROUGH: stop gating and proceed
+                    # through the normal path from here on. Re-invoking the
+                    # gate (and its graph_port calls) every remaining cycle
+                    # would just repeat the same check for no benefit.
+                    state.readiness_gate_resolved = True
 
                 resolved_goal = self._invoke_phase("resolve", self._dependencies.resolve, state, perception_payload)
                 phase_results.append(resolved_goal)
