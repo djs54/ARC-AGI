@@ -85,7 +85,7 @@ today it is queried reactively, per-candidate, never consulted as "here's the
 whole episode so far, what's the strategy."
 
 **3 — the knowledge graph as a control plane** 
-Domainentities, relationships, and causal hierarchies are mapped into a structured
+Domain entities, relationships, and causal hierarchies are mapped into a structured
 graph that is not a passive retrieval database — it functions as the agent's
 control plane and search graph. Every graph edge represents an explicit
 testable hypothesis. The graph bounds the permissible paths the agent can

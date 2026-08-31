@@ -125,17 +125,21 @@ class TestDomainAwareDeepeningPatience:
         )
         assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.AWAITING_LLM
 
-    def test_chaotic_and_disorder_domains_unchanged_from_default(self):
-        """Regression: only COMPLEX gets extra patience -- CHAOTIC and
-        DISORDER must escalate at exactly the same cycle count as before
-        this card (the flat default, 3)."""
-        for domain in (CynefinDomain.CHAOTIC, CynefinDomain.DISORDER):
-            signals = CycleSignals(
-                meaningful_progress=False, confidence=0.3, untested_remaining=True,
-                all_falsified=False, execution_inconclusive=False,
-                deepening_cycle_count=3, already_retried=False, domain=domain,
-            )
-            assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.AWAITING_LLM
+    def test_disorder_domain_unchanged_from_default(self):
+        """Regression: only COMPLEX gets extra patience -- DISORDER must
+        escalate at exactly the same cycle count as before this card (the
+        flat default, 3). (CHAOTIC's own patience behavior changed under
+        A221 Finding 1 -- see test_a200_annatar_state_machine.py's
+        test_chaotic_domain_goes_to_exhausted_from_deepening; CHAOTIC now
+        exits to EXHAUSTED before this deepening_cycle_count check is ever
+        reached, so it no longer belongs in this "still escalates the same
+        as before" regression group.)"""
+        signals = CycleSignals(
+            meaningful_progress=False, confidence=0.3, untested_remaining=True,
+            all_falsified=False, execution_inconclusive=False,
+            deepening_cycle_count=3, already_retried=False, domain=CynefinDomain.DISORDER,
+        )
+        assert transition(InvestigationState.DEEPENING, signals) == InvestigationState.AWAITING_LLM
 
 
 class TestComputeCycleSignalsDomain:
