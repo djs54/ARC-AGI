@@ -10,7 +10,8 @@ from typing import Any, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
-from .annatar_state_machine import CynefinDomain, classify_domain
+from .annatar_signals import classify_entity_domain_detailed
+from .annatar_state_machine import CynefinDomain
 from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, PlanCandidate, PlanningResult, ResolvedGoal, WorkflowPhase, WorkflowState
 
@@ -288,12 +289,15 @@ class PlanGenerator:
                 # when action_id == "ACTION6", entity_ref is present (not the fallback
                 # sentinel), and graph_port supports the query.
                 entity_neighborhood_grounded = False
-                # A220/A224: Cynefin domain read, reusing A217's
-                # classify_domain() against the same entity-neighborhood
-                # evidence already fetched below for entity_neighborhood_grounded.
-                # Defaults to DISORDER (the conservative "we don't know" case)
-                # for every candidate that never reaches/completes the lookup
-                # below -- mirrors entity_neighborhood_grounded's own
+                # A220/A224/A226: Cynefin domain read via the consolidated
+                # classify_entity_domain_detailed (annatar_signals.py) --
+                # this used to be plan_generator.py's own independent copy
+                # of the same fetch_entity_neighborhood -> classify_domain
+                # -> (if DISORDER) fetch_entity_history -> upgrade-to-CHAOTIC
+                # sequence compute_cycle_signals also had inline. Defaults to
+                # DISORDER (the conservative "we don't know" case) for every
+                # candidate that never reaches/completes the lookup below --
+                # mirrors entity_neighborhood_grounded's own
                 # always-present-defaults-to-False convention. A224: now
                 # actually affects `score` (see cynefin_complex_bonus/
                 # cynefin_chaotic_penalty above) -- A220's own "must never
@@ -301,72 +305,39 @@ class PlanGenerator:
                 cynefin_domain: CynefinDomain = CynefinDomain.DISORDER
                 entity_ref = target_info.get("entity_ref")
                 if entity_ref is not None and graph_port is not None:
-                    fetch_neighborhood = getattr(graph_port, "fetch_entity_neighborhood", None)
-                    if fetch_neighborhood is not None:
-                        try:
-                            neighborhood = fetch_neighborhood(entity_ref)
-                            hypotheses = neighborhood.get("hypotheses", [])
-                            rules = neighborhood.get("rules", [])
-                            live_hypotheses = [h for h in hypotheses if not h.get("falsified")]
-                            live_rules = [r for r in rules if not r.get("falsified")]
+                    classification = classify_entity_domain_detailed(entity_ref, graph_port)
+                    cynefin_domain = classification.domain
 
-                            # A220: classify_domain() does its own live-filtering
-                            # internally, so pass the full (not pre-filtered)
-                            # combined list -- same convention A217's
-                            # compute_cycle_signals already established.
-                            cynefin_domain = classify_domain(hypotheses + rules)
+                    # A208: hard-exclusion when the graph has tested this entity
+                    # and found nothing that holds -- exclude the candidate
+                    # entirely, the same way A191 excludes a repeated_falsified
+                    # book_id. Requires the graph to have SOME record for this
+                    # entity (hypotheses or rules non-empty) where nothing live
+                    # remains -- an entity with no record at all (fresh,
+                    # ungrounded) is NOT excluded, since the graph hasn't said
+                    # anything, positive or negative, yet.
+                    nothing_live_remains = not classification.live_hypotheses and not classification.live_rules
+                    if classification.had_any_record and nothing_live_remains:
+                        continue
 
-                            # A208: hard-exclusion when the graph has tested this entity
-                            # and found nothing that holds -- exclude the candidate
-                            # entirely, the same way A191 excludes a repeated_falsified
-                            # book_id. Requires the graph to have SOME record for this
-                            # entity (hypotheses or rules non-empty) where nothing live
-                            # remains -- an entity with no record at all (fresh,
-                            # ungrounded) is NOT excluded, since the graph hasn't said
-                            # anything, positive or negative, yet.
-                            had_any_record = bool(hypotheses) or bool(rules)
-                            nothing_live_remains = not live_hypotheses and not live_rules
-                            if had_any_record and nothing_live_remains:
-                                continue
+                    if classification.live_hypotheses:
+                        score += max(h.get("confidence", 0.0) for h in classification.live_hypotheses) * self._limits.entity_neighborhood_weight
+                        # A196: flag this so graph_grounded telemetry
+                        # can see entity-scoped grounding, not just
+                        # action-family-level graph_evidence.
+                        entity_neighborhood_grounded = True
+                    # B359 follow-up: entity-scoped confirmed Rule
+                    # evidence (ENTITY_RULE), additive and separate
+                    # from the hypothesis boost above -- both can
+                    # contribute if both exist for this entity.
+                    if classification.live_rules:
+                        score += max(r.get("confidence", 0.0) for r in classification.live_rules) * self._limits.entity_rule_weight
+                        entity_neighborhood_grounded = True
 
-                            if live_hypotheses:
-                                score += max(h.get("confidence", 0.0) for h in live_hypotheses) * self._limits.entity_neighborhood_weight
-                                # A196: flag this so graph_grounded telemetry
-                                # can see entity-scoped grounding, not just
-                                # action-family-level graph_evidence.
-                                entity_neighborhood_grounded = True
-                            # B359 follow-up: entity-scoped confirmed Rule
-                            # evidence (ENTITY_RULE), additive and separate
-                            # from the hypothesis boost above -- both can
-                            # contribute if both exist for this entity.
-                            if live_rules:
-                                score += max(r.get("confidence", 0.0) for r in live_rules) * self._limits.entity_rule_weight
-                                entity_neighborhood_grounded = True
-
-                            # A224: A218's fetch_entity_history extension,
-                            # mirrored here (annatar_signals.py had it,
-                            # plan_generator.py didn't) -- without this, the
-                            # rule/hypothesis-CHAOTIC case is already
-                            # hard-excluded by A208 just above, so
-                            # cynefin_chaotic_penalty would be unreachable
-                            # dead code. Only queried when domain would
-                            # otherwise be DISORDER, same bound as A218's
-                            # original.
-                            if cynefin_domain == CynefinDomain.DISORDER:
-                                fetch_history = getattr(graph_port, "fetch_entity_history", None)
-                                if fetch_history is not None:
-                                    history = fetch_history(entity_ref)
-                                    transitions = history.get("transitions", []) if isinstance(history, Mapping) else []
-                                    changed_count_total = history.get("changed_count_total", 0) if isinstance(history, Mapping) else 0
-                                    if len(transitions) >= 2 and not changed_count_total:
-                                        cynefin_domain = CynefinDomain.CHAOTIC
-
-                            if cynefin_domain == CynefinDomain.COMPLEX:
-                                score += self._limits.cynefin_complex_bonus
-                            elif cynefin_domain == CynefinDomain.CHAOTIC:
-                                score -= self._limits.cynefin_chaotic_penalty
-                        except Exception:
-                            pass
+                    if cynefin_domain == CynefinDomain.COMPLEX:
+                        score += self._limits.cynefin_complex_bonus
+                    elif cynefin_domain == CynefinDomain.CHAOTIC:
+                        score -= self._limits.cynefin_chaotic_penalty
 
                 if state.latest_veto_alternative is not None and state.replan_passes == 1 and action_id == state.latest_veto_alternative.action_id:
                     score += self._limits.replan_feedback_bonus
