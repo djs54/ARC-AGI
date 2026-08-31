@@ -119,28 +119,33 @@ def _best_click_candidate(neighborhood: dict):
 
 
 class TestScoreRegressionUnchanged:
-    """Regression guard (plan Step 2): candidate `score` must be byte-for-byte
+    """Regression guard (plan Step 2): candidate `score` was byte-for-byte
     identical to the pre-A220 baseline for both a COMPLEX-shaped and a
-    CONVERGED-shaped entity-neighborhood fixture. These exact float values
-    were captured by running this test against the unmodified (pre-A220)
-    code, confirming it passed, BEFORE any `classify_domain()` wiring was
-    added to `_build_candidates`."""
+    CONVERGED-shaped entity-neighborhood fixture, for A220 itself (visibility
+    only, no scoring change -- that was this card's own explicit constraint).
 
-    def test_complex_shaped_candidate_score_unchanged(self):
+    A224 (2026-08-31) deliberately supersedes that constraint: A220 shipped
+    `cynefin_domain` visibility with nothing scoring on it, the exact "build
+    the capability, never force anything downstream to depend on it" pattern
+    found five times in this session's /arc-graph-engineering-review pass.
+    The COMPLEX case below now includes A224's `cynefin_complex_bonus`
+    (+0.15) -- see tests/test_a224_cynefin_domain_scoring.py for the full
+    scoring-bonus test coverage. CONVERGED is genuinely unaffected (no bonus
+    or penalty applies to it), so that assertion is still a real regression
+    guard, unchanged."""
+
+    def test_complex_shaped_candidate_score_now_includes_a224_domain_bonus(self):
         best = _best_click_candidate(COMPLEX_NEIGHBORHOOD)
-        # graph_positive_score (0.3, from fetch_action_evidence confidence)
-        # + _voi_bonus untested fallback (0.22, no family-level rules mocked)
+        # graph_positive_score (0.3) + _voi_bonus untested fallback (0.22)
         # + entity_rule_weight (0.2) * max live entity-rule confidence (0.6)
-        # = 0.3 + 0.22 + 0.12 = 0.64. Captured by running this test against
-        # the unmodified (pre-A220) code and confirming it passed.
-        assert best.score == 0.64
+        # = 0.64 (the original A220 baseline), + A224's cynefin_complex_bonus
+        # (0.15) = 0.79.
+        assert best.score == 0.79
 
-    def test_converged_shaped_candidate_score_unchanged(self):
+    def test_converged_shaped_candidate_score_still_unchanged(self):
         best = _best_click_candidate(CONVERGED_NEIGHBORHOOD)
-        # Same arithmetic as the COMPLEX case above (both fixtures have the
-        # same max live entity-rule confidence, 0.6) -- score must be
-        # identical regardless of to_color agreement, since agreement only
-        # affects the new cynefin_domain field, never score.
+        # CONVERGED gets neither A224's bonus nor penalty -- score must
+        # still be identical to the original A220 baseline.
         assert best.score == 0.64
 
 
