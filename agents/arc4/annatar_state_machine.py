@@ -243,6 +243,60 @@ def apply_llm_vote(vote: InvestigationState, signals: CycleSignals) -> Investiga
     return InvestigationState.DEEPENING
 
 
+class ReadinessStatus(StrEnum):
+    """A224: is the graph ready for `resolve` to commit to a goal, or should
+    this cycle keep mapping entities instead? See readiness_status()."""
+
+    READY = "ready"                          # every entity has a real classification
+    NOT_READY = "not_ready"                  # at least one entity is still DISORDER, budget allows continuing
+    PARTIAL_FALLTHROUGH = "partial_fallthrough"  # at least one still DISORDER, budget exhausted -- proceed anyway
+
+
+def readiness_status(
+    entity_domains: Mapping[Any, "CynefinDomain"],
+    *,
+    step_index: int,
+    max_cycles: int,
+    budget_fraction_before_fallthrough: float = 0.5,
+) -> ReadinessStatus:
+    """A224: the Cynefin readiness gate. Pure, no I/O -- entity_domains is
+    {entity_ref: CynefinDomain}, already computed by the caller (classify_domain()
+    per entity, via already-fetched fetch_entity_neighborhood/fetch_entity_history
+    data) -- this function does not fetch anything itself, mirrors transition()'s
+    own "caller computes signals, this function only decides" discipline.
+
+    Deliberately the blunt v0, not Cynefin's actual prescription: not-ready
+    means ANY currently-visible entity is still DISORDER (no evidence at
+    all), not a smarter per-anchor "evaluate as needed" judgment -- the
+    operator's own explicit correction during design: "I don't want this
+    phase stopping at 'I've mapped 1 action pretty good so let's move on'".
+    The budget_fraction_before_fallthrough safety valve exists because full
+    mapping could otherwise consume an entire episode's step budget on a
+    busy grid -- PARTIAL_FALLTHROUGH is a real, queryable telemetry fact
+    (see Task 5), not a silent failure, generating the trace data needed to
+    eventually decide whether a smarter, continuous per-anchor version
+    (Cynefin's actual prescription) is viable once RETRY/deepening-bias/the
+    streak threshold are also revisited -- not attempted in this card.
+
+    Starting-point budget_fraction_before_fallthrough=0.5, no empirical
+    basis yet -- same honest-gap treatment as every other new threshold
+    this session.
+    """
+    if not entity_domains:
+        # Nothing to map means nothing blocks proceeding -- a blank/empty
+        # grid shouldn't stall the episode forever waiting to map zero
+        # entities.
+        return ReadinessStatus.READY
+
+    if not any(domain == CynefinDomain.DISORDER for domain in entity_domains.values()):
+        return ReadinessStatus.READY
+
+    if max_cycles <= 0 or (step_index / max_cycles) >= budget_fraction_before_fallthrough:
+        return ReadinessStatus.PARTIAL_FALLTHROUGH
+
+    return ReadinessStatus.NOT_READY
+
+
 def decision_for_state(new_state: InvestigationState) -> AnnatarDecision:
     """Map a resolved investigation-thread state to what the orchestrator
     does next. SATISFIED/EXHAUSTED end THIS thread, not the episode -- both
@@ -269,4 +323,6 @@ __all__ = [
     "permissible_llm_transitions",
     "apply_llm_vote",
     "decision_for_state",
+    "ReadinessStatus",
+    "readiness_status",
 ]
