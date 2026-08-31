@@ -366,15 +366,26 @@ class GoalResolver:
         hypotheses: list[GoalHypothesis],
         patch: dict[str, Any],
     ) -> list[GoalHypothesis]:
+        # A224: an LLM-proposed goal_id that doesn't match any presented,
+        # graph-derived hypothesis used to be appended as a brand-new
+        # hypothesis with zero graph evidence -- the LLM escaping the
+        # graph's bound entirely. Confirmed nothing downstream would have
+        # caught this: _apply_grounding_gate is a pass-through whenever
+        # state.active_goal is None (the cold-start case this whole
+        # investigation started from), and _order_hypotheses ranks purely
+        # by confidence, which the LLM sets itself -- so an ungrounded
+        # invention could become `selected` outright. Dropped, not kept-
+        # but-downgraded: confidence alone doesn't gate selection here, so
+        # a "downgraded" hypothesis would still need an explicit filter
+        # elsewhere to be safe, which doesn't exist. The LLM's vote only
+        # counts if it picked from what the graph actually offered.
         goal_id = patch.get("goal_id")
         confidence = float(patch.get("confidence", 0.0) or 0.0)
         reason = str(patch.get("reason", "") or "")
         evidence = tuple(str(item) for item in patch.get("evidence", ()) if item is not None)
         updated: list[GoalHypothesis] = []
-        matched = False
         for hypothesis in hypotheses:
             if goal_id and hypothesis.goal_id == goal_id:
-                matched = True
                 metadata = self._merge_metadata(hypothesis.metadata, {"tier": 3, "llm_reason": reason, "llm_patch": True})
                 updated.append(
                     GoalHypothesis(
@@ -387,17 +398,6 @@ class GoalResolver:
                 )
                 continue
             updated.append(hypothesis)
-
-        if not matched and goal_id:
-            updated.append(
-                GoalHypothesis(
-                    goal_id=goal_id,
-                    description=patch.get("description") or reason or "LLM-backed goal hypothesis",
-                    confidence=confidence,
-                    evidence=evidence,
-                    metadata={"tier": 3, "llm_reason": reason, "llm_patch": True},
-                )
-            )
 
         return updated
 

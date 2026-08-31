@@ -95,7 +95,20 @@ def test_freetext_response_without_goal_id_does_not_create_hypothesis():
     assert len(updated) == len(baseline)
 
 
-def test_freetext_response_with_clean_goal_id_still_works():
+def test_freetext_response_with_clean_goal_id_still_parses_correctly():
+    """A155's original scope: the free-text parser itself must correctly
+    extract a clean goal_id, not garbage-slugify a whole paragraph. Parsing
+    correctness is what this test now covers -- whether that parsed goal_id
+    then becomes a real hypothesis is a *different* question, superseded by
+    A224 below: even a cleanly-parsed goal_id gets rejected by
+    _merge_llm_patch if it doesn't match a graph-derived candidate (see
+    test_a224_bounded_goal_escalation.py). A155's original assertion here
+    was that a clean-but-unmatched goal_id becomes a real hypothesis --
+    found live-smoke (2026-08-31) that nothing downstream ever filtered an
+    ungrounded one, so a clean-but-invented goal_id could become `selected`
+    with zero graph evidence just as easily as a garbage one. A155's actual
+    bug (slugified 300-word paragraphs) is still fully covered by the other
+    tests in this file, unaffected by this change."""
     resolver = GoalResolver()
     patch = resolver._parse_llm_response(FREETEXT_WITH_GOAL_ID)
 
@@ -104,9 +117,10 @@ def test_freetext_response_with_clean_goal_id_still_works():
 
     updated = resolver._merge_llm_patch(_baseline_hypotheses(), patch)
 
-    assert "block-red" in [h.goal_id for h in updated]
-    new_hypothesis = next(h for h in updated if h.goal_id == "block-red")
-    assert new_hypothesis.confidence == 0.8
+    # A224: a clean-but-unmatched goal_id is now correctly rejected, not
+    # accepted as a new ungrounded hypothesis.
+    assert "block-red" not in [h.goal_id for h in updated]
+    assert [h.goal_id for h in updated] == [h.goal_id for h in _baseline_hypotheses()]
 
 
 def test_reason_capture_is_bounded():
