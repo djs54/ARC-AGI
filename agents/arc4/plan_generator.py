@@ -818,6 +818,67 @@ class PlanGenerator:
             return {"kind": "grid_change", "confidence": 0.3}
         return {"kind": "grid_change", "confidence": 0.4}
 
+    def _select_readiness_probe(
+        self,
+        perception: PerceptionSnapshot,
+        entity_domains: Mapping[Any, CynefinDomain],
+    ) -> PlanCandidate | None:
+        """A224 Task 4: deterministic probe selection for the readiness
+        gate's "not ready" path -- does NOT route through resolve's LLM
+        escalation or the normal candidate-scoring/RETRY machinery, which is
+        tuned for deepening an already-anchored investigation and would
+        prematurely abandon anchors during broad initial mapping for the
+        same reason it does today (A224's Problem section, point 5).
+
+        Reuses _click_targets' own existing salience ordering (small, rare,
+        point/block entities first) among just the still-DISORDER entities --
+        adapted, not reinvented, per this card's plan. Returns None when no
+        DISORDER entity remains (the caller should not be in the "not ready"
+        path at all if that's the case -- readiness_status() already
+        confirmed at least one exists, but this function is defensive on its
+        own terms rather than trusting the caller blindly).
+
+        goal_id uses an explicit "readiness_probe" sentinel, not None or a
+        fabricated real goal_id -- no ResolvedGoal exists yet at this point
+        in the cycle by design (the whole point of the readiness gate is to
+        skip resolve's escalation until the graph is ready).
+        """
+        disorder_refs = {ref for ref, domain in entity_domains.items() if domain == CynefinDomain.DISORDER}
+        if not disorder_refs:
+            return None
+
+        filtered_entities = tuple(
+            entity for entity in perception.entities
+            if (entity.attributes or {}).get("entity_ref") in disorder_refs
+        )
+        if not filtered_entities:
+            return None
+
+        filtered_perception = PerceptionSnapshot(
+            observation={}, grid_hash=perception.grid_hash, entities=filtered_entities,
+        )
+        targets = self._click_targets(filtered_perception, limit=1)
+        if not targets:
+            return None
+
+        target = targets[0]
+        payload = {"x": target["x"], "y": target["y"]}
+        book_id = f"ACTION6@{target['x']},{target['y']}"
+        return PlanCandidate(
+            action_id="ACTION6",
+            goal_id="readiness_probe",
+            score=0.0,
+            rationale=f"readiness probe: click {target.get('entity_kind', 'entity')} color={target.get('entity_color', 'unknown')} at ({target['x']},{target['y']})",
+            payload=payload,
+            book_id=book_id,
+            metadata={
+                "readiness_probe": True,
+                "entity_ref": target.get("entity_ref"),
+                "entity_kind": target.get("entity_kind"),
+                "entity_color": target.get("entity_color"),
+            },
+        )
+
     @staticmethod
     def _click_targets(
         perception: PerceptionSnapshot,
