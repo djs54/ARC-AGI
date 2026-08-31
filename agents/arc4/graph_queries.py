@@ -78,11 +78,27 @@ class ArcGraphQueryPort:
     _goal_confidence_write_count: int = field(default=0)
 
     def ingest_perception(self, perception: PerceptionSnapshot) -> dict[str, Any]:
+        # A221 Finding 2: perception.metadata["disappeared_entities"]
+        # (A219, plain-dict PerceivedEntity.to_dict() shape) reconstructed
+        # and serialized with the exact same fidelity as visible entities --
+        # a vanished entity is still a real perceived fact, not degraded
+        # telemetry. Sent as an additional field on the existing
+        # ingest_perception call (one atomic per-step write, matching how
+        # loop_signal/repeated_grid_count are already bundled into `effect`
+        # rather than a second round-trip) -- degrades gracefully if the
+        # server doesn't understand the new field yet (same non-strict-MCP
+        # pattern as every other graph consumer here); the server-side work
+        # to actually act on it is tracked separately, not guessed at here.
+        disappeared_raw = perception.metadata.get("disappeared_entities") or []
+        disappeared_entities = [
+            self._serialize_entity(PerceivedEntity.from_dict(d)) for d in disappeared_raw
+        ]
         payload = {
             "task_id": self.task_id,
             "step": self._perception_step(perception),
             "grid_hash": perception.grid_hash,
             "entities": [self._serialize_entity(entity) for entity in perception.entities],
+            "disappeared_entities": disappeared_entities,
             "action_taken": str(perception.metadata.get("action_taken") or perception.metadata.get("selected_action") or ""),
             "effect": {
                 "loop_signal": perception.loop_signal,
