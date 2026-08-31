@@ -75,6 +75,16 @@ class PerceiveAgent:
                 # unchanged) -- not consumed by scoring or graph writes in
                 # this card, see backlog/A219.md.
                 "entity_effects": entity_effects,
+                # A221 Finding 2: disappearance is a genuinely new causal
+                # fact (A175's correspondence tracking had no disappearance
+                # detection before A219) -- unlike the other five effect
+                # types, this one is promoted to a real graph write
+                # (ingest_perception, see graph_queries.py). Plain-dict
+                # shape (PerceivedEntity.to_dict()), matching how `entities`
+                # itself is handled in PerceptionSnapshot.to_dict() -- not
+                # raw PerceivedEntity instances, which would break
+                # metadata's direct pass-through there.
+                "disappeared_entities": [e.to_dict() for e in disappeared_entities],
             },
         )
 
