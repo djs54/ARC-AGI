@@ -338,6 +338,17 @@ class AnnatarOutcome:
     # just makes the degradation visible in telemetry instead of silently
     # swallowed. See spec section 8.
     degraded: bool = False
+    # A230: Annatar's own answer to "did all actions/entities available get
+    # explored and their entities/edges recorded in the world model" --
+    # None when no readiness_report was passed to run_annatar_cycle this
+    # cycle (normal post-readiness-gate cycles, or no readiness gate
+    # configured at all); True/False set directly by run_annatar_cycle's
+    # own glue code from the readiness report's status (READY/
+    # PARTIAL_FALLTHROUGH -> True, NOT_READY -> False) whenever a report was
+    # passed in. workflow.py's probe-path loop branches on this field
+    # instead of reading readiness_status()'s raw return value itself --
+    # this is the actual authority transfer A230 delivers.
+    exploration_complete: bool | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -347,6 +358,7 @@ class AnnatarOutcome:
             "required_action_id": self.required_action_id,
             "required_book_id": self.required_book_id,
             "degraded": self.degraded,
+            "exploration_complete": self.exploration_complete,
         }
 
     @classmethod
@@ -358,6 +370,7 @@ class AnnatarOutcome:
             required_action_id=d.get("required_action_id"),
             required_book_id=d.get("required_book_id"),
             degraded=d.get("degraded", False),
+            exploration_complete=d.get("exploration_complete"),
         )
 
 

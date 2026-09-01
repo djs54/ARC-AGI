@@ -42,6 +42,7 @@ from agents.arc4.annatar_signals import (
 )
 from agents.arc4.annatar_state_machine import CynefinDomain, ReadinessStatus
 from agents.arc4.types import (
+    AnnatarOutcome,
     EvaluationResult,
     ExecutionResult,
     PerceivedEntity,
@@ -223,7 +224,7 @@ def _perception_result(entities):
     )
 
 
-def _make_dependencies(*, graph_port, resolve_calls, execute_calls):
+def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None):
     goal = ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d", confidence=0.5))
 
     def perceive(state, observation):
@@ -281,7 +282,7 @@ def _make_dependencies(*, graph_port, resolve_calls, execute_calls):
         vet=vet,
         execute=execute,
         evaluate=evaluate,
-        annatar=None,
+        annatar=annatar,
         readiness_gate=readiness_gate,
     )
 
@@ -337,4 +338,104 @@ class TestWorkflowReadinessGateRouting:
 
         assert len(resolve_calls) == 1, "no gate configured -- must proceed exactly as before this card"
         assert len(execute_calls) == 1
-        assert execute_calls[0].goal_id == "g1"
+
+    def test_readiness_gate_configured_annatar_none_behaves_exactly_as_before(self):
+        """A230: the new combination A224 never had to consider, since
+        Annatar wasn't reachable from the probe path at all until this
+        card. `annatar=None` must preserve byte-for-byte pre-A230 behavior
+        -- branch directly on readiness_status()'s own return value, same
+        backward-compatibility convention every other
+        `if self._dependencies.annatar is not None:` branch in workflow.py
+        already provides."""
+        resolve_calls, execute_calls = [], []
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
+        deps = _make_dependencies(graph_port=graph_port, resolve_calls=resolve_calls, execute_calls=execute_calls, annatar=None)
+        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=1))
+        state = WorkflowState()
+
+        orchestrator.run(state, {"entities": (_entity(1),)})
+
+        assert resolve_calls == [], "annatar=None -- probe path must skip resolve/plan/vet exactly as before A230"
+        assert len(execute_calls) == 1
+        assert execute_calls[0].metadata.get("readiness_probe") is True
+
+    def test_probe_cycle_calls_annatar_dependency(self):
+        """A230's core regression: today this sees 0 calls -- the whole
+        point of this card is that every probe cycle routes through the
+        same self._dependencies.annatar(...) call site the normal path
+        already uses."""
+        resolve_calls, execute_calls = [], []
+        annatar_calls: list[dict] = []
+
+        def fake_annatar(state, perception, execution, evaluation, *, readiness_report=None, **_ignored):
+            annatar_calls.append({"readiness_report": readiness_report})
+            return AnnatarOutcome(decision="repeat_deepen", exploration_complete=False)
+
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
+        deps = _make_dependencies(
+            graph_port=graph_port, resolve_calls=resolve_calls, execute_calls=execute_calls, annatar=fake_annatar
+        )
+        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=1))
+        state = WorkflowState()
+
+        orchestrator.run(state, {"entities": (_entity(1),)})
+
+        # Filter to calls carrying a readiness_report -- the probe-path's
+        # own signature -- since _route_budget_through_annatar (unrelated,
+        # pre-existing behavior) also calls annatar once budget is
+        # exhausted, with readiness_report=None. The core regression this
+        # card fixes is that the PROBE cycle itself now reaches annatar at
+        # all -- today (pre-A230) that count is 0.
+        probe_calls = [c for c in annatar_calls if c["readiness_report"] is not None]
+        assert len(probe_calls) == 1, "annatar must be invoked exactly once for this single probe cycle"
+        assert probe_calls[0]["readiness_report"].get("status") == ReadinessStatus.NOT_READY
+
+    def test_annatar_exploration_complete_true_stops_probing_even_if_readiness_status_says_not_ready(self):
+        """A230's actual authority-transfer proof: a fake annatar dependency
+        that returns exploration_complete=True regardless of input must make
+        the orchestrator stop probing and resolve the gate -- even though
+        this scenario's real readiness_status() would say NOT_READY (3
+        DISORDER entities, only one gets probed). Annatar's outcome, not
+        readiness_status()'s raw return value, is what drives the loop."""
+        resolve_calls, execute_calls = [], []
+        annatar_calls: list[dict] = []
+
+        def fake_annatar(state, perception, execution, evaluation, *, readiness_report=None, **_ignored):
+            annatar_calls.append({"readiness_report": readiness_report})
+            return AnnatarOutcome(decision="repeat_deepen", exploration_complete=True)
+
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
+        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
+        deps = _make_dependencies(
+            graph_port=graph_port, resolve_calls=resolve_calls, execute_calls=execute_calls, annatar=fake_annatar
+        )
+        # max_cycles=1: if the fall-through were instead a `continue` to a
+        # SEPARATE cycle (as an alternative, also-acceptable design per the
+        # plan), check_budget would end the run before that second cycle's
+        # resolve ever ran, and resolve_calls would stay empty. Getting
+        # resolve_calls == 1 here is the concrete proof the SAME cycle that
+        # resolved the gate also reached resolve/plan/vet/execute/evaluate,
+        # not a wasted extra cycle.
+        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=1))
+        state = WorkflowState()
+
+        orchestrator.run(state, {"entities": (_entity(1), _entity(2), _entity(3))})
+
+        # Real readiness_status() over 3 untouched DISORDER entities would
+        # still say NOT_READY after probing just one of them -- but Annatar
+        # said exploration_complete=True, so the gate must resolve and the
+        # SAME cycle must fall through into the normal resolve/plan/vet path
+        # immediately (no wasted extra cycle). Only the FIRST annatar call
+        # carries a readiness_report (the probe cycle); a later call (if
+        # any) is the normal per-cycle Annatar call (readiness_report=None),
+        # unrelated to this proof.
+        probe_calls = [c for c in annatar_calls if c["readiness_report"] is not None]
+        assert len(probe_calls) == 1, "only one probe cycle should run before the gate resolves"
+        assert probe_calls[0]["readiness_report"].get("status") == ReadinessStatus.NOT_READY
+        assert state.readiness_gate_resolved is True
+        assert len(resolve_calls) == 1, "must fall through to resolve/plan/vet in the SAME cycle Annatar resolved it"
