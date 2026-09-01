@@ -58,7 +58,26 @@ class PlanVetter:
 
         # A135: Graph-backed action gate — ask the graph if this action should be allowed
         graph_gate = self._check_graph_gate(candidate.action_id)
-        if not graph_gate.get("allowed", True) and alternative is not None:
+        graph_gate_denied = not graph_gate.get("allowed", True)
+        # A232: check_action_gate's veto (server-side arc_check_action_gate,
+        # falsification_count >= 3) reads ActionFact.falsified_count, which
+        # this repo's own record_reward_prediction_error bug (see
+        # backlog/A232.md) corrupted for every already-in-flight task before
+        # the write was removed -- an action with real, live, unfalsified
+        # Rule-graph evidence could still show a stale falsification-driven
+        # veto for historical episodes. Before letting a denial stand, cross-
+        # check fetch_rules_for_action the same way plan_generator.py's own
+        # live_rule_confidences check does: real unfalsified evidence with
+        # positive confidence overrides a gate denial that contradicts it.
+        # This is a defensive mitigation on the ARC side only -- it does not
+        # fix the underlying stale counter or the gate's own threshold
+        # server-side; see docs/handoff/B278-action-gate-falsification-source.md
+        # for the hippocampy-side root-cause recommendation.
+        graph_gate_overridden = False
+        if graph_gate_denied and self._has_live_rule_evidence(candidate.action_id):
+            graph_gate_denied = False
+            graph_gate_overridden = True
+        if graph_gate_denied and alternative is not None:
             decision = VetDecision(
                 approved=False,
                 candidate=candidate,
@@ -121,6 +140,7 @@ class PlanVetter:
                 "candidate_falsifications": candidate_falsifications,
                 "warnings": warnings,
                 "graph_gate": graph_gate,
+                "graph_gate_overridden": graph_gate_overridden,
             },
         )
         return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.OK, payload=decision, reason=decision.reason)
@@ -133,6 +153,30 @@ class PlanVetter:
             return self._graph_port.check_action_gate(action_id)
         except Exception:
             return {"allowed": True, "reason": "graph_error"}
+
+    def _has_live_rule_evidence(self, action_id: str) -> bool:
+        """A232: real, unfalsified Rule-graph evidence with positive
+        confidence for this action -- mirrors plan_generator.py's own
+        live_rule_confidences check (_build_candidates), the correct signal
+        this repo already trusts elsewhere over the falsification-count-based
+        gate. fetch_rules_for_action isn't part of GraphQueryPort's Protocol
+        (same optional/defensive pattern plan_generator.py uses), so guard
+        with getattr; any missing method, capability_missing, or error
+        degrades to False (no override) -- i.e. the gate's original decision
+        stands unless we have positive proof to contradict it."""
+        if self._graph_port is None:
+            return False
+        fetch_rules = getattr(self._graph_port, "fetch_rules_for_action", None)
+        if fetch_rules is None:
+            return False
+        try:
+            rules = fetch_rules(action_id) or []
+        except Exception:
+            return False
+        live_rule_confidences = [
+            r.get("confidence", 0.0) for r in rules if isinstance(r, dict) and not r.get("falsified")
+        ]
+        return any(confidence > 0 for confidence in live_rule_confidences)
 
     def _choose_alternative(
         self,

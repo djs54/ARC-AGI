@@ -214,6 +214,17 @@ class PlanGenerator:
                         live_rule_confidences = [r.get("confidence", 0.0) for r in rules if not r.get("falsified")]
                         if live_rule_confidences:
                             graph_positive_score += max(live_rule_confidences) * self._limits.rule_confidence_weight
+                            # A232: surface real Rule-graph evidence into graph_evidence
+                            # itself, not just the score -- this is what graph_grounded/
+                            # graph_informed (telemetry.py) actually read from candidate
+                            # metadata. fetch_per_action_evidence's own confidence/
+                            # supports/contradictions (above) was corrupted by the
+                            # record_reward_prediction_error bug this card also fixes;
+                            # blend rather than overwrite so a real signal is never lost
+                            # even where fetch_per_action_evidence happens to agree.
+                            graph_evidence = dict(graph_evidence)
+                            graph_evidence["confidence"] = max(graph_evidence.get("confidence", 0.0), max(live_rule_confidences))
+                            graph_evidence["supports"] = graph_evidence.get("supports", 0) + len(live_rule_confidences)
                     except Exception:
                         rules = []
 
