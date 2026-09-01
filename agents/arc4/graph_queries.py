@@ -405,13 +405,28 @@ class ArcGraphQueryPort:
         own entity_ref instead of "none" -- the fact
         fetch_entity_history(entity_ref) needs to ever report anything for
         it. See backlog/A218.md's Outcome for the live-graph evidence this
-        closes."""
+        closes.
+
+        A229: on the real-change path, _attribute_entity is now gated by the
+        click coordinate that caused this step (when known) -- an entity is
+        only eligible for the "most changed cells" tiebreak if its own bbox
+        actually contains the click. Unnormalized bbox-overlap alone let any
+        entity whose bbox spans a large fraction of the grid structurally
+        absorb credit for changes anywhere on the board, independent of
+        whether a click on it caused anything (see backlog/A229.md's live
+        evidence: a background-sized entity credited for 3/3 real
+        transitions in a 30-step episode, every time the click landed
+        outside its own bbox). When no entity's bbox contains the click,
+        this falls back to A218's _targeted_entity_ref -- the same "we know
+        what was clicked" signal already used on the no-op path below,
+        extended here to the one real-change case bbox-overlap alone can't
+        resolve."""
         changed_cells = grid_diff.get("changed_cells") if isinstance(grid_diff, Mapping) else None
 
         if changed_cells:
             color_transitions = self._summarize_color_transitions(changed_cells)
             changed_count = int(grid_diff.get("changed_count", len(changed_cells)) or 0)
-            entity_ref = self._attribute_entity(changed_cells, entities)
+            entity_ref = self._attribute_entity_for_execution(execution, changed_cells, entities)
         else:
             # A213: no-op action — send minimal record marking "tried, zero effect"
             color_transitions = []
@@ -465,7 +480,7 @@ class ArcGraphQueryPort:
         if not signatures:
             return {"status": "no_changes", "recorded": False}
 
-        entity_ref = self._attribute_entity(changed_cells, entities)
+        entity_ref = self._attribute_entity_for_execution(execution, changed_cells, entities)
         payload: dict[str, Any] = {
             "task_id": self.task_id,
             "step": self._execution_step(execution),
@@ -618,14 +633,45 @@ class ArcGraphQueryPort:
         return [{"from": frm, "to": to, "count": count} for (frm, to), count in histogram.items()]
 
     @staticmethod
-    def _attribute_entity(changed_cells: Sequence[Mapping[str, Any]], entities: Sequence[Any]) -> Any:
-        best_ref: Any = None
-        best_count = 0
+    def _attribute_entity(
+        changed_cells: Sequence[Mapping[str, Any]],
+        entities: Sequence[Any],
+        click_row_col: tuple[int, int] | None = None,
+    ) -> Any:
+        """Attribute a step's changed cells to whichever perceived entity's
+        bbox contains the most of them.
+
+        A229: when the click coordinate that caused this step is known
+        (``click_row_col``), an entity is only eligible for the "most
+        changed cells" tiebreak if its own bbox actually contains that
+        click -- otherwise an entity whose bbox spans a large fraction of
+        the grid structurally absorbs credit for scattered changes anywhere
+        on the board, regardless of whether a click on it caused anything
+        (see backlog/A229.md's live evidence). Among entities whose bbox
+        does contain the click, the original "most changed cells" tiebreak
+        is unchanged -- this only narrows the candidate pool. When
+        ``click_row_col`` is None (no click info available, e.g. a
+        non-click action), behavior is unchanged from pre-A229: every
+        entity with a bbox is eligible."""
+        candidates: list[tuple[tuple[int, int, int, int], Mapping[str, Any]]] = []
         for entity in entities:
             attributes = getattr(entity, "attributes", None)
             bbox = attributes.get("bbox") if isinstance(attributes, Mapping) else None
             if not bbox or len(bbox) != 4:
                 continue
+            candidates.append((bbox, attributes))
+
+        if click_row_col is not None:
+            click_row, click_col = click_row_col
+            candidates = [
+                (bbox, attributes)
+                for bbox, attributes in candidates
+                if bbox[0] <= click_row <= bbox[2] and bbox[1] <= click_col <= bbox[3]
+            ]
+
+        best_ref: Any = None
+        best_count = 0
+        for bbox, attributes in candidates:
             min_row, min_col, max_row, max_col = bbox
             count = sum(
                 1
@@ -636,6 +682,50 @@ class ArcGraphQueryPort:
                 best_count = count
                 best_ref = attributes.get("entity_ref")
         return best_ref
+
+    @staticmethod
+    def _click_row_col(execution: ExecutionResult) -> tuple[int, int] | None:
+        """A229: the (row, col) grid coordinate a click-shaped action
+        targeted, read from the candidate's own payload (plan_generator.py's
+        ACTION6 click-target generation stamps x/y there -- x is column, y
+        is row, the same convention _click_targets itself uses). None for
+        non-click actions (no x/y in payload) or when there's no candidate
+        at all."""
+        candidate = execution.candidate
+        if candidate is None:
+            return None
+        payload = candidate.payload
+        if not isinstance(payload, Mapping):
+            return None
+        x = payload.get("x")
+        y = payload.get("y")
+        if x is None or y is None:
+            return None
+        try:
+            return int(y), int(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _attribute_entity_for_execution(
+        self,
+        execution: ExecutionResult,
+        changed_cells: Sequence[Mapping[str, Any]],
+        entities: Sequence[Any],
+    ) -> Any:
+        """A229: bbox-overlap attribution gated by the click coordinate that
+        caused this step (when known), falling back to A218's
+        _targeted_entity_ref -- the click's own known target -- when the
+        click coordinate is known but no entity's bbox contains it. This is
+        the same "we know what was clicked" signal A218 already uses on
+        record_transition's no-op path, extended here to the real-change
+        path for the one case bbox-overlap alone can't resolve. When the
+        click coordinate isn't known (non-click action), behavior is
+        unchanged from pre-A229: plain bbox-overlap, no fallback attempted."""
+        click_row_col = self._click_row_col(execution)
+        entity_ref = self._attribute_entity(changed_cells, entities, click_row_col)
+        if entity_ref is None and click_row_col is not None:
+            entity_ref = self._targeted_entity_ref(execution)
+        return entity_ref
 
     @staticmethod
     def _targeted_entity_ref(execution: ExecutionResult) -> Any:
