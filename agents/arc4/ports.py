@@ -126,7 +126,15 @@ class AnnatarPhase(Protocol):
     into CycleSignals but never read by transition()/decision_for_state(),
     so it carries no decision authority, matching the `check_budget`
     (A209) informed-not-empowered precedent rather than `second_veto`'s
-    (A207) full escalation."""
+    (A207) full escalation.
+
+    `readiness_report` (A230, same optional-keyword pattern as
+    `stall_reason`): the Cynefin readiness gate's own report
+    (`status`/`entities_mapped`/`entities_total`), passed through by
+    workflow.py's probe-path block on every probe cycle so Annatar's own
+    outcome -- not workflow.py's direct read of `readiness_status()` --
+    drives whether probing continues. See annatar_signals.run_annatar_cycle
+    and AnnatarOutcome.exploration_complete."""
 
     def __call__(
         self,
@@ -139,6 +147,7 @@ class AnnatarPhase(Protocol):
         stall_reason: str | None = None,
         veto_reason: str | None = None,
         veto_alternative_action_id: str | None = None,
+        readiness_report: Mapping[str, Any] | None = None,
     ) -> AnnatarOutcome: ...
 
 

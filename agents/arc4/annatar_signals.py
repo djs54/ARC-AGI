@@ -22,6 +22,7 @@ from .annatar_state_machine import (
     CynefinDomain,
     InvestigationState,
     AnnatarDecision,
+    ReadinessStatus,
     apply_llm_vote,
     classify_domain,
     decision_for_state,
@@ -152,6 +153,7 @@ def compute_cycle_signals(
     stall_reason: str | None = None,
     veto_reason: str | None = None,
     veto_alternative_action_id: str | None = None,
+    readiness_report: Mapping[str, Any] | None = None,
 ) -> CycleSignals:
     meaningful_progress = bool(evaluation.meaningful_progress)
 
@@ -222,6 +224,17 @@ def compute_cycle_signals(
         all_falsified = True
         untested_remaining = False
 
+    # A230: purely informational -- set from the readiness-gate's own report
+    # (already computed by the readiness_gate dependency, unchanged) when
+    # workflow.py's probe-path routes a probe cycle through this same
+    # Annatar call site. transition() never reads these fields (see
+    # CycleSignals' own docstring); the whole-episode "is exploration
+    # complete" decision is computed separately, by run_annatar_cycle below,
+    # onto AnnatarOutcome.exploration_complete.
+    readiness_status = readiness_report.get("status") if readiness_report is not None else None
+    readiness_entities_mapped = readiness_report.get("entities_mapped") if readiness_report is not None else None
+    readiness_entities_total = readiness_report.get("entities_total") if readiness_report is not None else None
+
     return CycleSignals(
         meaningful_progress=meaningful_progress,
         confidence=confidence,
@@ -234,6 +247,9 @@ def compute_cycle_signals(
         veto_reason=veto_reason,
         veto_alternative_action_id=veto_alternative_action_id,
         domain=domain,
+        readiness_status=readiness_status,
+        readiness_entities_mapped=readiness_entities_mapped,
+        readiness_entities_total=readiness_entities_total,
     )
 
 
@@ -361,6 +377,7 @@ def run_annatar_cycle(
     veto_reason: str | None = None,
     veto_alternative_action_id: str | None = None,
     max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
+    readiness_report: Mapping[str, Any] | None = None,
 ) -> AnnatarOutcome:
     """The actual AnnatarPhase: resolves the current investigation thread's
     state via annatar_state_machine's pure functions, persists the result
@@ -383,7 +400,20 @@ def run_annatar_cycle(
     DOES show progress resets it to 0. Crossing max_unproductive_anchors
     overrides the decision to TERMINATE (an existing workflow.py code path
     that decision_for_state() itself was documented as never actually
-    producing)."""
+    producing).
+
+    `readiness_report` (A230): the Cynefin readiness gate's own report
+    (`{"status": ReadinessStatus, "entities_mapped": int, "entities_total":
+    int, ...}`, already computed by the readiness_gate dependency exactly as
+    before this card) -- passed through by workflow.py's probe-path block on
+    every probe cycle so Annatar actually sees the whole-perception
+    exploration-coverage question instead of workflow.py deciding it alone.
+    Threaded into CycleSignals (informational only, see compute_cycle_
+    signals) and used here, independently of the per-anchor transition
+    table, to compute AnnatarOutcome.exploration_complete: True for READY/
+    PARTIAL_FALLTHROUGH, False for NOT_READY, None when no report was passed
+    (normal post-readiness-gate cycles, or no readiness gate configured at
+    all)."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
     # AnnatarOutcome.degraded at the bottom of this function.
@@ -433,6 +463,7 @@ def run_annatar_cycle(
         stall_reason=stall_reason,
         veto_reason=veto_reason,
         veto_alternative_action_id=veto_alternative_action_id,
+        readiness_report=readiness_report,
     )
     degraded = degraded or signals.degraded
     anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress)
@@ -469,16 +500,37 @@ def run_annatar_cycle(
         decision = decision_for_state(new_state)
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
-        if anchor.get("any_progress"):
-            state.annatar_unproductive_anchor_streak = 0
-        else:
-            state.annatar_unproductive_anchor_streak += 1
-        if state.annatar_unproductive_anchor_streak >= max_unproductive_anchors:
-            # Whole-episode futility: every anchor tried in a row has been
-            # completely dead. Override the per-anchor ADVANCE with a real
-            # episode-level decision instead of silently starting yet
-            # another anchor that's likely to fare the same.
-            decision = AnnatarDecision.TERMINATE
+        # A230 (discovered live during this card's own implementation, via
+        # the existing tests/test_a141_mock_contract.py mock-harness
+        # integration test): annatar_unproductive_anchor_streak (A206) was
+        # built and tuned for the GOAL-DIRECTED post-readiness-gate
+        # investigation loop, where "advanced without meaningful_progress"
+        # really does mean "this click was a dead end." A probe-phase
+        # anchor (readiness_report is not None) advancing without
+        # meaningful_progress is the OPPOSITE of futile -- it means broad
+        # initial entity-mapping is working exactly as designed (A224:
+        # "no RETRY/deepening-bias machinery... would prematurely abandon
+        # anchors during broad initial mapping" -- see the probe-path
+        # comment in workflow.py). Confirmed by direct reproduction: without
+        # this guard, any puzzle with >= max_unproductive_anchors untested
+        # entities terminates the WHOLE episode partway through probing,
+        # before readiness_status() ever reaches READY/PARTIAL_FALLTHROUGH
+        # and before goal-directed play is ever attempted -- a severe
+        # regression this card must not ship. So: whole-episode-futility
+        # tracking only applies to non-probe (readiness_report is None)
+        # cycles, exactly as it always has; a probe cycle's ADVANCE neither
+        # increments nor resets the streak.
+        if readiness_report is None:
+            if anchor.get("any_progress"):
+                state.annatar_unproductive_anchor_streak = 0
+            else:
+                state.annatar_unproductive_anchor_streak += 1
+            if state.annatar_unproductive_anchor_streak >= max_unproductive_anchors:
+                # Whole-episode futility: every anchor tried in a row has been
+                # completely dead. Override the per-anchor ADVANCE with a real
+                # episode-level decision instead of silently starting yet
+                # another anchor that's likely to fare the same.
+                decision = AnnatarDecision.TERMINATE
     else:
         anchor["state"] = new_state.value
         if new_state == InvestigationState.DEEPENING:
@@ -487,6 +539,20 @@ def run_annatar_cycle(
         state.active_investigation_anchor = anchor
 
     reports_anchor = decision.value in ("repeat_deepen", "repeat_retry")
+
+    # A230: Annatar's own answer to "is the world model sufficiently
+    # explored," computed once here from the readiness-gate's report --
+    # never recomputed or re-decided by workflow.py. None (not False) when
+    # no report was passed this cycle, distinguishing "Annatar wasn't asked"
+    # from "Annatar said not yet."
+    exploration_complete: bool | None = None
+    if readiness_report is not None:
+        readiness_status_value = readiness_report.get("status")
+        exploration_complete = readiness_status_value in (
+            ReadinessStatus.READY,
+            ReadinessStatus.PARTIAL_FALLTHROUGH,
+        )
+
     return AnnatarOutcome(
         decision=decision.value,
         anchor_ref=anchor["anchor_ref"] if reports_anchor else None,
@@ -494,6 +560,7 @@ def run_annatar_cycle(
         required_action_id=execution.action_id if decision.value == "repeat_retry" else None,
         required_book_id=getattr(execution.candidate, "book_id", None) if decision.value == "repeat_retry" else None,
         degraded=degraded,
+        exploration_complete=exploration_complete,
     )
 
 

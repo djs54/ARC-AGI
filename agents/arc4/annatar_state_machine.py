@@ -110,6 +110,20 @@ class CycleSignals:
     # anchor_type != "entity" or the graph call fails/degrades. transition()
     # reads this to scale DEEPENING patience; it carries no other weight.
     domain: CynefinDomain = CynefinDomain.DISORDER
+    # A230: informational-only readiness-gate report, threaded through from
+    # workflow.py's probe-path call to self._dependencies.annatar(...) via
+    # compute_cycle_signals' new `readiness_report` parameter. Same "carries
+    # no decision weight for the per-anchor transition" precedent
+    # veto_reason/veto_alternative_action_id already establish above --
+    # transition() never reads any of these three fields. The actual
+    # whole-episode "is exploration complete" decision is computed
+    # separately by run_annatar_cycle's own glue code onto
+    # AnnatarOutcome.exploration_complete, not by this per-anchor state
+    # machine (this module stays zero-I/O and purely per-anchor -- see
+    # module docstring).
+    readiness_status: "ReadinessStatus | None" = None
+    readiness_entities_mapped: int | None = None
+    readiness_entities_total: int | None = None
 
 
 @dataclass(slots=True)

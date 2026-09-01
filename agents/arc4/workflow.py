@@ -189,14 +189,84 @@ class WorkflowOrchestrator:
                                 phase_results,
                             )
 
-                        current_observation = execution_payload.observation
-                        continue
+                        # A230: route every probe cycle through the SAME
+                        # self._dependencies.annatar(...) call site the
+                        # normal path already uses (below), instead of
+                        # `continue`ing without Annatar ever seeing this
+                        # cycle happen (the gap this card fixes). The
+                        # readiness-gate's own report (status/entities_
+                        # mapped/entities_total, already computed above,
+                        # unchanged) is passed through so Annatar's signal
+                        # layer can read it -- readiness_status()'s own
+                        # classification logic is untouched; only who acts
+                        # on it changes.
+                        if self._dependencies.annatar is not None:
+                            outcome = self._dependencies.annatar(
+                                state,
+                                perception_payload,
+                                execution_payload,
+                                evaluation_payload,
+                                readiness_report=readiness_payload,
+                            )
+                            state.annatar_degraded = outcome.degraded
+                            # A230 live-verification hook: matches the
+                            # existing STALL_CHECK precedent below -- a
+                            # greppable, concrete record that Annatar was
+                            # actually invoked for this probe cycle and what
+                            # it decided, since (unlike every other phase)
+                            # the annatar dependency is not wrapped by
+                            # telemetry.wrap_phase and so never produces a
+                            # phase_transition snapshot of its own.
+                            import logging as _probe_logging
+                            _probe_logging.getLogger(__name__).info(
+                                "PROBE_ANNATAR decision=%s exploration_complete=%s entities_mapped=%s entities_total=%s",
+                                outcome.decision,
+                                outcome.exploration_complete,
+                                state.readiness_gate_entities_mapped,
+                                state.readiness_gate_entities_total,
+                            )
+                            if outcome.decision == "terminate":
+                                return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
 
-                    # NOT_READY with nothing left to probe this cycle, or
-                    # READY/PARTIAL_FALLTHROUGH: stop gating and proceed
-                    # through the normal path from here on. Re-invoking the
-                    # gate (and its graph_port calls) every remaining cycle
-                    # would just repeat the same check for no benefit.
+                            current_observation = execution_payload.observation
+                            if outcome.exploration_complete is True:
+                                # Annatar's own outcome -- not readiness_
+                                # status()'s raw return value -- says the
+                                # world model is sufficiently explored. Fall
+                                # through (no `continue`) into the same
+                                # cycle's normal resolve/plan/vet path
+                                # immediately below, instead of burning a
+                                # whole extra cycle just to notice the gate
+                                # resolved. The "stop gating" code just below
+                                # still runs and sets
+                                # state.readiness_gate_resolved = True --
+                                # harmlessly idempotent when already True.
+                                pass
+                            else:
+                                # False (still not ready) or None (Annatar
+                                # configured but produced no readiness
+                                # opinion this cycle -- treat conservatively,
+                                # same as False): keep probing next cycle.
+                                continue
+                        else:
+                            # No Annatar configured -- byte-for-byte pre-A230
+                            # behavior, same backward-compatibility
+                            # convention every other
+                            # `if self._dependencies.annatar is not None:`
+                            # branch in this file already provides: branch
+                            # directly on readiness_status()'s own return
+                            # value (already done above via probe_candidate),
+                            # always continue probing next cycle.
+                            current_observation = execution_payload.observation
+                            continue
+
+                    # NOT_READY with nothing left to probe this cycle,
+                    # READY/PARTIAL_FALLTHROUGH, or Annatar just reported
+                    # exploration_complete=True above: stop gating and
+                    # proceed through the normal path from here on.
+                    # Re-invoking the gate (and its graph_port calls) every
+                    # remaining cycle would just repeat the same check for
+                    # no benefit.
                     state.readiness_gate_resolved = True
 
                 resolved_goal = self._invoke_phase("resolve", self._dependencies.resolve, state, perception_payload)

@@ -735,6 +735,48 @@ class TestComputeCycleSignals:
 
         assert transition(InvestigationState.EXPLORING, without_veto) == transition(InvestigationState.EXPLORING, with_veto)
 
+    def test_readiness_report_none_leaves_new_fields_none(self):
+        """A230: every existing run_annatar_cycle/compute_cycle_signals
+        caller passes no readiness_report -- confirms the new parameter is
+        optional and defaults to not affecting anything."""
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+        )
+        assert signals.readiness_status is None
+        assert signals.readiness_entities_mapped is None
+        assert signals.readiness_entities_total is None
+
+    def test_readiness_report_fields_pass_through_when_provided(self):
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+            readiness_report={
+                "status": ReadinessStatus.NOT_READY,
+                "entities_mapped": 1,
+                "entities_total": 4,
+            },
+        )
+        assert signals.readiness_status == ReadinessStatus.NOT_READY
+        assert signals.readiness_entities_mapped == 1
+        assert signals.readiness_entities_total == 4
+
 
 # ── Unit tests: agents/arc4/annatar_signals.run_annatar_cycle ─────────
 
@@ -1049,3 +1091,107 @@ class TestRunAnnatarCycleAwaitingLLM:
             already_retried=False,
         )
         assert resolve_llm_vote(None, WorkflowState(), signals) == InvestigationState.EXPLORING
+
+
+class TestRunAnnatarCycleExplorationComplete:
+    """A230: run_annatar_cycle's own glue code computes AnnatarOutcome.
+    exploration_complete directly from the readiness_report's status --
+    True for READY/PARTIAL_FALLTHROUGH, False for NOT_READY, None when no
+    report was passed this cycle. This is independent of whatever per-anchor
+    decision (advance/repeat_deepen/repeat_retry/terminate) the probed
+    entity's own domain/progress produces."""
+
+    def test_no_readiness_report_returns_none(self):
+        candidate = PlanCandidate(action_id="a1", goal_id="g1")
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
+
+        assert outcome.exploration_complete is None
+
+    def test_not_ready_report_returns_false(self):
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_annatar_cycle(
+            state,
+            _perception_snapshot(),
+            execution,
+            evaluation,
+            graph_port=None,
+            readiness_report={"status": ReadinessStatus.NOT_READY, "entities_mapped": 1, "entities_total": 3},
+        )
+
+        assert outcome.exploration_complete is False
+
+    def test_ready_report_returns_true(self):
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_annatar_cycle(
+            state,
+            _perception_snapshot(),
+            execution,
+            evaluation,
+            graph_port=None,
+            readiness_report={"status": ReadinessStatus.READY, "entities_mapped": 3, "entities_total": 3},
+        )
+
+        assert outcome.exploration_complete is True
+
+    def test_partial_fallthrough_report_returns_true(self):
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_annatar_cycle(
+            state,
+            _perception_snapshot(),
+            execution,
+            evaluation,
+            graph_port=None,
+            readiness_report={
+                "status": ReadinessStatus.PARTIAL_FALLTHROUGH,
+                "entities_mapped": 1,
+                "entities_total": 3,
+            },
+        )
+
+        assert outcome.exploration_complete is True
+
+    def test_exploration_complete_independent_of_per_anchor_decision(self):
+        """A NOT_READY readiness report (exploration_complete=False) can
+        still coexist with whatever per-anchor decision the probed entity's
+        own signals produce (here: meaningful_progress=True -> SATISFIED ->
+        advance) -- the two are genuinely independent questions."""
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
+        execution = _execution_result(action_id="a1", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=True, grid_changed=True)
+
+        outcome = run_annatar_cycle(
+            state,
+            _perception_snapshot(),
+            execution,
+            evaluation,
+            graph_port=None,
+            readiness_report={"status": ReadinessStatus.NOT_READY, "entities_mapped": 1, "entities_total": 3},
+        )
+
+        assert outcome.decision == "advance"
+        assert outcome.exploration_complete is False

@@ -222,3 +222,48 @@ class TestDecisionForState:
     def test_awaiting_llm_has_no_decision_mapping(self):
         with pytest.raises(ValueError, match="no decision mapping"):
             decision_for_state(InvestigationState.AWAITING_LLM)
+
+
+class TestReadinessFieldsOnCycleSignals:
+    """A230: CycleSignals gains three new informational-only readiness-gate
+    fields (readiness_status/readiness_entities_mapped/
+    readiness_entities_total), threaded through from workflow.py's
+    probe-path call to Annatar. Same "carries no decision weight" precedent
+    veto_reason/veto_alternative_action_id already established (A212) --
+    transition() must be provably unaffected by these fields."""
+
+    def test_fields_default_to_none(self):
+        signals = _signals()
+        assert signals.readiness_status is None
+        assert signals.readiness_entities_mapped is None
+        assert signals.readiness_entities_total is None
+
+    def test_fields_accept_and_store_provided_values(self):
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        signals = _signals(
+            readiness_status=ReadinessStatus.NOT_READY,
+            readiness_entities_mapped=1,
+            readiness_entities_total=3,
+        )
+        assert signals.readiness_status == ReadinessStatus.NOT_READY
+        assert signals.readiness_entities_mapped == 1
+        assert signals.readiness_entities_total == 3
+
+    def test_readiness_fields_do_not_change_transition_decision(self):
+        """Regression: two CycleSignals instances differing only in the new
+        readiness fields must produce the same transition() output for
+        otherwise-identical inputs -- transition() never reads them."""
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        without_readiness = _signals(confidence=0.4)
+        with_readiness = _signals(
+            confidence=0.4,
+            readiness_status=ReadinessStatus.NOT_READY,
+            readiness_entities_mapped=1,
+            readiness_entities_total=5,
+        )
+
+        assert transition(InvestigationState.EXPLORING, without_readiness) == transition(
+            InvestigationState.EXPLORING, with_readiness
+        )
