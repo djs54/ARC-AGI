@@ -72,7 +72,7 @@ class GoalResolver:
         hypotheses = self._order_hypotheses(hypotheses)
         hypotheses = self._apply_failure_decay(state, hypotheses)
         hypotheses = self._order_hypotheses(hypotheses)
-        hypotheses, grounding_gate_passed = self._apply_grounding_gate(state, perception, hypotheses)
+        hypotheses, grounding_gate_passed = self._apply_grounding_gate(state, perception, hypotheses, graph_evidence)
 
         # A203: apply anchor hint to reorder hypotheses if a goal-type hint exists
         anchor_hint = getattr(state, "annatar_anchor_hint", None)
@@ -466,6 +466,7 @@ class GoalResolver:
         state: WorkflowState,
         perception: PerceptionSnapshot,
         hypotheses: list[GoalHypothesis],
+        graph_evidence: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[list[GoalHypothesis], bool]:
         if state.active_goal is None:
             return hypotheses, True
@@ -476,6 +477,37 @@ class GoalResolver:
 
         active_goal_id = state.active_goal.selected.goal_id
         ceiling = state.active_goal.selected.confidence
+
+        # A233: the local grid-hash comparison above answers "did the grid
+        # visibly change" -- cheap, and it catches a real case the graph
+        # can't (a visible change is trustworthy on its own, no round trip
+        # needed). But it can't see the deeper case: the grid looks the
+        # same, yet the graph has *reasons* -- real evidence, not just
+        # local drift -- to think this goal is still (or no longer) worth
+        # pursuing. Consult the graph evidence `_merge_graph_evidence`
+        # already fetched earlier THIS SAME resolve() call (zero extra
+        # round trip -- this function runs every cycle a goal stays active,
+        # so a fresh fetch here every cycle was rejected as unaffordable;
+        # see backlog/A233.md's Outcome for the reasoning). Only a record
+        # whose goal_id exactly matches the active goal counts -- most
+        # graph_evidence records today carry a synthetic source-derived
+        # goal_id ("mechanic_priors", "goal_evidence", ...) that can't
+        # collide with a real entity-derived hypothesis id, so this is a
+        # no-op (falls through to the pre-A233 local-only behavior) unless
+        # the graph genuinely has an opinion on this specific goal.
+        graph_record = next(
+            (record for record in graph_evidence if record.get("goal_id") == active_goal_id),
+            None,
+        )
+        graph_confidence = float(graph_record.get("confidence", 0.0) or 0.0) if graph_record is not None else None
+
+        if graph_confidence is not None and graph_confidence >= ceiling:
+            # The graph itself still backs this goal at least as strongly as
+            # its last-known ceiling, despite no visible grid change this
+            # cycle -- trust the graph's fresher, evidence-backed opinion
+            # over the local heuristic and don't clamp at all.
+            return hypotheses, True
+
         clamped: list[GoalHypothesis] = []
         applied = False
         for hypothesis in hypotheses:
@@ -486,13 +518,23 @@ class GoalResolver:
             # (A152 death-spiral risk called out in the plan's Step 4).
             if hypothesis.goal_id == active_goal_id and hypothesis.confidence > ceiling:
                 applied = True
+                effective_ceiling = ceiling
+                gate_reason = "clamped"
+                if graph_confidence is not None and graph_confidence < ceiling:
+                    # The graph actively contradicts continuing this goal (its
+                    # own confidence has fallen below the local ceiling) --
+                    # clamp to the graph's lower figure, not just the stale
+                    # local ceiling, so real negative graph evidence actually
+                    # bites instead of being silently outvoted by local drift.
+                    effective_ceiling = min(ceiling, graph_confidence)
+                    gate_reason = "clamped_graph_contradicted"
                 clamped.append(
                     GoalHypothesis(
                         goal_id=hypothesis.goal_id,
                         description=hypothesis.description,
-                        confidence=ceiling,
+                        confidence=effective_ceiling,
                         evidence=hypothesis.evidence,
-                        metadata=self._merge_metadata(hypothesis.metadata, {"grounding_gate": "clamped", "grounding_ceiling": ceiling}),
+                        metadata=self._merge_metadata(hypothesis.metadata, {"grounding_gate": gate_reason, "grounding_ceiling": effective_ceiling}),
                     )
                 )
                 continue

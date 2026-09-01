@@ -106,7 +106,18 @@ def test_graph_evidence_merges_into_the_same_goal_model():
     assert result.payload.metadata["graph_evidence"][0]["goal_id"] == "block-red"
 
 
-def test_grounding_gate_blocks_confidence_increase_without_progress():
+def test_grounding_gate_trusts_strong_graph_confirmation_despite_no_local_progress():
+    """A233 Track A: _apply_grounding_gate now consults the graph evidence
+    already fetched earlier this same resolve() call (via
+    _merge_graph_evidence -- zero extra round trip) before falling back to
+    the local-only grid-hash clamp. When the graph itself still backs this
+    exact active goal_id at or above its last-known ceiling, that's a real,
+    fresher reason to believe the goal is still worth pursuing than "the
+    grid happens to look unchanged this cycle" -- so the clamp is skipped
+    entirely and the gate passes. Pre-A233, this scenario force-clamped
+    confidence back to 0.61 regardless of the graph's own 0.93 confirmation
+    -- exactly the "grounding gate never consults the graph" audit finding.
+    """
     resolver = GoalResolver()
     perception = _perception(grid_hash="grid-1", entities=(PerceivedEntity(kind="block", value="red", attributes={}),))
     active_goal = ResolvedGoal(
@@ -130,9 +141,53 @@ def test_grounding_gate_blocks_confidence_increase_without_progress():
     )
 
     assert result.payload is not None
-    assert result.payload.grounding_gate_passed is False
-    assert result.payload.selected.confidence == 0.61
+    assert result.payload.grounding_gate_passed is True
+    assert result.payload.selected.confidence == 0.95
     assert result.payload.selected.goal_id == "block-red"
+
+
+def test_grounding_gate_clamps_to_graph_confidence_when_graph_contradicts_active_goal():
+    """A233 Track A: when the graph's own confidence for the active goal_id
+    has fallen *below* the local ceiling, that's real negative evidence --
+    the clamp should land on the graph's lower figure, not just the stale
+    local ceiling, so the contradiction actually bites."""
+    resolver = GoalResolver()
+    perception = _perception(grid_hash="grid-1")
+    state = _state(previous_grid_hash="grid-1", active_goal=ResolvedGoal(
+        selected=GoalHypothesis(goal_id="block-red", description="Arrange the red block", confidence=0.6),
+        alternatives=(),
+        grounding_gate_passed=True,
+    ))
+    hypotheses = [GoalHypothesis(goal_id="block-red", description="Arrange the red block", confidence=0.75)]
+    graph_evidence = [{"goal_id": "block-red", "confidence": 0.3, "evidence": [], "metadata": {}}]
+
+    gated, grounding_gate_passed = resolver._apply_grounding_gate(state, perception, hypotheses, graph_evidence)
+
+    assert grounding_gate_passed is False
+    assert gated[0].confidence == 0.3
+    assert gated[0].metadata["grounding_gate"] == "clamped_graph_contradicted"
+
+
+def test_grounding_gate_falls_back_to_local_ceiling_without_matching_graph_evidence():
+    """Regression guard: when no graph_evidence record's goal_id matches the
+    active goal (the common case today -- confirmed live, see
+    backlog/A233.md's Outcome), the gate must fall back to the pre-A233
+    local-only grid-hash clamp unchanged."""
+    resolver = GoalResolver()
+    perception = _perception(grid_hash="grid-1")
+    state = _state(previous_grid_hash="grid-1", active_goal=ResolvedGoal(
+        selected=GoalHypothesis(goal_id="block-red", description="Arrange the red block", confidence=0.5),
+        alternatives=(),
+        grounding_gate_passed=True,
+    ))
+    hypotheses = [GoalHypothesis(goal_id="block-red", description="Arrange the red block", confidence=0.7)]
+    graph_evidence = [{"goal_id": "some-other-goal", "confidence": 0.99, "evidence": [], "metadata": {}}]
+
+    gated, grounding_gate_passed = resolver._apply_grounding_gate(state, perception, hypotheses, graph_evidence)
+
+    assert grounding_gate_passed is False
+    assert gated[0].confidence == 0.5
+    assert gated[0].metadata["grounding_gate"] == "clamped"
 
 
 def test_llm_escalates_only_when_hypotheses_remain_ambiguous():
