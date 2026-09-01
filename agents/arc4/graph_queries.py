@@ -152,9 +152,29 @@ class ArcGraphQueryPort:
 
     # ── A135: Graph read tools for planner, vet, evaluator ──────────
 
-    def fetch_untested_actions(self) -> list[str]:
-        """Return action IDs the graph has never seen attempted for this task."""
-        result = self._call_tool("fetch_untested_actions", {"task_id": self.task_id})
+    def fetch_untested_actions(self, available_actions: Sequence[str] | None = None) -> list[str]:
+        """Return action IDs the graph has never seen attempted for this task.
+
+        A231 finding (confirmed live against the real hippocampy server,
+        arc_queries.py::arc_get_untested_actions): the server computes
+        `untested = [a for a in available if a not in tested]`, defaulting
+        `available` to `[]` when the `available_actions` param is omitted --
+        so without it, `untested` is ALWAYS `[]` regardless of what's
+        actually been tested. This method historically never sent that
+        param (confirmed by direct read before this card), so its one
+        pre-existing consumer (plan_generator.py's own goal-directed
+        candidate generation, ~line 558) has always received `[]` in
+        production. That consumer calls this with no arguments and is left
+        untouched here -- `available_actions=None` (the default) preserves
+        that exact byte-for-byte behavior, matching this card's explicit
+        "don't rebuild that consumer" boundary. Only the new readiness-gate
+        call site (arc_runtime/bundle.py::_readiness_gate, A231) supplies
+        this parameter, which is what actually makes the untested-action
+        signal non-vacuous."""
+        payload: dict[str, Any] = {"task_id": self.task_id}
+        if available_actions:
+            payload["available_actions"] = [str(a) for a in available_actions]
+        result = self._call_tool("fetch_untested_actions", payload)
         return self._extract_action_ids(result)
 
     def fetch_per_action_evidence(self, action_id: str) -> dict[str, Any]:

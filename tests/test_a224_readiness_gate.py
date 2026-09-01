@@ -67,3 +67,40 @@ class TestReadinessStatus:
             domains, step_index=5, max_cycles=30, budget_fraction_before_fallthrough=0.1,
         )
         assert result == ReadinessStatus.PARTIAL_FALLTHROUGH
+
+
+class TestReadinessStatusUntestedActions:
+    """A231: readiness_status() also fires NOT_READY when whole-action-space
+    coverage (fetch_untested_actions, A135) is incomplete, not just entity
+    click-coverage."""
+
+    def test_all_entities_classified_but_untested_action_remains_is_not_ready(self):
+        domains = {1: CynefinDomain.CONVERGED, 2: CynefinDomain.COMPLEX, 3: CynefinDomain.CHAOTIC}
+        result = readiness_status(
+            domains, step_index=1, max_cycles=30, untested_non_click_actions=["ACTION3"],
+        )
+        assert result == ReadinessStatus.NOT_READY
+
+    def test_no_entities_at_all_but_untested_action_remains_is_not_ready(self):
+        """The pre-A231 empty-entity_domains early return must not shadow a
+        genuinely untested action -- a blank/entity-free grid whose only
+        real mechanic is a non-click action must still gate."""
+        result = readiness_status(
+            {}, step_index=1, max_cycles=30, untested_non_click_actions=["ACTION1"],
+        )
+        assert result == ReadinessStatus.NOT_READY
+
+    def test_untested_action_past_budget_fraction_is_partial_fallthrough(self):
+        domains = {1: CynefinDomain.CONVERGED}
+        result = readiness_status(
+            domains, step_index=15, max_cycles=30, untested_non_click_actions=["ACTION2"],
+        )
+        assert result == ReadinessStatus.PARTIAL_FALLTHROUGH
+
+    def test_empty_untested_actions_default_is_ready_when_entities_all_classified(self):
+        """Regression: the default `()` must behave exactly like the
+        pre-A231 signature -- no untested_non_click_actions kwarg passed at
+        all here, matching every pre-existing call site."""
+        domains = {1: CynefinDomain.CONVERGED}
+        result = readiness_status(domains, step_index=1, max_cycles=30)
+        assert result == ReadinessStatus.READY

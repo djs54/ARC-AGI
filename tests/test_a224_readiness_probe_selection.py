@@ -86,3 +86,56 @@ class TestSelectReadinessProbe:
         probe = planner._select_readiness_probe(perception, entity_domains)
 
         assert probe.goal_id == "readiness_probe"
+
+
+class TestSelectReadinessProbeUntestedActions:
+    """A231: untested non-click actions (fetch_untested_actions, A135) get
+    their own probe candidate -- no x/y coordinate, since Executor.execute /
+    the real transport only special-case ACTION6's payload."""
+
+    def test_untested_action_selected_when_no_disorder_entities(self):
+        entities = (_entity(1),)
+        perception = PerceptionSnapshot(observation={}, grid_hash="h1", entities=entities)
+        entity_domains = {1: CynefinDomain.CONVERGED}
+
+        planner = PlanGenerator()
+        probe = planner._select_readiness_probe(
+            perception, entity_domains, untested_non_click_actions=["ACTION3"],
+        )
+
+        assert probe is not None
+        assert probe.action_id == "ACTION3"
+        assert probe.payload == {}, "no x/y -- only ACTION6 needs a coordinate payload"
+        assert probe.metadata.get("readiness_probe") is True
+        assert probe.metadata.get("readiness_probe_kind") == "action"
+        assert probe.goal_id == "readiness_probe"
+
+    def test_untested_action_takes_precedence_over_disorder_entities(self):
+        """A231 Track A precedence decision: untested actions are typically
+        a much smaller set than DISORDER entities on a busy grid, so they're
+        probed first, cheaply, before the more expensive entity-mapping
+        phase begins."""
+        entities = (_entity(1),)
+        perception = PerceptionSnapshot(observation={}, grid_hash="h1", entities=entities)
+        entity_domains = {1: CynefinDomain.DISORDER}
+
+        planner = PlanGenerator()
+        probe = planner._select_readiness_probe(
+            perception, entity_domains, untested_non_click_actions=["ACTION2", "ACTION4"],
+        )
+
+        assert probe is not None
+        assert probe.action_id == "ACTION2", "first untested action, deterministic order"
+
+    def test_empty_untested_actions_falls_through_to_entity_probe(self):
+        """Default `()` must behave exactly like the pre-A231 signature --
+        no untested_non_click_actions kwarg passed at all here."""
+        entities = (_entity(1),)
+        perception = PerceptionSnapshot(observation={}, grid_hash="h1", entities=entities)
+        entity_domains = {1: CynefinDomain.DISORDER}
+
+        planner = PlanGenerator()
+        probe = planner._select_readiness_probe(perception, entity_domains)
+
+        assert probe is not None
+        assert probe.action_id == "ACTION6"
