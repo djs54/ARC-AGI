@@ -479,6 +479,33 @@ def run_annatar_cycle(
             "deepening_cycle_count": 0,
             "already_retried": False,
             "any_progress": False,
+            # A235: baseline snapshot of state.world_model_edge_writes
+            # (A183's confirmed-real-graph-write counter) at anchor
+            # creation, so any_progress below can also credit real graph
+            # growth this anchor's own investigation caused, not just
+            # signals.meaningful_progress (a narrow whole-puzzle-progress
+            # boolean that stayed False across a whole live episode that
+            # had, in fact, produced real CHAOTIC/COMPLEX/CONVERGED
+            # classifications -- see backlog/A235.md).
+            #
+            # Known limitation (Track A, investigated not assumed): this
+            # snapshot is taken AFTER this same cycle's own evaluate phase
+            # already ran (workflow.py calls evaluate, then annatar --
+            # confirmed by direct read of both the probe-path and
+            # normal-path call sites), so a brand-new anchor's very first
+            # cycle can never have its own evaluate's graph write credited
+            # via this before/after comparison -- only cycle 2+ on the SAME
+            # anchor (DEEPENING/RETRY) can register growth. Accepted as a
+            # documented limitation rather than fixed via a pre-evaluate
+            # snapshot threaded through workflow.py/ports.py/bundle.py:
+            # a single-cycle anchor that immediately ADVANCEs was never
+            # going to threaten the 3-strike streak on its own (the streak
+            # only accumulates across MULTIPLE unproductive anchor
+            # conclusions), and the streak has time to matter precisely in
+            # the multi-cycle DEEPENING/RETRY case this fix already covers.
+            # See backlog/A235.md's Outcome for the live-data check behind
+            # this call.
+            "edge_writes_at_start": state.world_model_edge_writes,
         }
 
     current_state = InvestigationState(anchor["state"])
@@ -499,7 +526,45 @@ def run_annatar_cycle(
         resolve_report=resolve_report,
     )
     degraded = degraded or signals.degraded
-    anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress)
+    # A235: graph_grew is a second, independent progress signal alongside
+    # meaningful_progress -- real graph growth (a confirmed CONFIRMED_BY/
+    # FALSIFIED_BY/PREDICTS edge write, per A183's "only a confirmed real
+    # write counts" discipline) attributable to THIS anchor's own
+    # investigation counts as progress even when the narrower whole-puzzle
+    # meaningful_progress signal never fires. Edge-writes-only (not also
+    # node_writes): node writes include routine perception bookkeeping
+    # (GridEntity/GridSnapshot writes every cycle regardless of whether
+    # anything was actually learned), while edge writes only ever happen on
+    # a confirmed rule/transition-evidence write in evaluator.py -- the
+    # closer fit for "real causal learning," per this card's investigation.
+    # anchor.get(..., state.world_model_edge_writes) guards a pre-existing
+    # anchor dict (e.g. built directly in a test fixture, or from state
+    # persisted before this card) that predates this field -- defaulting to
+    # the current count makes graph_grew False rather than raising or
+    # spuriously crediting progress.
+    graph_grew = state.world_model_edge_writes > anchor.get("edge_writes_at_start", state.world_model_edge_writes)
+    anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress) or graph_grew
+
+    # A235 live-verification hook: mirrors workflow.py's PROBE_ANNATAR/
+    # RESOLVE_ANNATAR/STALL_CHECK precedent -- a greppable, concrete record
+    # of the two independent progress signals feeding any_progress every
+    # single cycle (not just on ADVANCE), so a live run can be directly
+    # inspected for whether graph_grew credited an anchor that meaningful_
+    # progress alone would have missed.
+    import logging as _annatar_logging
+
+    _annatar_logging.getLogger(__name__).info(
+        "ANCHOR_PROGRESS anchor_ref=%s anchor_type=%s meaningful_progress=%s graph_grew=%s any_progress=%s "
+        "edge_writes=%s edge_writes_at_start=%s streak=%s",
+        anchor["anchor_ref"],
+        anchor["anchor_type"],
+        bool(signals.meaningful_progress),
+        graph_grew,
+        anchor["any_progress"],
+        state.world_model_edge_writes,
+        anchor.get("edge_writes_at_start"),
+        state.annatar_unproductive_anchor_streak,
+    )
 
     if current_state == InvestigationState.AWAITING_LLM:
         vote = resolve_llm_vote(llm_port, state, signals)

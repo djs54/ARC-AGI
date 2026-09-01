@@ -1084,6 +1084,68 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
         assert outcome.decision == "advance"
         assert state.annatar_unproductive_anchor_streak == 0
 
+    def test_graph_growth_between_cycles_of_the_same_anchor_counts_as_productive(self):
+        """A235: real graph growth (state.world_model_edge_writes increasing
+        since the anchor's own edge_writes_at_start snapshot) attributable
+        to THIS anchor's own investigation must count as progress too, even
+        when signals.meaningful_progress -- a narrow whole-puzzle-progress
+        boolean -- never fires. Confirmed live: a 5-step episode terminated
+        immediately after real, graph-confirmed CHAOTIC/COMPLEX/CONVERGED
+        classifications were written to the graph during that exact
+        episode, because meaningful_progress alone never credited any of it
+        (see backlog/A235.md). This simulates cycle 2+ of the same anchor
+        (edge_writes_at_start was snapshotted on an earlier cycle, then a
+        later cycle's own evaluate wrote a confirmed graph edge) -- the one
+        case this fix is designed to catch, per Track A's timing analysis
+        (a brand-new anchor's very first cycle can't self-credit its own
+        same-cycle write; see the code comment in annatar_signals.py)."""
+        state = WorkflowState(
+            active_investigation_anchor={
+                "anchor_ref": "e1",
+                "anchor_type": "entity",
+                "thread_id": None,
+                "state": InvestigationState.DEEPENING.value,
+                "deepening_cycle_count": 0,
+                "already_retried": False,
+                "any_progress": False,
+                "edge_writes_at_start": 0,
+            }
+        )
+        # Simulates real graph growth having happened on an earlier cycle
+        # of this SAME anchor's own investigation, since its
+        # edge_writes_at_start snapshot was taken.
+        state.world_model_edge_writes = 2
+
+        outcome = self._unproductive_advance(state)
+
+        assert outcome.decision == "advance"
+        # meaningful_progress was False the whole time (per
+        # _unproductive_advance) -- only graph_grew credits this anchor.
+        assert state.annatar_unproductive_anchor_streak == 0
+
+    def test_flat_edge_writes_across_cycles_still_counts_as_unproductive(self):
+        """Regression: the guard's original purpose must survive this
+        fix. An anchor whose meaningful_progress stays False AND whose
+        state.world_model_edge_writes is genuinely flat (no growth at all,
+        matching edge_writes_at_start on every cycle) must still correctly
+        count as unproductive -- 3 such anchors in a row must still
+        terminate the whole episode, exactly as before this card."""
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        # world_model_edge_writes stays at its default (0) for the whole
+        # test -- _unproductive_advance never touches it, so every anchor's
+        # edge_writes_at_start snapshot (taken at 0) never grows.
+        assert state.world_model_edge_writes == 0
+
+        outcome1 = self._unproductive_advance(state)
+        outcome2 = self._unproductive_advance(state)
+        outcome3 = self._unproductive_advance(state)
+
+        assert outcome1.decision == "advance"
+        assert outcome2.decision == "advance"
+        assert outcome3.decision == "terminate"
+        assert state.annatar_unproductive_anchor_streak == 3
+        assert state.active_investigation_anchor is None
+
     def test_max_unproductive_anchors_kwarg_overrides_default_threshold(self):
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
         # A221 Finding 1: entity_ref candidate + CHAOTIC-shaped graph_port,
