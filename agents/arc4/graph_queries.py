@@ -813,28 +813,21 @@ class ArcGraphQueryPort:
                     tool_key="record_action_effect",
                 )
             )
-            updates.append(
-                self._normalize_write_result(
-                    self._call_tool(
-                        "record_reward_prediction_error",
-                        {
-                            "task_id": self.task_id,
-                            "action_id": action_id,
-                            "step": metadata.get("step") or metadata.get("execution_step") or 0,
-                            # B278's arc_record_reward_prediction_error derives the
-                            # error itself as (actual_reward - predicted_reward) and
-                            # bumps falsified_count when it is < -0.3. The planner
-                            # proposed this action expecting a productive effect
-                            # (predicted 1.0); a no-progress step realises 0.0, giving
-                            # error -1.0 → falsification. Sending the legacy
-                            # "reward_prediction_error" key is silently ignored.
-                            "predicted_reward": 1.0,
-                            "actual_reward": 1.0 if evaluation.meaningful_progress else 0.0,
-                        },
-                    ),
-                    tool_key="record_reward_prediction_error",
-                )
-            )
+            # A232: record_reward_prediction_error used to be called here with a
+            # hardcoded predicted_reward=1.0 and actual_reward derived from
+            # whole-puzzle meaningful_progress. Since predicted_reward never
+            # varied, B278's arc_record_reward_prediction_error error = actual -
+            # predicted could only ever be 0.0 (no-op) or -1.0 (falsification) --
+            # the confidence-boosting branch (error > 0.3) was mathematically
+            # unreachable. This call never once increased an ActionFact's
+            # confidence in production; it only ever falsified a working action
+            # for lacking whole-puzzle progress, which is a different question
+            # than whether the action's predicted effect was confirmed. Confirmed
+            # live (A232): falsified_count == attempts for every action checked,
+            # even ones with real, unfalsified Rule-graph evidence at confidence
+            # up to 1.0 for the exact same action at the exact same moment. See
+            # backlog/A232.md. record_action_effect above is unaffected -- it
+            # never touches confidence/falsified_count server-side.
 
         if not updates:
             return {"status": "skipped", "tool": "record_evaluation"}
