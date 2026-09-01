@@ -214,12 +214,57 @@ def build_arc_v2_bundle(
     # ordering. Lives in Annatar's own module home
     # (annatar_state_machine.readiness_status), not a new rival component,
     # per A224's explicit "no rival gate" constraint.
+    #
+    # A231: extended with whole-action-space coverage (fetch_untested_
+    # actions, A135) alongside the pre-existing entity click-coverage
+    # check -- a puzzle whose real mechanic is a non-click action (ACTION1-5)
+    # must not sail through this gate reporting READY while that action has
+    # never been tried. `_available_actions_from_observation` mirrors
+    # workflow.py's own existing stall-check pattern (`current_observation.
+    # get("available_actions", [])`) rather than reusing plan_generator.py's
+    # much larger `_available_actions`, which is goal-scoped (merges
+    # mechanic priors, graph_records, multiple metadata sources) and takes a
+    # `goal: ResolvedGoal` this closure doesn't have -- no ResolvedGoal
+    # exists yet at this point in the cycle by design. "ACTION6" is filtered
+    # out of the untested-actions list because click coverage is already
+    # tracked at the entity level via entity_domains above; counting it here
+    # too would ask the same coverage question twice.
+    def _available_actions_from_observation(perception) -> list[str]:
+        observation = perception.observation
+        obs_actions = observation.get("available_actions") if isinstance(observation, Mapping) else None
+        if not isinstance(obs_actions, (list, tuple)):
+            return []
+        return [str(a) for a in obs_actions]
+
     def _readiness_gate(state, perception):
         entity_domains = classify_all_entity_domains(perception, graph_port)
-        status = readiness_status(entity_domains, step_index=state.step_index, max_cycles=max_cycles)
+
+        untested_non_click_actions: list[str] = []
+        obs_available_actions = _available_actions_from_observation(perception)
+        fetch_untested = getattr(graph_port, "fetch_untested_actions", None)
+        if fetch_untested is not None and obs_available_actions:
+            try:
+                untested = fetch_untested(available_actions=obs_available_actions)
+            except Exception:
+                untested = []
+            available_set = set(obs_available_actions)
+            untested_non_click_actions = [
+                str(action_id)
+                for action_id in (untested or [])
+                if str(action_id) != "ACTION6" and str(action_id) in available_set
+            ]
+
+        status = readiness_status(
+            entity_domains,
+            step_index=state.step_index,
+            max_cycles=max_cycles,
+            untested_non_click_actions=untested_non_click_actions,
+        )
         probe_candidate = None
         if status == ReadinessStatus.NOT_READY:
-            probe_candidate = plan_agent._select_readiness_probe(perception, entity_domains)
+            probe_candidate = plan_agent._select_readiness_probe(
+                perception, entity_domains, untested_non_click_actions=untested_non_click_actions,
+            )
         return PhaseResult(
             phase=WorkflowPhase.READINESS_GATE,
             status=PhaseStatus.OK,
@@ -229,6 +274,7 @@ def build_arc_v2_bundle(
                 "entities_mapped": sum(1 for d in entity_domains.values() if d != CynefinDomain.DISORDER),
                 "entities_total": len(entity_domains),
                 "probe_candidate": probe_candidate,
+                "untested_non_click_actions": untested_non_click_actions,
             },
         )
 

@@ -224,7 +224,7 @@ def _perception_result(entities):
     )
 
 
-def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None):
+def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None, untested_non_click_actions=()):
     goal = ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d", confidence=0.5))
 
     def perceive(state, observation):
@@ -234,10 +234,22 @@ def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None
         domains = classify_all_entity_domains(perception, graph_port)
         entities_total = len(domains)
         entities_mapped = sum(1 for d in domains.values() if d != CynefinDomain.DISORDER)
-        status = ReadinessStatus.READY if entities_mapped == entities_total else ReadinessStatus.NOT_READY
+        # A231: mirrors arc_runtime/bundle.py::_readiness_gate's real
+        # wiring -- untested_non_click_actions (whole-action-space
+        # coverage, fetch_untested_actions/A135) keeps the gate NOT_READY
+        # even once every entity is mapped, and drives probe selection via
+        # the same _select_readiness_probe the entity path already uses.
+        entities_ready = entities_mapped == entities_total
+        status = (
+            ReadinessStatus.READY
+            if entities_ready and not untested_non_click_actions
+            else ReadinessStatus.NOT_READY
+        )
         probe_candidate = None
         if status == ReadinessStatus.NOT_READY:
-            probe_candidate = PlanGenerator()._select_readiness_probe(perception, domains)
+            probe_candidate = PlanGenerator()._select_readiness_probe(
+                perception, domains, untested_non_click_actions=untested_non_click_actions,
+            )
         return PhaseResult(
             phase=WorkflowPhase.READINESS_GATE,
             status=PhaseStatus.OK,
@@ -247,6 +259,7 @@ def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None
                 "entities_mapped": entities_mapped,
                 "entities_total": entities_total,
                 "probe_candidate": probe_candidate,
+                "untested_non_click_actions": list(untested_non_click_actions),
             },
         )
 
@@ -439,3 +452,50 @@ class TestWorkflowReadinessGateRouting:
         assert probe_calls[0]["readiness_report"].get("status") == ReadinessStatus.NOT_READY
         assert state.readiness_gate_resolved is True
         assert len(resolve_calls) == 1, "must fall through to resolve/plan/vet in the SAME cycle Annatar resolved it"
+
+    def test_untested_non_click_action_keeps_gate_not_ready_even_after_every_entity_mapped(self):
+        """A231's core regression: readiness_status() must not report READY
+        just because every visible entity got click-probed -- whole-
+        action-space coverage (fetch_untested_actions/A135) is a second,
+        independent condition. The probe path routes the untested action
+        through the exact same execute/evaluate/Annatar cycle A230 already
+        wired up for entity probes -- zero changes to workflow.py itself,
+        confirmed here by using the same orchestrator/dependencies wiring
+        every other test in this class uses."""
+        resolve_calls, execute_calls = [], []
+        annatar_calls: list[dict] = []
+
+        def fake_annatar(state, perception, execution, evaluation, *, readiness_report=None, **_ignored):
+            annatar_calls.append({"readiness_report": readiness_report})
+            return AnnatarOutcome(decision="repeat_deepen", exploration_complete=False)
+
+        # Entity already fully mapped (CONVERGED, not DISORDER) -- the
+        # pre-A231 gate would have reported READY here.
+        graph_port = MagicMock()
+        graph_port.fetch_entity_neighborhood.return_value = {
+            "hypotheses": [], "rules": [{"confidence": 0.6, "falsified": False, "to_color": 3}],
+        }
+        deps = _make_dependencies(
+            graph_port=graph_port,
+            resolve_calls=resolve_calls,
+            execute_calls=execute_calls,
+            annatar=fake_annatar,
+            untested_non_click_actions=["ACTION3"],
+        )
+        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=1))
+        state = WorkflowState()
+
+        orchestrator.run(state, {"entities": (_entity(1),)})
+
+        assert resolve_calls == [], "gate must still route to the probe path, not resolve -- an untested action remains"
+        assert len(execute_calls) == 1
+        probed_candidate = execute_calls[0]
+        assert probed_candidate.action_id == "ACTION3", "the untested action itself is the probe candidate"
+        assert probed_candidate.payload == {}, "no x/y -- non-click action probes carry no coordinate"
+        assert probed_candidate.metadata.get("readiness_probe") is True
+        assert probed_candidate.metadata.get("readiness_probe_kind") == "action"
+
+        probe_calls = [c for c in annatar_calls if c["readiness_report"] is not None]
+        assert len(probe_calls) == 1, "annatar must be invoked for this probe cycle, same A230-routed path as entity probes"
+        assert probe_calls[0]["readiness_report"].get("status") == ReadinessStatus.NOT_READY
+        assert probe_calls[0]["readiness_report"].get("untested_non_click_actions") == ["ACTION3"]

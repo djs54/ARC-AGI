@@ -272,6 +272,7 @@ def readiness_status(
     step_index: int,
     max_cycles: int,
     budget_fraction_before_fallthrough: float = 0.5,
+    untested_non_click_actions: Sequence[str] = (),
 ) -> ReadinessStatus:
     """A224: the Cynefin readiness gate. Pure, no I/O -- entity_domains is
     {entity_ref: CynefinDomain}, already computed by the caller (classify_domain()
@@ -295,14 +296,26 @@ def readiness_status(
     Starting-point budget_fraction_before_fallthrough=0.5, no empirical
     basis yet -- same honest-gap treatment as every other new threshold
     this session.
-    """
-    if not entity_domains:
-        # Nothing to map means nothing blocks proceeding -- a blank/empty
-        # grid shouldn't stall the episode forever waiting to map zero
-        # entities.
-        return ReadinessStatus.READY
 
-    if not any(domain == CynefinDomain.DISORDER for domain in entity_domains.values()):
+    A231: `untested_non_click_actions` extends "not fully mapped" to cover
+    whole-action-space coverage (fetch_untested_actions, A135), not just
+    entity click-coverage -- a puzzle whose real mechanic is a non-click
+    action (ACTION1-5) must not report READY while that action has never
+    been tried even once. Defaults to `()` so every existing caller that
+    doesn't pass it gets byte-for-byte unchanged behavior (regression-tested
+    against the full pre-A231 test_a224_readiness_gate.py suite, zero
+    assertion edits). The caller (arc_runtime/bundle.py::_readiness_gate) is
+    responsible for excluding "ACTION6" from this sequence before calling --
+    click coverage is already tracked via entity_domains above; double-
+    counting it here would just be the same coverage question asked twice.
+    """
+    has_disorder_entity = any(domain == CynefinDomain.DISORDER for domain in entity_domains.values())
+    has_untested_action = bool(untested_non_click_actions)
+
+    if not has_disorder_entity and not has_untested_action:
+        # Nothing left to map/probe means nothing blocks proceeding -- a
+        # blank/empty grid with no untested actions either shouldn't stall
+        # the episode forever.
         return ReadinessStatus.READY
 
     if max_cycles <= 0 or (step_index / max_cycles) >= budget_fraction_before_fallthrough:

@@ -793,6 +793,8 @@ class PlanGenerator:
         self,
         perception: PerceptionSnapshot,
         entity_domains: Mapping[Any, CynefinDomain],
+        *,
+        untested_non_click_actions: Sequence[str] = (),
     ) -> PlanCandidate | None:
         """A224 Task 4: deterministic probe selection for the readiness
         gate's "not ready" path -- does NOT route through resolve's LLM
@@ -804,16 +806,48 @@ class PlanGenerator:
         Reuses _click_targets' own existing salience ordering (small, rare,
         point/block entities first) among just the still-DISORDER entities --
         adapted, not reinvented, per this card's plan. Returns None when no
-        DISORDER entity remains (the caller should not be in the "not ready"
-        path at all if that's the case -- readiness_status() already
-        confirmed at least one exists, but this function is defensive on its
-        own terms rather than trusting the caller blindly).
+        DISORDER entity remains and no untested action remains (the caller
+        should not be in the "not ready" path at all if that's the case --
+        readiness_status() already confirmed at least one exists, but this
+        function is defensive on its own terms rather than trusting the
+        caller blindly).
 
         goal_id uses an explicit "readiness_probe" sentinel, not None or a
         fabricated real goal_id -- no ResolvedGoal exists yet at this point
         in the cycle by design (the whole point of the readiness gate is to
         skip resolve's escalation until the graph is ready).
+
+        A231: `untested_non_click_actions` (whole-action-space coverage,
+        fetch_untested_actions/A135) is checked FIRST, ahead of the
+        entity-DISORDER click-probe path below -- a deliberate precedence
+        choice, not an arbitrary one. Untested actions are typically a
+        single-digit set (ACTION1-5 minus whatever's already been tried at
+        least once) versus potentially dozens of DISORDER entities on a
+        busy grid, so clearing the cheap, small set first costs little and
+        gets whole-action-space coverage out of the way before the more
+        expensive entity-mapping phase begins. readiness_status()'s own
+        docstring doesn't prescribe an order between the two conditions --
+        both just flatten into one NOT_READY -- so nothing in its design
+        argues against this. Falls through to the pre-existing entity-probe
+        path once untested_non_click_actions is empty; the default `()`
+        keeps every pre-A231 call site's behavior unchanged.
         """
+        if untested_non_click_actions:
+            action_id = str(untested_non_click_actions[0])
+            return PlanCandidate(
+                action_id=action_id,
+                goal_id="readiness_probe",
+                score=0.0,
+                rationale=f"readiness probe: untested action {action_id}",
+                payload={},
+                book_id=f"readiness_probe:{action_id}",
+                metadata={
+                    "readiness_probe": True,
+                    "readiness_probe_kind": "action",
+                    "action_id": action_id,
+                },
+            )
+
         disorder_refs = {ref for ref, domain in entity_domains.items() if domain == CynefinDomain.DISORDER}
         if not disorder_refs:
             return None
