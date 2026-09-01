@@ -70,7 +70,21 @@ _SINGLE_ENTITY = (PerceivedEntity(kind="block", value="red", attributes={}),)
 def test_ambiguous_pair_escalates_once_then_suppresses_until_patience_elapses():
     """First cycle a pair goes ambiguous: escalate (unchanged responsiveness).
     Second cycle, identical pair, no new evidence: suppressed. Third cycle,
-    streak has crossed llm_patience_steps: escalate again."""
+    streak has crossed llm_patience_steps: escalate again.
+
+    A236 reopened (2026-09-01): the original fix reset the streak on
+    pair-change/real-confidence-divergence but never after an escalation
+    itself fired, so once the streak crossed llm_patience_steps once it
+    stayed there forever -- cycle 3 escalated, and every cycle after that
+    escalated too (verified by extending this exact scenario to 8 cycles
+    before the fix landed: cycles 4-8 all escalated). The fix resets
+    `ambiguous_pair_streak` to 0 immediately after a successful escalation,
+    restoring a true period-llm_patience_steps cadence
+    (escalate, suppress x(patience-1), escalate, suppress x(patience-1), ...)
+    instead of a one-time gate that permanently disables itself. This test
+    now runs 8 consecutive cycles of a genuinely unchanging ambiguous pair
+    and asserts that periodic pattern holds for the whole run, not just the
+    first 3 cycles."""
     resolver = GoalResolver(GoalResolverLimits(ambiguity_gap=0.12, llm_patience_steps=2))
     perception = _perception(entities=_AMBIGUOUS_ENTITIES)
     llm = _llm()
@@ -87,7 +101,33 @@ def test_ambiguous_pair_escalates_once_then_suppresses_until_patience_elapses():
 
     resolver.resolve(state, perception, llm_port=llm)
     assert len(llm.calls) == 2, "streak crossed llm_patience_steps: must escalate again"
-    assert state.ambiguous_pair_streak == 2
+    # A236 reopened: previously asserted == 2 (the streak just kept
+    # growing). The fix resets the streak to 0 right after this escalation
+    # fires, so the NEXT escalation on this same pair waits a fresh
+    # llm_patience_steps cycles instead of escalating on every subsequent
+    # cycle forever.
+    assert state.ambiguous_pair_streak == 0
+
+    # Cycles 4-8: this is exactly where the reopened bug showed up -- the
+    # original TDD test stopped at cycle 3 and never checked cycle 4+,
+    # which is precisely where a streak that never resets after escalating
+    # starts escalating every single cycle instead of maintaining the
+    # intended periodic cadence.
+    expected_escalations = {5, 7}  # cycle 3 already escalated above (call count 2)
+    expected_streaks = {4: 1, 5: 0, 6: 1, 7: 0, 8: 1}
+    for cycle in range(4, 9):
+        calls_before = len(llm.calls)
+        resolver.resolve(state, perception, llm_port=llm)
+        did_escalate = len(llm.calls) > calls_before
+        if cycle in expected_escalations:
+            assert did_escalate, f"cycle {cycle}: streak should have crossed llm_patience_steps again and escalated"
+        else:
+            assert not did_escalate, f"cycle {cycle}: identical pair, no new evidence -- must still be suppressed, not escalate every cycle (the reopened bug)"
+        assert state.ambiguous_pair_streak == expected_streaks[cycle]
+
+    # Total: escalations at cycles 1, 3, 5, 7 -- 4 total over 8 cycles,
+    # never degrading into "escalate every cycle" past cycle 3.
+    assert len(llm.calls) == 4
 
 
 def test_genuinely_new_ambiguous_pair_escalates_immediately():

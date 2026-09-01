@@ -79,6 +79,38 @@ class GoalResolver:
                 llm_applied = True
                 llm_reason = llm_patch.get("reason")
 
+                # A236 (reopened 2026-09-01): an escalation actually fired
+                # this cycle -- reset the per-pair streak so the NEXT
+                # escalation on this same pair waits a fresh
+                # llm_patience_steps cycles, instead of the streak (which
+                # _update_ambiguous_pair_streak increments unconditionally
+                # every cycle the pair stays unchanged) monotonically
+                # growing past the threshold and staying there forever.
+                # That was the reopened bug: the gate suppressed exactly
+                # one cycle total, then escalated every cycle for the rest
+                # of the pair's life, because nothing ever brought the
+                # streak back below llm_patience_steps once it crossed.
+                #
+                # Reset unconditionally on any successful escalation
+                # (whether `ambiguous` or `under_confident` was the
+                # deciding disjunct in _should_escalate_to_llm), not only
+                # an `ambiguous`-triggered one: _query_llm sends the full
+                # ordered candidate list every time it is called, and the
+                # returned patch is merged into hypotheses regardless of
+                # which condition triggered the call -- the LLM call
+                # itself does not know or care why it was invoked, so it
+                # provides equally fresh evidence about the current
+                # top-two pair either way. Gating the reset on
+                # `llm_applied` (not merely "escalation was requested")
+                # is deliberate too: a query that returned an unparseable
+                # response (llm_patch is None) paid the wall-clock cost
+                # but produced no new evidence, so the pair's patience
+                # streak should not be reset in that case -- this mirrors
+                # `llm_escalated` in the metadata below, which is also
+                # keyed off `llm_applied`, not off escalation having been
+                # merely attempted.
+                state.ambiguous_pair_streak = 0
+
         hypotheses = self._order_hypotheses(hypotheses)
         hypotheses = self._apply_failure_decay(state, hypotheses)
         hypotheses = self._order_hypotheses(hypotheses)
