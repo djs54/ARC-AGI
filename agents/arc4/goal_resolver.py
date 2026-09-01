@@ -60,6 +60,16 @@ class GoalResolver:
         if graph_port is not None:
             hypotheses, graph_evidence = self._merge_graph_evidence(hypotheses, graph_port, perception)
 
+        # A236: update the ambiguous-pair streak from the *same* hypothesis
+        # ordering _should_escalate_to_llm is about to see (post graph-merge,
+        # pre-LLM, pre-failure-decay/grounding-gate reordering below) --
+        # must run every cycle that computes ordered hypotheses, not only
+        # when escalation actually fires, so the streak tracks "how many
+        # consecutive cycles has this pair been ambiguous," not "how many
+        # times did we escalate." Runs before _should_escalate_to_llm so
+        # that function sees this cycle's already-updated streak.
+        self._update_ambiguous_pair_streak(state, hypotheses)
+
         llm_applied = False
         llm_reason: str | None = None
         if llm_port is not None and self._should_escalate_to_llm(state, hypotheses):
@@ -351,6 +361,36 @@ class GoalResolver:
 
         return updated
 
+    def _update_ambiguous_pair_streak(self, state: WorkflowState, hypotheses: Sequence[GoalHypothesis]) -> None:
+        """A236: track how many consecutive cycles the same top-two goal_id
+        pair has been ambiguous, so _should_escalate_to_llm's `ambiguous`
+        branch can suppress redundant re-escalation on an unchanged
+        question. Deliberately separate from consecutive_no_progress_count
+        (see WorkflowState's field comment) and deliberately a side effect
+        confined to this dedicated method -- _should_escalate_to_llm itself
+        stays a pure predicate, matching its existing shape."""
+        if len(hypotheses) < 2:
+            state.last_ambiguous_pair = None
+            state.ambiguous_pair_streak = 0
+            return
+
+        ordered = self._order_hypotheses(hypotheses)
+        top = ordered[0]
+        runner_up = ordered[1]
+        pair = (top.goal_id, runner_up.goal_id)
+        ambiguous_raw = (top.confidence - runner_up.confidence) <= self._limits.ambiguity_gap
+
+        if not ambiguous_raw:
+            # Real evidence moved the pair apart -- any future re-ambiguity
+            # (same pair or not) must be treated as new, not still-suppressed.
+            state.last_ambiguous_pair = None
+            state.ambiguous_pair_streak = 0
+        elif state.last_ambiguous_pair == pair:
+            state.ambiguous_pair_streak += 1
+        else:
+            state.last_ambiguous_pair = pair
+            state.ambiguous_pair_streak = 0
+
     def _should_escalate_to_llm(self, state: WorkflowState, hypotheses: Sequence[GoalHypothesis]) -> bool:
         if len(hypotheses) < 2:
             return bool(hypotheses and hypotheses[0].confidence < self._limits.low_confidence_threshold and state.consecutive_no_progress_count >= self._limits.llm_patience_steps)
@@ -358,7 +398,20 @@ class GoalResolver:
         ordered = self._order_hypotheses(hypotheses)
         top = ordered[0]
         runner_up = ordered[1]
-        ambiguous = (top.confidence - runner_up.confidence) <= self._limits.ambiguity_gap
+        pair = (top.goal_id, runner_up.goal_id)
+        ambiguous_raw = (top.confidence - runner_up.confidence) <= self._limits.ambiguity_gap
+        if ambiguous_raw and state.last_ambiguous_pair == pair and state.ambiguous_pair_streak > 0:
+            # A236: this exact pair was already ambiguous last cycle with no
+            # new evidence (streak > 0, tracked by _update_ambiguous_pair_streak)
+            # -- keep suppressing re-escalation until the streak crosses the
+            # same llm_patience_steps threshold the under_confident branch
+            # below already uses, mirroring its existing precedent.
+            ambiguous = state.ambiguous_pair_streak >= self._limits.llm_patience_steps
+        else:
+            # Either genuinely not ambiguous, or this is the first cycle
+            # this exact pair has been ambiguous (streak == 0) -- escalate
+            # immediately, preserving today's responsiveness to new ambiguity.
+            ambiguous = ambiguous_raw
         under_confident = top.confidence < self._limits.low_confidence_threshold and state.consecutive_no_progress_count >= self._limits.llm_patience_steps
         return ambiguous or under_confident
 

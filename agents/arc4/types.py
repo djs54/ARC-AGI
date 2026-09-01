@@ -432,6 +432,15 @@ class WorkflowState:
     loop_history_pointer: int = -1
     active_goal: ResolvedGoal | None = None
     consecutive_no_progress_count: int = 0
+    # A236: tracks how many consecutive cycles the SAME top-two goal_id pair
+    # has been ambiguous, so _should_escalate_to_llm's `ambiguous` branch can
+    # stop re-asking the LLM the identical question every cycle. Deliberately
+    # separate from consecutive_no_progress_count (a whole-episode "nothing
+    # has progressed" signal) -- conflating the two would treat "this specific
+    # pair is still ambiguous" and "the whole episode is stalled" as the same
+    # fact, which they are not.
+    last_ambiguous_pair: tuple[str, str] | None = None
+    ambiguous_pair_streak: int = 0
     action_attempt_counts: dict[str, int] = field(default_factory=dict)
     action_falsification_counts: dict[str, int] = field(default_factory=dict)
     goal_failure_counts: dict[str, int] = field(default_factory=dict)
@@ -521,6 +530,8 @@ class WorkflowState:
             "loop_history_pointer": self.loop_history_pointer,
             "active_goal": self.active_goal.to_dict() if self.active_goal else None,
             "consecutive_no_progress_count": self.consecutive_no_progress_count,
+            "last_ambiguous_pair": list(self.last_ambiguous_pair) if self.last_ambiguous_pair else None,
+            "ambiguous_pair_streak": self.ambiguous_pair_streak,
             "action_attempt_counts": self.action_attempt_counts,
             "action_falsification_counts": self.action_falsification_counts,
             "goal_failure_counts": self.goal_failure_counts,
@@ -552,6 +563,8 @@ class WorkflowState:
             loop_history_pointer=d.get("loop_history_pointer", -1),
             active_goal=ResolvedGoal.from_dict(d["active_goal"]) if d.get("active_goal") else None,
             consecutive_no_progress_count=d.get("consecutive_no_progress_count", 0),
+            last_ambiguous_pair=tuple(d["last_ambiguous_pair"]) if d.get("last_ambiguous_pair") else None,
+            ambiguous_pair_streak=d.get("ambiguous_pair_streak", 0),
             action_attempt_counts=d.get("action_attempt_counts", {}),
             action_falsification_counts=d.get("action_falsification_counts", {}),
             goal_failure_counts=d.get("goal_failure_counts", {}),
