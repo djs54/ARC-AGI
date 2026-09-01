@@ -973,7 +973,19 @@ class ArcGraphQueryPort:
         if result is None:
             return []
         if isinstance(result, Mapping):
-            for key in ("goal_evidence", "mechanic_priors", "results", "priors", "records", "items", "actions"):
+            # A233: "goals" added -- confirmed live (arc_queries.py::
+            # arc_get_goal_evidence, sibling hippocampy repo) that the
+            # server's real fetch_goal_evidence response shape is
+            # {"goals": [{"id": ..., "confidence": ..., ...}], "source": ...},
+            # one VictoryCondition record per real goal_id. Without "goals"
+            # recognized here, the whole per-goal list was silently
+            # discarded and the entire mapping collapsed into one synthetic,
+            # contentless "goal_evidence" record (confidence 0.0, no real
+            # goal_id) -- so every individual goal's own graph confidence
+            # was unreachable by _merge_single_record/_apply_grounding_gate
+            # no matter how much real data the server held. See
+            # backlog/A233.md's Outcome for the live query that found this.
+            for key in ("goals", "goal_evidence", "mechanic_priors", "results", "priors", "records", "items", "actions"):
                 value = result.get(key)
                 if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
                     return value
