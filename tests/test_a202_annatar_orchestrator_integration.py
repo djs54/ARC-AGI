@@ -777,6 +777,153 @@ class TestComputeCycleSignals:
         assert signals.readiness_entities_mapped == 1
         assert signals.readiness_entities_total == 4
 
+    def test_resolve_report_none_leaves_new_fields_none(self):
+        """A234: every existing run_annatar_cycle/compute_cycle_signals
+        caller passes no resolve_report -- confirms the new parameter is
+        optional and defaults to not affecting anything."""
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+        )
+        assert signals.resolve_grounding_gate_passed is None
+        assert signals.resolve_llm_escalated is None
+        assert signals.resolve_hypothesis_ambiguity is None
+
+    def test_resolve_report_fields_pass_through_when_provided(self):
+        signals = compute_cycle_signals(
+            WorkflowState(),
+            _perception_snapshot(),
+            _execution_result(),
+            _evaluation_result(meaningful_progress=False, grid_changed=True),
+            anchor_ref="g1",
+            anchor_type="goal",
+            deepening_cycle_count=0,
+            already_retried=False,
+            graph_port=None,
+            resolve_report={
+                "grounding_gate_passed": False,
+                "llm_escalated": True,
+                "llm_reason": "ambiguous hypotheses",
+                "hypothesis_count": 3,
+                "top_two_confidence_gap": 0.05,
+            },
+        )
+        assert signals.resolve_grounding_gate_passed is False
+        assert signals.resolve_llm_escalated is True
+        assert signals.resolve_hypothesis_ambiguity == 0.05
+
+    def test_resolve_report_does_not_change_transition_decision(self):
+        """A234's Track A conclusion: resolve_grounding_gate_passed/
+        resolve_llm_escalated/resolve_hypothesis_ambiguity must carry zero
+        decision weight, same as veto_reason (A212) and readiness_status
+        (A230) before it -- transition() output must be identical whether
+        or not they're set, holding every other signal fixed."""
+        from agents.arc4.annatar_state_machine import transition
+
+        base_kwargs = dict(
+            meaningful_progress=False,
+            confidence=0.2,
+            untested_remaining=True,
+            all_falsified=False,
+            execution_inconclusive=False,
+            deepening_cycle_count=0,
+            already_retried=False,
+        )
+        without_resolve_report = CycleSignals(**base_kwargs)
+        with_resolve_report = CycleSignals(
+            **base_kwargs,
+            resolve_grounding_gate_passed=False,
+            resolve_llm_escalated=True,
+            resolve_hypothesis_ambiguity=0.01,
+        )
+
+        assert transition(InvestigationState.EXPLORING, without_resolve_report) == transition(
+            InvestigationState.EXPLORING, with_resolve_report
+        )
+
+
+class TestResolveReportVisibilityFoldedIntoAnnatarCall:
+    """A234: goal_resolver.py::resolve()'s own already-computed per-cycle
+    output (grounding_gate_passed/llm_escalated/llm_reason/hypothesis
+    ambiguity) previously never reached Annatar's normal-cycle call at all
+    -- the same structural gap A230 found and fixed for the readiness/probe
+    phase, now closed here for goal resolution. This test pins that the
+    signal actually reaches the existing self._dependencies.annatar(...)
+    call (no new call site), built from the ResolvedGoal object workflow.py
+    already holds as resolved_goal_payload."""
+
+    def test_resolve_report_reaches_annatar_normal_cycle_call(self):
+        calls: list[str] = []
+        mock_annatar = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
+        goal = ResolvedGoal(
+            selected=GoalHypothesis(goal_id="goal-1", description="goal-1", confidence=0.5),
+            alternatives=(GoalHypothesis(goal_id="goal-2", description="goal-2", confidence=0.42),),
+            grounding_gate_passed=False,
+            metadata={
+                "hypotheses": [{"goal_id": "goal-1"}, {"goal_id": "goal-2"}],
+                "llm_escalated": True,
+                "llm_reason": "ambiguous hypotheses",
+            },
+        )
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "resolve": [PhaseResult(phase=WorkflowPhase.RESOLVE, payload=goal)],
+                "evaluate": [_evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat")],
+            },
+        )
+        deps.annatar = mock_annatar
+
+        WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert mock_annatar.call_count == 1
+        resolve_report = mock_annatar.call_args_list[0].kwargs["resolve_report"]
+        assert resolve_report["grounding_gate_passed"] is False
+        assert resolve_report["llm_escalated"] is True
+        assert resolve_report["llm_reason"] == "ambiguous hypotheses"
+        assert resolve_report["hypothesis_count"] == 2
+        assert resolve_report["top_two_confidence_gap"] == pytest.approx(0.08)
+
+    def test_no_alternatives_reports_none_confidence_gap(self):
+        calls: list[str] = []
+        mock_annatar = MagicMock(return_value=AnnatarOutcome(decision="terminate"))
+        goal = ResolvedGoal(selected=GoalHypothesis(goal_id="goal-1", description="goal-1", confidence=0.5))
+        deps = _shared_dependencies(
+            calls,
+            overrides={
+                "resolve": [PhaseResult(phase=WorkflowPhase.RESOLVE, payload=goal)],
+                "evaluate": [_evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat")],
+            },
+        )
+        deps.annatar = mock_annatar
+
+        WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        resolve_report = mock_annatar.call_args_list[0].kwargs["resolve_report"]
+        assert resolve_report["top_two_confidence_gap"] is None
+        assert resolve_report["grounding_gate_passed"] is True
+        assert resolve_report["llm_escalated"] is False
+
+    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
+        """Regression guard: with no Annatar wired in, resolve()'s output is
+        never read into a resolve_report at all -- this card only ever
+        builds the dict for an Annatar call that, with annatar=None, never
+        happens."""
+        calls: list[str] = []
+        deps = _shared_dependencies(calls)
+
+        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
+
+        assert calls == ["perceive", "resolve", "plan", "vet", "execute", "evaluate"]
+        assert result.status == WorkflowStatus.TERMINATED
+
 
 # ── Unit tests: agents/arc4/annatar_signals.run_annatar_cycle ─────────
 

@@ -137,7 +137,15 @@ class AnnatarPhase(Protocol):
     workflow.py's probe-path block on every probe cycle so Annatar's own
     outcome -- not workflow.py's direct read of `readiness_status()` --
     drives whether probing continues. See annatar_signals.run_annatar_cycle
-    and AnnatarOutcome.exploration_complete."""
+    and AnnatarOutcome.exploration_complete.
+
+    `resolve_report` (A234, same optional-keyword, informational-only
+    pattern as `readiness_report`): goal_resolver.py::resolve()'s own
+    already-computed per-cycle output (`grounding_gate_passed`/
+    `llm_escalated`/hypothesis-ambiguity), passed through by workflow.py's
+    normal-cycle call from the `resolved_goal_payload` it already holds.
+    Carries no decision weight -- see annatar_signals.run_annatar_cycle's
+    own docstring and CycleSignals.resolve_hypothesis_ambiguity for why."""
 
     def __call__(
         self,
@@ -151,6 +159,7 @@ class AnnatarPhase(Protocol):
         veto_reason: str | None = None,
         veto_alternative_action_id: str | None = None,
         readiness_report: Mapping[str, Any] | None = None,
+        resolve_report: Mapping[str, Any] | None = None,
     ) -> AnnatarOutcome: ...
 
 

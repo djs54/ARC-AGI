@@ -426,6 +426,31 @@ class WorkflowOrchestrator:
                         if cycle_vetoes and state.latest_veto_alternative is not None
                         else None
                     )
+                    # A234: resolved_goal_payload is already in scope (set a
+                    # few lines above, right after the last `resolve` call
+                    # this cycle -- either the first resolve at the top of
+                    # the cycle, or the local same-cycle retry's resolve if
+                    # a first veto triggered one). Fold goal_resolver.py::
+                    # resolve()'s own already-computed per-cycle output into
+                    # this same existing Annatar call, mirroring A230's
+                    # readiness_report -- no new call site, no new routing
+                    # logic. `top_two_confidence_gap` re-derives the same
+                    # ambiguity measure goal_resolver.py::_should_escalate_
+                    # to_llm computes internally (selected vs. top
+                    # alternative's confidence), read-only here from data
+                    # already sitting on ResolvedGoal -- None when there is
+                    # no alternative to compare against.
+                    resolve_report = {
+                        "grounding_gate_passed": resolved_goal_payload.grounding_gate_passed,
+                        "llm_escalated": bool(resolved_goal_payload.metadata.get("llm_escalated")),
+                        "llm_reason": resolved_goal_payload.metadata.get("llm_reason"),
+                        "hypothesis_count": len(resolved_goal_payload.metadata.get("hypotheses", [])),
+                        "top_two_confidence_gap": (
+                            resolved_goal_payload.selected.confidence - resolved_goal_payload.alternatives[0].confidence
+                            if resolved_goal_payload.alternatives
+                            else None
+                        ),
+                    }
                     outcome = self._dependencies.annatar(
                         state,
                         perception_payload,
@@ -434,6 +459,21 @@ class WorkflowOrchestrator:
                         stall_reason=stall_reason,
                         veto_reason=veto_reason,
                         veto_alternative_action_id=veto_alternative_action_id,
+                        resolve_report=resolve_report,
+                    )
+                    # A234 live-verification hook: mirrors A230's own
+                    # PROBE_ANNATAR precedent -- a greppable, concrete
+                    # record that resolve()'s real output actually reached
+                    # this call, since (unlike every other phase) the
+                    # annatar dependency is not wrapped by
+                    # telemetry.wrap_phase and so never produces a
+                    # phase_transition snapshot of its own.
+                    import logging as _resolve_logging
+                    _resolve_logging.getLogger(__name__).info(
+                        "RESOLVE_ANNATAR grounding_gate_passed=%s llm_escalated=%s top_two_confidence_gap=%s",
+                        resolve_report["grounding_gate_passed"],
+                        resolve_report["llm_escalated"],
+                        resolve_report["top_two_confidence_gap"],
                     )
                     # A205 / spec section 8: make a degraded (graph-unreachable)
                     # Annatar cycle visible in telemetry rather than silently

@@ -154,6 +154,7 @@ def compute_cycle_signals(
     veto_reason: str | None = None,
     veto_alternative_action_id: str | None = None,
     readiness_report: Mapping[str, Any] | None = None,
+    resolve_report: Mapping[str, Any] | None = None,
 ) -> CycleSignals:
     meaningful_progress = bool(evaluation.meaningful_progress)
 
@@ -235,6 +236,21 @@ def compute_cycle_signals(
     readiness_entities_mapped = readiness_report.get("entities_mapped") if readiness_report is not None else None
     readiness_entities_total = readiness_report.get("entities_total") if readiness_report is not None else None
 
+    # A234: purely informational -- set from goal_resolver.py::resolve()'s
+    # own already-computed output (workflow.py builds this dict from
+    # resolved_goal_payload right before the normal-cycle Annatar call, see
+    # workflow.py's own A234 comment at that call site). Same "informed, not
+    # empowered" precedent as readiness_report/veto_reason above --
+    # transition() never reads these three fields (see Track A's reasoning
+    # on CycleSignals.resolve_hypothesis_ambiguity's own docstring).
+    resolve_grounding_gate_passed = (
+        resolve_report.get("grounding_gate_passed") if resolve_report is not None else None
+    )
+    resolve_llm_escalated = resolve_report.get("llm_escalated") if resolve_report is not None else None
+    resolve_hypothesis_ambiguity = (
+        resolve_report.get("top_two_confidence_gap") if resolve_report is not None else None
+    )
+
     return CycleSignals(
         meaningful_progress=meaningful_progress,
         confidence=confidence,
@@ -250,6 +266,9 @@ def compute_cycle_signals(
         readiness_status=readiness_status,
         readiness_entities_mapped=readiness_entities_mapped,
         readiness_entities_total=readiness_entities_total,
+        resolve_grounding_gate_passed=resolve_grounding_gate_passed,
+        resolve_llm_escalated=resolve_llm_escalated,
+        resolve_hypothesis_ambiguity=resolve_hypothesis_ambiguity,
     )
 
 
@@ -378,6 +397,7 @@ def run_annatar_cycle(
     veto_alternative_action_id: str | None = None,
     max_unproductive_anchors: int = DEFAULT_MAX_UNPRODUCTIVE_ANCHORS,
     readiness_report: Mapping[str, Any] | None = None,
+    resolve_report: Mapping[str, Any] | None = None,
 ) -> AnnatarOutcome:
     """The actual AnnatarPhase: resolves the current investigation thread's
     state via annatar_state_machine's pure functions, persists the result
@@ -413,7 +433,19 @@ def run_annatar_cycle(
     table, to compute AnnatarOutcome.exploration_complete: True for READY/
     PARTIAL_FALLTHROUGH, False for NOT_READY, None when no report was passed
     (normal post-readiness-gate cycles, or no readiness gate configured at
-    all)."""
+    all).
+
+    `resolve_report` (A234): goal_resolver.py::resolve()'s own already-
+    computed per-cycle output (`{"grounding_gate_passed": bool,
+    "llm_escalated": bool, "llm_reason": str | None, "top_two_confidence_
+    gap": float | None}`), built by workflow.py's normal-cycle call site
+    from the `resolved_goal_payload` it already holds. Threaded into
+    CycleSignals (informational only, see compute_cycle_signals) exactly
+    like readiness_report above -- no new decision logic here, no
+    AnnatarOutcome field of its own. See Track A's reasoning (backlog/
+    A234.md's Outcome, and CycleSignals.resolve_hypothesis_ambiguity's own
+    docstring) for why this stays purely informational rather than gaining
+    an exploration_complete-style aggregate the way readiness_report did."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
     # AnnatarOutcome.degraded at the bottom of this function.
@@ -464,6 +496,7 @@ def run_annatar_cycle(
         veto_reason=veto_reason,
         veto_alternative_action_id=veto_alternative_action_id,
         readiness_report=readiness_report,
+        resolve_report=resolve_report,
     )
     degraded = degraded or signals.degraded
     anchor["any_progress"] = anchor.get("any_progress", False) or bool(signals.meaningful_progress)

@@ -283,7 +283,7 @@ def build_arc_v2_bundle(
     # closure above already captures graph_port/llm_port at bundle-build
     # time rather than the orchestrator holding its own reference, so
     # WorkflowOrchestrator itself needs no graph_port constructor param.
-    annatar = lambda state, perception, execution, evaluation, *, stall_reason=None, veto_reason=None, veto_alternative_action_id=None, readiness_report=None: run_annatar_cycle(
+    annatar = lambda state, perception, execution, evaluation, *, stall_reason=None, veto_reason=None, veto_alternative_action_id=None, readiness_report=None, resolve_report=None: run_annatar_cycle(
         state,
         perception,
         execution,
@@ -294,6 +294,7 @@ def build_arc_v2_bundle(
         veto_reason=veto_reason,
         veto_alternative_action_id=veto_alternative_action_id,
         readiness_report=readiness_report,
+        resolve_report=resolve_report,
     )
 
     # A211: best-effort crash cleanup closure -- captures graph_port at

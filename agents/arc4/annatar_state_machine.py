@@ -124,6 +124,30 @@ class CycleSignals:
     readiness_status: "ReadinessStatus | None" = None
     readiness_entities_mapped: int | None = None
     readiness_entities_total: int | None = None
+    # A234: informational-only resolve-phase report, threaded through from
+    # workflow.py's normal-cycle call to self._dependencies.annatar(...) via
+    # compute_cycle_signals' new `resolve_report` parameter. Same "carries
+    # no decision weight for the per-anchor transition" precedent A230's
+    # readiness_status/readiness_entities_mapped/readiness_entities_total
+    # (and A212's veto_reason/veto_alternative_action_id) already establish
+    # above -- transition() never reads any of these three fields. Track A
+    # (A234's own investigation, see backlog/A234.md's Outcome) concluded
+    # this should stay purely informational: resolve_hypothesis_ambiguity is
+    # a goal-level "which hypothesis to pursue" signal computed over
+    # GoalHypothesis objects, a different scope from the per-anchor
+    # Cynefin `domain` field above (live rule/hypothesis evidence *for this
+    # anchor specifically*, via classify_entity_domain_detailed) that
+    # A217's COMPLEX-domain deepening-patience extension already reads --
+    # and goal_resolver.py::resolve() already owns the decision of what to
+    # do about hypothesis ambiguity (its own LLM-escalation logic via
+    # _should_escalate_to_llm). Reacting to the same signal a second time
+    # here would make transition() a rival decision-owner over ambiguity
+    # that goal_resolver already decides what to do about -- a Shift B
+    # violation, not a legitimate extension the way A217's anchor-scoped
+    # domain read is.
+    resolve_grounding_gate_passed: bool | None = None
+    resolve_llm_escalated: bool | None = None
+    resolve_hypothesis_ambiguity: float | None = None
 
 
 @dataclass(slots=True)
