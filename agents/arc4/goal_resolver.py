@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .mechanic_fusion import TransferredRuleRecord, fuse_transferred_rules
 from .ports import GraphQueryPort, LLMMessage, LLMPort
 from .rule_extraction import compute_fingerprint
-from .types import GoalHypothesis, PerceptionSnapshot, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowPhase, WorkflowState
+from .types import GoalHypothesis, PerceivedEntity, PerceptionSnapshot, PhaseResult, PhaseStatus, ResolvedGoal, WorkflowPhase, WorkflowState
 
 # A179: cross-game single-rule transfer is a lead, not a fact -- its
 # contribution must be strictly smaller than the in-game
@@ -112,10 +112,29 @@ class GoalResolver:
     ) -> list[GoalHypothesis]:
         hypotheses: list[GoalHypothesis] = []
 
-        for index, entity in enumerate(perception.entities[:3]):
+        # A171: rank by distinctiveness (rare color + small relative size)
+        # instead of raw raster-scan order -- entities[:3] used to mean "the
+        # first three same-colored blobs the scan happened to encounter,"
+        # which on a puzzle with dozens/hundreds of entities meant the real
+        # goal-relevant entity could never earn a tier-1 hypothesis at all.
+        # Mirrors plan_generator.py::_click_targets' own color_counts-based
+        # rarity philosophy, just applied to goal selection instead of click
+        # targets.
+        color_counts: dict[str, int] = {}
+        for entity in perception.entities:
+            color_counts[entity.value] = color_counts.get(entity.value, 0) + 1
+
+        ranked_entities = sorted(
+            perception.entities,
+            key=lambda e: self._distinctiveness_score(e, color_counts),
+            reverse=True,
+        )[:3]
+
+        for index, entity in enumerate(ranked_entities):
             goal_id = self._slugify(f"{entity.kind}-{entity.value or index}")
             description = self._describe_entity_goal(entity.kind, entity.value, perception)
-            confidence = min(0.75, self._limits.min_heuristic_confidence + 0.12 + (0.05 * (2 - min(index, 2))))
+            score = self._distinctiveness_score(entity, color_counts)
+            confidence = min(0.75, self._limits.min_heuristic_confidence + 0.12 + (0.05 * min(score, 1.0)))
             evidence = [f"entity:{entity.kind}:{entity.value}"]
 
             # A176: consume A175/A176's persisted transition history -- an
@@ -220,6 +239,16 @@ class GoalResolver:
             )
 
         return hypotheses[: self._limits.max_hypotheses]
+
+    @staticmethod
+    def _distinctiveness_score(entity: PerceivedEntity, color_counts: Mapping[str, int]) -> float:
+        """A171: rare-colored, small-relative-size entities score higher --
+        the same "prefer small, distinct objects" principle
+        plan_generator.py::_click_targets already uses for click-target
+        ranking, ported here for goal selection."""
+        rarity = 1.0 / max(color_counts.get(entity.value, 1), 1)
+        smallness = 1.0 - min(entity.attributes.get("coverage", 0.0), 1.0)
+        return (0.6 * rarity) + (0.4 * smallness)
 
     @staticmethod
     def _apply_mechanic_fusion_boost(
