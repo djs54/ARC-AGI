@@ -283,6 +283,10 @@ class WorkflowOrchestrator:
                 )
                 phase_results.append(planning)
                 planning_payload = self._require_payload(planning, WorkflowPhase.PLAN)
+                # A237: mirrors state.annatar_degraded's exact placement --
+                # set immediately after the phase call, before any branching
+                # on the result.
+                state.plan_degraded = getattr(planning_payload, "degraded", False)
 
                 vet = self._invoke_phase(
                     "vet",
@@ -294,6 +298,7 @@ class WorkflowOrchestrator:
                 )
                 phase_results.append(vet)
                 vet_payload = self._require_payload(vet, WorkflowPhase.VET)
+                state.vet_degraded = getattr(vet_payload, "degraded", False)
                 if not vet_payload.approved or vet.status == PhaseStatus.VETO:
                     cycle_vetoes += 1
                     state.latest_veto_reason = vet_payload.reason or vet.reason
@@ -319,6 +324,10 @@ class WorkflowOrchestrator:
                     )
                     phase_results.append(planning)
                     planning_payload = self._require_payload(planning, WorkflowPhase.PLAN)
+                    # A237: same placement as the initial plan/vet call site
+                    # above -- "most recent invocation" semantics, matching
+                    # annatar_degraded's own two-call-site precedent.
+                    state.plan_degraded = getattr(planning_payload, "degraded", False)
 
                     vet = self._invoke_phase(
                         "vet",
@@ -330,6 +339,7 @@ class WorkflowOrchestrator:
                     )
                     phase_results.append(vet)
                     vet_payload = self._require_payload(vet, WorkflowPhase.VET)
+                    state.vet_degraded = getattr(vet_payload, "degraded", False)
                     if not vet_payload.approved or vet.status == PhaseStatus.VETO:
                         state.latest_veto_reason = vet_payload.reason or vet.reason
                         state.latest_veto_alternative = vet_payload.alternative or vet_payload.candidate

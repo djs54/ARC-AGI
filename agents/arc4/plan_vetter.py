@@ -22,6 +22,18 @@ class PlanVetter:
     def __init__(self, limits: PlanVetterLimits | None = None, *, graph_port: GraphQueryPort | None = None) -> None:
         self._limits = limits or PlanVetterLimits()
         self._graph_port = graph_port
+        # A237: scratch flag, reset at the top of every vet() call and set
+        # True by _check_graph_gate/_has_live_rule_evidence when their
+        # except branch fires. Read back into every VetDecision this call
+        # returns. Same instance-scratch design as PlanGenerator._degraded
+        # (agents/arc4/plan_generator.py) -- PlanVetter is likewise a single
+        # long-lived instance reused for every cycle of an episode (see
+        # arc_runtime/bundle.py) and never called re-entrantly on itself, so
+        # this is safe for a purely additive visibility signal. One combined
+        # bit for both exception sites (not split into gate-vs-override
+        # reasons) per card A237's default -- no concrete consumer needs the
+        # distinction.
+        self._degraded = False
 
     def __call__(
         self,
@@ -41,6 +53,10 @@ class PlanVetter:
     ) -> PhaseResult[VetDecision]:
         del perception, goal
 
+        # A237: reset before this cycle's graph_port calls so a prior cycle's
+        # degradation never leaks forward into this one.
+        self._degraded = False
+
         candidate = plan.candidate
         if candidate is None:
             decision = VetDecision(
@@ -48,6 +64,7 @@ class PlanVetter:
                 candidate=None,
                 reason="missing plan candidate",
                 should_replan=True,
+                degraded=self._degraded,
             )
             return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.VETO, payload=decision, reason=decision.reason)
 
@@ -90,6 +107,7 @@ class PlanVetter:
                     "veto_type": "graph_evidence",
                     "graph_gate": graph_gate,
                 },
+                degraded=self._degraded,
             )
             return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.VETO, payload=decision, reason=decision.reason)
 
@@ -105,6 +123,7 @@ class PlanVetter:
                     "candidate_falsifications": candidate_falsifications,
                     "veto_type": "repeated_falsification",
                 },
+                degraded=self._degraded,
             )
             return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.VETO, payload=decision, reason=decision.reason)
 
@@ -125,6 +144,7 @@ class PlanVetter:
                     "candidate_falsifications": candidate_falsifications,
                     "veto_type": "excessive_repetition",
                 },
+                degraded=self._degraded,
             )
             return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.VETO, payload=decision, reason=decision.reason)
 
@@ -142,6 +162,7 @@ class PlanVetter:
                 "graph_gate": graph_gate,
                 "graph_gate_overridden": graph_gate_overridden,
             },
+            degraded=self._degraded,
         )
         return PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.OK, payload=decision, reason=decision.reason)
 
@@ -152,6 +173,10 @@ class PlanVetter:
         try:
             return self._graph_port.check_action_gate(action_id)
         except Exception:
+            # A237: fail-open behavior unchanged (allowed=True) -- just make
+            # the degradation visible instead of indistinguishable from a
+            # genuine "nothing to object to" gate result.
+            self._degraded = True
             return {"allowed": True, "reason": "graph_error"}
 
     def _has_live_rule_evidence(self, action_id: str) -> bool:
@@ -172,6 +197,9 @@ class PlanVetter:
         try:
             rules = fetch_rules(action_id) or []
         except Exception:
+            # A237: override behavior unchanged (degrades to False -- no
+            # override), just make the degradation visible.
+            self._degraded = True
             return False
         live_rule_confidences = [
             r.get("confidence", 0.0) for r in rules if isinstance(r, dict) and not r.get("falsified")

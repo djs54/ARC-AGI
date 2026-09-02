@@ -87,6 +87,20 @@ class PlanGenerator:
 
     def __init__(self, limits: PlanGeneratorLimits | None = None) -> None:
         self._limits = limits or PlanGeneratorLimits()
+        # A237: scratch flag, reset at the top of every generate() call and
+        # set True by _build_candidates/_available_actions when a graph_port
+        # call they depend on raises. Read back into PlanningResult.degraded
+        # at the end of generate(). Deliberately an instance-scratch field
+        # rather than threading a (result, degraded) tuple through
+        # _build_candidates'/_available_actions' return values -- both
+        # methods are called directly (expecting a plain list back) by ~15
+        # existing test files across this repo's plan_generator test suite,
+        # and PlanGenerator is a single long-lived instance reused for every
+        # cycle of an episode (see arc_runtime/bundle.py), never called
+        # re-entrantly/concurrently on itself, so a reset-per-generate()
+        # scratch attribute is safe and avoids that regression risk for a
+        # purely additive visibility signal.
+        self._degraded = False
 
     def __call__(
         self,
@@ -108,6 +122,9 @@ class PlanGenerator:
         graph_port: GraphQueryPort | None = None,
         llm_port: LLMPort | None = None,
     ) -> PhaseResult[PlanningResult]:
+        # A237: reset before this cycle's graph_port calls so a prior cycle's
+        # degradation never leaks forward into this one.
+        self._degraded = False
         graph_records = self._fetch_graph_records(graph_port, perception, goal)
         mechanic_actions = self._extract_mechanic_prior_actions(graph_records)
         available_actions = self._available_actions(perception, goal, graph_records, graph_port=graph_port)
@@ -137,6 +154,7 @@ class PlanGenerator:
             candidate=self._to_plan_candidate(selected, goal.selected.goal_id) if selected is not None else None,
             alternatives=alternatives,
             needs_vet=True,
+            degraded=self._degraded,
             metadata={
                 "goal_contract": self._serialize_goal(goal),
                 "graph_records": graph_records,
@@ -201,7 +219,10 @@ class PlanGenerator:
                     if evidence_contradictions > evidence_supports:
                         graph_contradiction_penalty = self._limits.falsification_penalty * (evidence_contradictions - evidence_supports)
                 except Exception:
-                    pass
+                    # A237: fetch_per_action_evidence raised -- graph_evidence
+                    # stays {} (unchanged fallback), but make the degradation
+                    # visible instead of silently absorbed.
+                    self._degraded = True
 
                 # A177: rule evidence -- a candidate action with a live, unfalsified
                 # causal rule behind it is more trustworthy than one with none, a
@@ -226,7 +247,10 @@ class PlanGenerator:
                             graph_evidence["confidence"] = max(graph_evidence.get("confidence", 0.0), max(live_rule_confidences))
                             graph_evidence["supports"] = graph_evidence.get("supports", 0) + len(live_rule_confidences)
                     except Exception:
+                        # A237: fetch_rules_for_action raised -- rules stays
+                        # [] (unchanged fallback), degradation made visible.
                         rules = []
+                        self._degraded = True
 
             target_variants: list[tuple[str, dict[str, Any], dict[str, Any]]] = [(action_id, {}, {})]
             if action_id == "ACTION6":
@@ -577,7 +601,9 @@ class PlanGenerator:
                             continue
                         candidates.append(action_text)
             except Exception:
-                pass  # graph unavailable — fall through to existing sources
+                # A237: graph unavailable — fall through to existing sources
+                # (unchanged fallback), degradation made visible.
+                self._degraded = True
 
         if not candidates:
             candidates.append(self._slugify(f"probe-{goal.selected.goal_id}"))
