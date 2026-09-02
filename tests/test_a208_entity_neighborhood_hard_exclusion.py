@@ -123,9 +123,13 @@ class TestEntityNeighborhoodHardExclusion:
             f"Expected ACTION6 candidate for entity 123 to be excluded "
             f"(all hypotheses falsified), but got {len(action6_candidates)} candidates"
         )
-        # Only fallback should remain
-        assert len(candidates) == 1
-        assert candidates[0].metadata.get("fallback") is True
+        # A238 (2026-09-01): _build_candidates used to fall back to a
+        # synthetic "probe-*" candidate here -- that string was never a
+        # real ARC command and guaranteed a 404 at the live transport
+        # (backlog/A238.md). It now leaves `candidates` empty instead, so
+        # PlanningResult.candidate becomes None rather than a doomed
+        # fallback.
+        assert candidates == []
 
     def test_entity_with_only_falsified_rules_excluded(self):
         """Scenario 2: Entity has rules but all are falsified.

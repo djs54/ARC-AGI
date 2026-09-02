@@ -60,6 +60,23 @@ def _score_after_n_falsifications(action_id: str, n: int) -> float:
     return result.candidate.score
 
 
+def _candidate_after_n_falsifications(action_id: str, n: int):
+    """Same scenario as _score_after_n_falsifications, but returns the raw
+    candidate (possibly None) instead of assuming one exists -- A238 made
+    PlanningResult.candidate=None a real, reachable outcome once the only
+    available action is excluded and no alternative exists."""
+    graph = _GraphPort(contradictions=n)
+    planner = PlanGenerator(LIMITS)
+    state = WorkflowState(
+        step_index=n,
+        action_attempt_counts={action_id: n},
+        action_falsification_counts={action_id: n},
+        consecutive_no_progress_count=0,
+    )
+    result = planner.generate(state, _perception(action_id), _goal(), graph_port=graph).payload
+    return result.candidate
+
+
 class TestDecayNoLongerForgivesRepeatedFalsification:
     """Updated for A191 (2026-08-23): this class's original concern was that
     decay could make a repeatedly-falsified action's score improve instead
@@ -77,14 +94,22 @@ class TestDecayNoLongerForgivesRepeatedFalsification:
         """A191 supersedes this card's original "does it get worse" concern
         for falsifications >= 2 -- confirm exclusion holds across the whole
         range this card's live finding covered (2, 3, and 4 failures), not
-        just the boundary."""
+        just the boundary.
+
+        Updated again for A238 (2026-09-01): ACTION1 is the only available
+        action here, so once A191 excludes it there is nothing left to
+        propose. This used to fall back to a synthetic "probe-*" candidate
+        with a flat 0.1 score -- that candidate was never a real ARC command
+        and guaranteed a 404 at the live transport (backlog/A238.md). The
+        fix leaves PlanningResult.candidate as None instead, so this test
+        now asserts that directly rather than asserting on a fallback score
+        that no longer exists."""
         for n in (2, 3, 4):
-            score = _score_after_n_falsifications("ACTION1", n)
-            # ACTION1 is the only available action; once excluded by A191,
-            # _build_candidates falls back to the flat 0.1 probe score.
-            assert score == pytest.approx(0.1), (
-                f"ACTION1 falsified {n} times should be excluded from real candidates "
-                f"and fall back to the flat probe score, got {score}"
+            candidate = _candidate_after_n_falsifications("ACTION1", n)
+            assert candidate is None, (
+                f"ACTION1 falsified {n} times should be excluded from real candidates, "
+                f"and with no alternative available should leave no candidate at all "
+                f"(A238), got {candidate}"
             )
 
     def test_single_falsification_still_penalizes_correctly(self):

@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 import httpx
 
 from benchmarks.arc3.adapter import ARC3Adapter, NoOpBrainClient
 from benchmarks.arc3.harness import ARC3Harness
+
+# A238 Track B: the only action_ids the real ARC API's /api/cmd/ endpoint
+# ever accepts (per this file's own open()/execute_action bare-ACTION6
+# usage -- coordinates travel via the JSON payload, never the id itself).
+# Defense-in-depth backstop for whatever produced plan_generator.py's
+# synthetic "probe-{goal_id}" fallback action_id (fixed at the source in
+# that file as part of this same card) -- confirmed live that an invalid
+# action_id reaching this method guaranteed a 404 on every single call, 28
+# wasted real API calls across this session's saved live-smoke logs. This
+# check rejects the request locally, before the network round-trip, with
+# the same CRASH-shaped failure the real 404 already produced (Executor.execute
+# wraps ANY exception raised here into the same PhaseStatus.CRASH shape), so
+# the only behavior change is that a bad id never actually reaches the live
+# API or consumes a real request against ARC's rate limit.
+_VALID_ACTION_ID = re.compile(r"^ACTION[1-7]$")
 
 
 class ArcV2GameSession:
@@ -48,6 +64,13 @@ class ArcV2GameSession:
         if self._real_api:
             if self._client is None:
                 raise RuntimeError("ARC v2 game session not opened")
+            if not _VALID_ACTION_ID.match(action_id):
+                # A238 Track B: fail locally, zero network cost, instead of
+                # sending a guaranteed-404 request to the live ARC API.
+                raise ValueError(
+                    f"invalid action_id for live ARC transport: {action_id!r} "
+                    "(expected ACTION1-ACTION7)"
+                )
             request_payload: dict[str, Any] = {"game_id": self._game_id, "guid": self._guid}
             request_payload.update(dict(payload))
             if action_id == "ACTION6":

@@ -421,8 +421,38 @@ class PlanGenerator:
                     )
                 )
 
-        if not candidates:
-            candidates.append(self._fallback_candidate(state, goal, perception))
+        # A238: used to call self._fallback_candidate(...) here, inventing a
+        # synthetic bookkeeping action_id (e.g. "probe-loop-breaker") whenever
+        # every real action this cycle was excluded (typically A191's
+        # repeated_falsified filter above). That string was never a real ARC
+        # command -- nothing between here and the live transport validated
+        # it, so it reached arc_runtime/game_session.py's real API call
+        # unvalidated and guaranteed a 404 every single time (confirmed live:
+        # 5/5 runs that reached this state hit it, 28 wasted real API calls
+        # across this session's saved logs, one run burning 7/17 of its whole
+        # step budget on nothing but repeats of this). Worse, plan_vetter.py's
+        # repeated_falsification veto requires a real alternative to exist
+        # (_choose_alternative), which is never true once every real action
+        # is exhausted -- so the same guaranteed-404 candidate kept getting
+        # re-approved and re-sent every cycle instead of ever being vetoed.
+        #
+        # Leaving `candidates` empty here instead is a deliberate no-op: it
+        # makes PlanningResult.candidate None, which plan_vetter.py::vet
+        # already handles today (VetDecision(approved=False, reason="missing
+        # plan candidate", should_replan=True) -- see vet()'s early return)
+        # -- that branch existed but was unreachable in practice, since this
+        # fallback always kept `candidates` non-empty. workflow.py's existing
+        # veto handling (same-cycle replan retry, then
+        # _route_second_veto_through_annatar on a second consecutive veto)
+        # takes it from there, so Annatar -- the single agent this
+        # architecture's mission statement makes responsible for what's
+        # believed and what's worth trying next -- still owns the
+        # terminate/retry decision (Shift B); this file only ever stops
+        # proposing a candidate it already knows is doomed. No real (or
+        # synthetic) action_id is sent to the transport when there is
+        # genuinely nothing left to try -- see arc_runtime/game_session.py's
+        # own action_id validation (Track B of A238) for the defense-in-depth
+        # backstop against any *other* future code path making this mistake.
 
         if state.latest_veto_alternative is not None and state.replan_passes == 1:
             veto_action = state.latest_veto_alternative.action_id
@@ -488,28 +518,6 @@ class PlanGenerator:
         return min(
             self._limits.voi_max_bonus,
             self._limits.voi_disagreement_unit * len(distinct_predictions),
-        )
-
-    def _fallback_candidate(self, state: WorkflowState, goal: ResolvedGoal, perception: PerceptionSnapshot) -> _CandidateRecord:
-        action_id = self._slugify(f"probe-{goal.selected.goal_id}")
-        return _CandidateRecord(
-            action_id=action_id,
-            book_id=action_id,
-            payload={},
-            score=0.1,
-            rationale=f"fallback probe for {goal.selected.goal_id}",
-            expected_effect=goal.selected.description,
-            predicted_outcome={"kind": "grid_change", "confidence": 0.3},
-            metadata={
-                "book_id": action_id,
-                "attempt_count": state.action_attempt_counts.get(action_id, 0),
-                "falsification_count": state.action_falsification_counts.get(action_id, 0),
-                "goal_alignment": True,
-                "perception_grid_hash": perception.grid_hash,
-                "untested": True,
-                "repeated_falsified": False,
-                "fallback": True,
-            },
         )
 
     @staticmethod

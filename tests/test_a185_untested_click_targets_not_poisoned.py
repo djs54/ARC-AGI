@@ -135,9 +135,15 @@ class TestAlreadyAttemptedClickTargetStillPenalized:
         excluded from the candidate set entirely at construction, a strictly
         stronger guarantee than "penalized" -- this test now asserts
         exclusion instead of a negative score (the original scenario, a
-        single available action with falsifications=2 and no alternatives,
-        now falls back to a generic probe candidate instead of ever scoring
-        ACTION6@20,10 at all)."""
+        single available action with falsifications=2 and no alternatives).
+
+        Superseded again by A238 (2026-09-01): the excluded-book_id case
+        used to fall back to a synthetic "probe-*" candidate that was never
+        a real ARC command and guaranteed a 404 at the live transport
+        (backlog/A238.md). It now produces no candidate at all
+        (PlanningResult.candidate is None), so this test asserts that
+        directly instead of asserting on a fallback book_id that no longer
+        exists -- either way, ACTION6@20,10 itself is never proposed."""
         graph = _GraphPort(evidence={"supports": 0, "contradictions": 2, "confidence": 0.0, "attempts": 2})
         planner = PlanGenerator(LIMITS)
         state = WorkflowState(
@@ -154,9 +160,10 @@ class TestAlreadyAttemptedClickTargetStillPenalized:
 
         result = planner.generate(state, perception, _goal(), graph_port=graph).payload
 
-        assert result.candidate.metadata.get("book_id") != "ACTION6@20,10", (
+        assert result.candidate is None, (
             "a click target that has itself been falsified twice must be excluded from the "
-            "candidate set entirely (A191), not merely scored with a penalty"
+            "candidate set entirely (A191); with no alternative available, A238 leaves "
+            "PlanningResult.candidate as None rather than inventing a doomed fallback"
         )
 
 
