@@ -25,6 +25,15 @@ from arc_runtime.game_session import ArcV2GameSession
 
 logger = logging.getLogger(__name__)
 
+# A241: fraction of whatever step-budget remained AT THE MOMENT a readiness-
+# gate resume was granted (state.readiness_gate_remap_started_step_index)
+# that the resumed probe window itself gets before falling through again --
+# see _readiness_gate's own comment for the full reasoning. Starting-point
+# value, no empirical basis yet -- same honest-gap treatment as every other
+# new budget/threshold constant this session (DEFAULT_MAX_UNPRODUCTIVE_
+# ANCHORS, readiness_status's own budget_fraction_before_fallthrough=0.5).
+REMAP_BUDGET_FRACTION = 0.5
+
 
 @dataclasses.dataclass(slots=True)
 class ArcV2Bundle:
@@ -254,12 +263,46 @@ def build_arc_v2_bundle(
                 if str(action_id) != "ACTION6" and str(action_id) in available_set
             ]
 
-        status = readiness_status(
-            entity_domains,
-            step_index=state.step_index,
-            max_cycles=max_cycles,
-            untested_non_click_actions=untested_non_click_actions,
-        )
+        # A241: readiness_status()'s elapsed-budget-fraction check (step_
+        # index/max_cycles >= budget_fraction_before_fallthrough, default
+        # 0.5) is computed against TOTAL episode budget. A resumed probe
+        # window (state.readiness_gate_remap_started_step_index set by
+        # annatar_signals.py::run_annatar_cycle's whole-episode-futility
+        # override, see its own docstring) is by construction only ever
+        # granted after step_index/max_cycles already crossed 0.5 once (the
+        # original PARTIAL_FALLTHROUGH required that same ratio), and
+        # step_index has only grown since -- so calling readiness_status
+        # with its default fraction here would report PARTIAL_FALLTHROUGH
+        # again on this very first re-check, before a single additional
+        # entity gets probed (the "naive reset accomplishes nothing" case
+        # backlog/A241.md's Step 4 investigates). Rebasing the fallthrough
+        # ceiling to REMAP_BUDGET_FRACTION of what remained AT THE MOMENT
+        # the resume was granted (not "now", so the ceiling stays stable
+        # across every cycle of the same resumed window) gives the resume a
+        # real, bounded window to probe in, while still reserving the other
+        # (1 - REMAP_BUDGET_FRACTION) share of what remained for a second
+        # round of goal-directed play afterward -- the same reasoning the
+        # original 0.5 default already embodies for the episode's first
+        # probe window. Left entirely alone (untouched call, byte-for-byte
+        # prior behavior) whenever no resume is active.
+        remap_started_at = state.readiness_gate_remap_started_step_index
+        if remap_started_at is not None and max_cycles > remap_started_at:
+            remaining_at_resume = max_cycles - remap_started_at
+            ceiling_step = remap_started_at + remaining_at_resume * REMAP_BUDGET_FRACTION
+            status = readiness_status(
+                entity_domains,
+                step_index=state.step_index,
+                max_cycles=max_cycles,
+                budget_fraction_before_fallthrough=ceiling_step / max_cycles,
+                untested_non_click_actions=untested_non_click_actions,
+            )
+        else:
+            status = readiness_status(
+                entity_domains,
+                step_index=state.step_index,
+                max_cycles=max_cycles,
+                untested_non_click_actions=untested_non_click_actions,
+            )
         probe_candidate = None
         if status == ReadinessStatus.NOT_READY:
             probe_candidate = plan_agent._select_readiness_probe(

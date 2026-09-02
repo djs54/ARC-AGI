@@ -372,6 +372,19 @@ class AnnatarOutcome:
     # instead of reading readiness_status()'s raw return value itself --
     # this is the actual authority transfer A230 delivers.
     exploration_complete: bool | None = None
+    # A241: Annatar's own signal that whole-episode-futility should resume
+    # the readiness-probe loop instead of terminating -- real unmapped
+    # territory (a live, graph-grounded entities_mapped < entities_total
+    # re-check, not the stale post-probe-phase snapshot) still remains.
+    # Mirrors exploration_complete's shape: a separate field alongside the
+    # raw per-anchor `decision`, not a new AnnatarDecision value, so every
+    # existing outcome.decision switch site is unaffected -- workflow.py is
+    # the only place that acts on this field. False (never None): unlike
+    # exploration_complete, this is only ever computed on the non-probe
+    # path, where "not warranted" is always a real, decidable answer. See
+    # agents/arc4/annatar_signals.py::run_annatar_cycle's docstring and
+    # backlog/A241.md for the full design.
+    resume_mapping: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -382,6 +395,7 @@ class AnnatarOutcome:
             "required_book_id": self.required_book_id,
             "degraded": self.degraded,
             "exploration_complete": self.exploration_complete,
+            "resume_mapping": self.resume_mapping,
         }
 
     @classmethod
@@ -394,6 +408,7 @@ class AnnatarOutcome:
             required_book_id=d.get("required_book_id"),
             degraded=d.get("degraded", False),
             exploration_complete=d.get("exploration_complete"),
+            resume_mapping=d.get("resume_mapping", False),
         )
 
 
@@ -551,6 +566,22 @@ class WorkflowState:
     readiness_gate_partial: bool = False
     readiness_gate_entities_mapped: int | None = None
     readiness_gate_entities_total: int | None = None
+    # A241: step_index at which the most recent readiness-gate resume
+    # (whole-episode-futility intercepted into a return to probing instead
+    # of TERMINATE -- see AnnatarOutcome.resume_mapping and annatar_
+    # signals.py::run_annatar_cycle's override block) was granted. None
+    # when no resume is currently active. Consumed by arc_runtime/bundle.py's
+    # readiness_gate closure to rebase readiness_status()'s elapsed-budget-
+    # fraction check against what remained AT THE MOMENT of the resume,
+    # instead of the stale total-episode fraction that already crossed 0.5
+    # the first time PARTIAL_FALLTHROUGH fired -- otherwise the very first
+    # re-check after a resume would instantly re-fall-through with zero net
+    # probing (see backlog/A241.md). Reset back to None by workflow.py once
+    # the resumed probe window itself concludes (readiness_gate_resolved set
+    # True again), so a LATER resume (entities_mapped is still <
+    # entities_total) gets its own fresh rebasing point rather than
+    # inheriting a stale one.
+    readiness_gate_remap_started_step_index: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -584,6 +615,7 @@ class WorkflowState:
             "readiness_gate_partial": self.readiness_gate_partial,
             "readiness_gate_entities_mapped": self.readiness_gate_entities_mapped,
             "readiness_gate_entities_total": self.readiness_gate_entities_total,
+            "readiness_gate_remap_started_step_index": self.readiness_gate_remap_started_step_index,
         }
 
     @classmethod
@@ -619,6 +651,7 @@ class WorkflowState:
             readiness_gate_partial=d.get("readiness_gate_partial", False),
             readiness_gate_entities_mapped=d.get("readiness_gate_entities_mapped"),
             readiness_gate_entities_total=d.get("readiness_gate_entities_total"),
+            readiness_gate_remap_started_step_index=d.get("readiness_gate_remap_started_step_index"),
         )
 
 

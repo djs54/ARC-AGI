@@ -139,6 +139,25 @@ def classify_all_entity_domains(
     return domains
 
 
+def _real_unmapped_entities_remain(perception: Any, graph_port: GraphQueryPort | None) -> bool:
+    """A241: the live, graph-grounded bound run_annatar_cycle's whole-
+    episode-futility override uses to decide whether resuming the
+    readiness-probe loop is warranted -- entities_mapped < entities_total,
+    re-derived fresh from the CURRENT graph (via classify_all_entity_
+    domains, the exact function arc_runtime/bundle.py's readiness_gate
+    closure itself uses), not read from the stale state.readiness_gate_
+    entities_mapped/entities_total snapshot the probe phase left behind.
+    Monotonic and real (an entity, once resolved out of DISORDER, never
+    reverts -- per this card's own design constraint), so this needs no
+    separate single-use attempt cap: it is naturally False forever once
+    every entity is mapped, the same condition a genuine READY would
+    produce."""
+    live_domains = classify_all_entity_domains(perception, graph_port)
+    entities_total = len(live_domains)
+    entities_mapped = sum(1 for d in live_domains.values() if d != CynefinDomain.DISORDER)
+    return entities_mapped < entities_total
+
+
 def compute_cycle_signals(
     state: WorkflowState,
     perception: PerceptionSnapshot,
@@ -453,7 +472,26 @@ def run_annatar_cycle(
     AnnatarOutcome field of its own. See Track A's reasoning (backlog/
     A234.md's Outcome, and CycleSignals.resolve_hypothesis_ambiguity's own
     docstring) for why this stays purely informational rather than gaining
-    an exploration_complete-style aggregate the way readiness_report did."""
+    an exploration_complete-style aggregate the way readiness_report did.
+
+    `AnnatarOutcome.resume_mapping` (A241): set True by the whole-episode-
+    futility override below exactly when it would otherwise TERMINATE, but
+    the readiness gate hit PARTIAL_FALLTHROUGH at some point this episode
+    (state.readiness_gate_partial) AND a fresh, live re-derivation of the
+    graph (not the stale post-probe-phase snapshot) shows real unmapped
+    territory still remains. Mirrors exploration_complete's own shape --
+    extra info alongside the raw per-anchor `decision`, not a new
+    AnnatarDecision value -- so `decision` itself stays whatever
+    decision_for_state produced (ADVANCE) whenever resume_mapping fires;
+    workflow.py is the only place that acts on it, resetting
+    state.readiness_gate_resolved and routing back into the existing
+    probe-path code instead of honoring the override's usual TERMINATE.
+    False (never None) here -- unlike exploration_complete, this is only
+    ever computed on the non-probe (readiness_report is None) path, where
+    "not warranted" is always a real, decidable answer, not "wasn't asked."
+    See backlog/A241.md for the full design (why this needed no new
+    single-use attempt cap: entities_mapped < entities_total is itself
+    real, monotonic, and graph-grounded)."""
     # A205: local degraded flag, visible (not silently discarded) whenever a
     # graph-client call below raises -- threaded into the returned
     # AnnatarOutcome.degraded at the bottom of this function.
@@ -604,6 +642,7 @@ def run_annatar_cycle(
         decision = AnnatarDecision.REPEAT_DEEPEN
     else:
         decision = decision_for_state(new_state)
+    resume_mapping = False  # A241: set True only by the whole-episode-futility override below
     if decision.value == "advance":
         state.active_investigation_anchor = None  # thread ended, next cycle picks a fresh anchor
         # A230 (discovered live during this card's own implementation, via
@@ -632,11 +671,103 @@ def run_annatar_cycle(
             else:
                 state.annatar_unproductive_anchor_streak += 1
             if state.annatar_unproductive_anchor_streak >= max_unproductive_anchors:
-                # Whole-episode futility: every anchor tried in a row has been
-                # completely dead. Override the per-anchor ADVANCE with a real
-                # episode-level decision instead of silently starting yet
-                # another anchor that's likely to fare the same.
-                decision = AnnatarDecision.TERMINATE
+                # A241: before honoring whole-episode futility, check whether
+                # there is real unmapped territory this episode's readiness
+                # gate never got to finish mapping, and resume probing
+                # instead of terminating if so. state.readiness_gate_partial
+                # (cheap, no graph query -- was the budget-fallthrough safety
+                # valve ever hit this episode) gates the more expensive live
+                # re-derivation below: an episode that never partially fell
+                # through (no readiness gate configured, or the gate reached
+                # READY cleanly) has nothing to resume to, so the graph query
+                # only runs when it could actually change the answer.
+                #
+                # The live re-derivation itself (not state.readiness_gate_
+                # entities_mapped/entities_total, which is a stale snapshot
+                # frozen the moment the probe phase originally concluded) is
+                # this card's own Step 1 staleness finding made concrete:
+                # plan_generator.py::_build_candidates calls classify_entity_
+                # domain_detailed on every ACTION6 candidate's entity_ref --
+                # including entities that were never probed (only entities
+                # with had_any_record AND nothing_live_remains get hard-
+                # excluded; a fresh DISORDER entity is still offered as a
+                # click candidate) -- and evaluator.py writes real graph
+                # evidence on any executed+evaluated action. Goal-directed
+                # play can therefore incidentally resolve some of the
+                # "unmapped" entities as a side effect before whole-episode-
+                # futility ever fires. Re-deriving fresh here (classify_all_
+                # entity_domains, the exact function arc_runtime/bundle.py's
+                # readiness_gate closure itself uses) means the resume
+                # decision reflects the CURRENT graph, not an over-counted
+                # gap that already partially closed on its own -- and it
+                # also gives this the same real, monotonic, graph-grounded
+                # bound the card calls for (entities_mapped < entities_total)
+                # instead of an arbitrary single-use attempt flag.
+                resume_mapping = state.readiness_gate_partial and _real_unmapped_entities_remain(
+                    perception, graph_port
+                )
+                if resume_mapping:
+                    # Annatar's own decision to resume mapping instead of
+                    # terminating -- `decision` is deliberately left as
+                    # ADVANCE (decision_for_state's own un-overridden
+                    # answer), not a new AnnatarDecision value: every
+                    # existing outcome.decision switch site (workflow.py's
+                    # three call sites) is completely unaffected by this
+                    # signal; AnnatarOutcome.resume_mapping (set at the
+                    # bottom of this function) is the one and only thing
+                    # workflow.py needs to check to actually resume probing.
+                    # Mirrors exploration_complete's own precedent: "extra
+                    # info alongside decision," not a decision value itself.
+                    #
+                    # The streak resets to 0 here so the goal-directed round
+                    # that follows the resumed probe phase gets a genuinely
+                    # fresh count of max_unproductive_anchors before whole-
+                    # episode-futility can fire again -- without this, the
+                    # very next unproductive anchor after resuming would
+                    # immediately re-cross the (already-at-threshold) streak
+                    # and re-fire this same override before the resumed
+                    # mapping had any chance to change anything.
+                    streak_before_reset = state.annatar_unproductive_anchor_streak
+                    state.annatar_unproductive_anchor_streak = 0
+                    # Marks exactly when this resume began so arc_runtime/
+                    # bundle.py's readiness_gate closure can rebase
+                    # readiness_status()'s elapsed-budget-fraction check
+                    # against what remained AT THIS MOMENT, instead of the
+                    # stale total-episode fraction that already crossed 0.5
+                    # the first time PARTIAL_FALLTHROUGH fired (see
+                    # WorkflowState.readiness_gate_remap_started_step_index's
+                    # own docstring for why a naive reset-and-rerun would
+                    # otherwise instantly re-fall-through with zero net
+                    # probing).
+                    state.readiness_gate_remap_started_step_index = state.step_index
+                    # A241 live-verification hook: mirrors the PROBE_ANNATAR/
+                    # RESOLVE_ANNATAR/ANCHOR_PROGRESS precedent (A230/A234/
+                    # A235) -- a permanent, greppable, concrete record that
+                    # whole-episode-futility was about to fire and got
+                    # intercepted into a resume instead, so a future live
+                    # smoke can directly confirm this path actually fires
+                    # rather than inferring it from side effects.
+                    import logging as _remap_logging
+
+                    _remap_logging.getLogger(__name__).info(
+                        "READINESS_REMAP resume_mapping=True step_index=%s streak_before_reset=%s "
+                        "threshold=%s stale_entities_mapped=%s stale_entities_total=%s",
+                        state.step_index,
+                        streak_before_reset,
+                        max_unproductive_anchors,
+                        state.readiness_gate_entities_mapped,
+                        state.readiness_gate_entities_total,
+                    )
+                else:
+                    # Whole-episode futility: every anchor tried in a row has
+                    # been completely dead, and either the readiness gate
+                    # never partially fell through (nothing to resume to) or
+                    # a fresh re-check shows every entity is already mapped
+                    # (nothing left to resume FOR). Override the per-anchor
+                    # ADVANCE with a real episode-level decision instead of
+                    # silently starting yet another anchor that's likely to
+                    # fare the same.
+                    decision = AnnatarDecision.TERMINATE
     else:
         anchor["state"] = new_state.value
         if new_state == InvestigationState.DEEPENING:
@@ -667,6 +798,7 @@ def run_annatar_cycle(
         required_book_id=getattr(execution.candidate, "book_id", None) if decision.value == "repeat_retry" else None,
         degraded=degraded,
         exploration_complete=exploration_complete,
+        resume_mapping=resume_mapping,
     )
 
 
