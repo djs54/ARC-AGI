@@ -201,13 +201,21 @@ def compute_cycle_signals(
 
     # execution_inconclusive: no clear grid change and no explicit progress
     # signal. Read from evaluation.metadata["grid_changed"] -- evaluator.py
-    # (agents/arc4/evaluator.py) is the sole owner of computing this flag
-    # (it falls back to `not grid_unchanged` when nothing upstream reports
-    # one explicitly) and always sets it on EvaluationResult.metadata.
-    # execution.metadata is never populated with "grid_changed" by any
-    # executor (confirmed by grepping the whole package) -- reading from
-    # execution.metadata instead, as an earlier sketch of this function
-    # assumed, would silently always read None and produce wrong signals.
+    # (agents/arc4/evaluator.py) is the sole owner of *resolving* this flag
+    # (grid_changed_flag, evaluator.py:67-71): it prefers the execution-level
+    # value when the real production transport supplies one, and only falls
+    # back to its own `not grid_unchanged` computation when that's absent.
+    # A240: execution.metadata *is* populated with "grid_changed" by the real
+    # production transport -- arc_runtime/game_session.py's _compute_progress
+    # returns it, and Executor._normalize_result's dict-shaped branch copies
+    # every key except "observation" (grid_changed included) through onto
+    # ExecutionResult.metadata. This function still reads from
+    # evaluation.metadata rather than execution.metadata, not because the
+    # latter is empty, but because evaluation.metadata["grid_changed"] is the
+    # *resolved* value -- correct regardless of whether execution-level data
+    # happens to be present (e.g. in tests or transports that only supply a
+    # bare dict), whereas reading execution.metadata directly here would skip
+    # evaluator.py's fallback and silently read None whenever it's absent.
     eval_meta = evaluation.metadata if isinstance(evaluation.metadata, dict) else {}
     execution_inconclusive = not bool(eval_meta.get("grid_changed", False)) and not meaningful_progress
 
