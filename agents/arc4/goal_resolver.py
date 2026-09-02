@@ -424,8 +424,41 @@ class GoalResolver:
             state.ambiguous_pair_streak = 0
 
     def _should_escalate_to_llm(self, state: WorkflowState, hypotheses: Sequence[GoalHypothesis]) -> bool:
+        # A243: both branches below now key their no-progress check off
+        # state.goal_failure_counts[<the hypothesis actually being judged>
+        # .goal_id] instead of the flat, whole-episode
+        # state.consecutive_no_progress_count. goal_failure_counts is
+        # already correctly per-goal-scoped (see workflow.py::
+        # _record_evaluation_state and _apply_failure_decay's existing use
+        # of the same field a few dozen lines below) -- a goal_id that has
+        # never been active starts at a dict-miss 0, so a freshly-selected
+        # goal's first cycle can no longer look "stalled" purely because
+        # unrelated prior goals had failed (confirmed live, RE86
+        # 2026-09-02: line-15's first cycle inherited a count of 6 from
+        # block-5/point-1/line-1's combined failures under the old flat
+        # counter). A goal that genuinely fails llm_patience_steps times
+        # under its OWN goal_id still escalates, unchanged.
+        #
+        # consecutive_no_progress_count is deliberately dropped from this
+        # function entirely, not kept as a second OR-condition "just in
+        # case": the whole-episode question it used to stand in for here
+        # ("has the episode, across many different goals, gone nowhere")
+        # is already answered by a real, already-wired signal --
+        # state.annatar_unproductive_anchor_streak (types.py, incremented
+        # by annatar_signals.py::run_annatar_cycle on every unproductive
+        # anchor conclusion, reset on any progress) -- which routes to
+        # AnnatarDecision.TERMINATE once it crosses its own threshold, a
+        # deliberately more drastic action than "ask the LLM for a second
+        # opinion on this goal." Re-adding a second, weaker whole-episode
+        # gate here would just reintroduce this exact card's cross-goal
+        # contamination risk on top of a signal that's already correctly
+        # handled elsewhere, with the correct consequence. See A243 Track A
+        # and backlog/A243.md's Outcome for the full reasoning.
         if len(hypotheses) < 2:
-            return bool(hypotheses and hypotheses[0].confidence < self._limits.low_confidence_threshold and state.consecutive_no_progress_count >= self._limits.llm_patience_steps)
+            if not hypotheses:
+                return False
+            goal_failures = state.goal_failure_counts.get(hypotheses[0].goal_id, 0)
+            return bool(hypotheses[0].confidence < self._limits.low_confidence_threshold and goal_failures >= self._limits.llm_patience_steps)
 
         ordered = self._order_hypotheses(hypotheses)
         top = ordered[0]
@@ -444,7 +477,8 @@ class GoalResolver:
             # this exact pair has been ambiguous (streak == 0) -- escalate
             # immediately, preserving today's responsiveness to new ambiguity.
             ambiguous = ambiguous_raw
-        under_confident = top.confidence < self._limits.low_confidence_threshold and state.consecutive_no_progress_count >= self._limits.llm_patience_steps
+        goal_failures = state.goal_failure_counts.get(top.goal_id, 0)
+        under_confident = top.confidence < self._limits.low_confidence_threshold and goal_failures >= self._limits.llm_patience_steps
         return ambiguous or under_confident
 
     def _query_llm(
