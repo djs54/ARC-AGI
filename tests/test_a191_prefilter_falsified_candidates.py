@@ -80,9 +80,14 @@ class TestNonClickActionRepeatedlyFalsifiedExcluded:
 
         candidates = planner._build_candidates(state, perception, _goal(), ["ACTION1"], [])
 
-        # ACTION1 should be excluded; only the fallback should be present
-        assert len(candidates) == 1
-        assert candidates[0].metadata.get("fallback") is True
+        # ACTION1 should be excluded. A238: _build_candidates no longer
+        # manufactures a synthetic "probe-*" fallback when the real
+        # candidate list empties out (that string reached the live ARC API
+        # unvalidated and guaranteed a 404 every time) -- the list is simply
+        # empty, and PlanningResult.candidate becomes None, which
+        # plan_vetter.py::vet already has a real handler for. See
+        # tests/test_a238_fallback_candidate_valid_action_id.py.
+        assert candidates == []
 
     def test_non_click_action_falsified_once_not_excluded(self):
         """Scenario 2: A non-click action with falsifications=1 (below threshold)
@@ -157,10 +162,19 @@ class TestClickTargetPerBookIdFiltering:
 
 
 class TestPathologicalAllFalsifiedFallback:
-    def test_all_actions_repeatedly_falsified_returns_fallback_not_empty(self):
-        """Scenario 4: Every available action/book_id is repeatedly falsified.
-        _build_candidates returns exactly one candidate (the fallback probe),
-        not an empty list."""
+    def test_all_actions_repeatedly_falsified_returns_empty_not_synthetic_fallback(self):
+        """Scenario 4 (renamed/inverted by A238): every available
+        action/book_id is repeatedly falsified. _build_candidates used to
+        return exactly one candidate (a synthetic "probe-*" fallback that
+        was never a real ARC command and guaranteed a 404 at the live
+        transport -- confirmed live, 28 wasted API calls across this
+        session's saved logs, see backlog/A238.md). It now returns an empty
+        list instead, leaving PlanningResult.candidate=None so
+        plan_vetter.py's existing "missing plan candidate" veto (previously
+        unreachable) routes the episode through the normal
+        replan/second-veto/Annatar-decides path with zero doomed API calls.
+        See tests/test_a238_fallback_candidate_valid_action_id.py for the
+        dedicated coverage of that path."""
         planner = PlanGenerator(LIMITS)
         state = _state(
             action_attempt_counts={
@@ -181,8 +195,7 @@ class TestPathologicalAllFalsifiedFallback:
 
         candidates = planner._build_candidates(state, perception, _goal(), ["ACTION1", "ACTION2", "ACTION3"], [])
 
-        assert len(candidates) == 1, f"Expected exactly 1 fallback candidate, got {len(candidates)}"
-        assert candidates[0].metadata.get("fallback") is True
+        assert candidates == [], f"Expected no candidates (A238), got {candidates}"
 
 
 class TestVetoAlternativeBypassesFilter:
@@ -339,8 +352,10 @@ class TestRepeatedFalsificationDefinesThreshold:
             f"ACTION2 with falsifications=2 should be excluded entirely, "
             f"but found {len(action2_candidates)} candidates"
         )
-        assert len(candidates) == 1
-        assert candidates[0].metadata.get("fallback") is True
+        # A238: no synthetic fallback candidate is manufactured anymore --
+        # the only action falsified enough to matter here (ACTION2) leaves
+        # the list empty.
+        assert candidates == []
 
     def test_falsifications_exceeds_two_still_excluded(self):
         """Boundary case: falsifications > 2 (e.g., 5) should also be excluded."""
@@ -359,5 +374,5 @@ class TestRepeatedFalsificationDefinesThreshold:
         # ACTION3 should be excluded
         action3_candidates = [c for c in candidates if c.action_id == "ACTION3"]
         assert len(action3_candidates) == 0
-        assert len(candidates) == 1
-        assert candidates[0].metadata.get("fallback") is True
+        # A238: no synthetic fallback candidate is manufactured anymore.
+        assert candidates == []
