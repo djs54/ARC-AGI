@@ -66,11 +66,31 @@ def record_evaluation_outcome(
     action_key: str,
     meaningful_progress: bool,
     falsification_delta: int,
+    count_toward_no_progress: bool = True,
 ) -> int:
-    """Update falsification counts in place; return new no-progress count."""
+    """Update falsification counts in place; return new no-progress count.
+
+    A242: ``count_toward_no_progress=False`` is set by readiness-probe-phase
+    call sites (workflow.py's ``if probe_candidate is not None:`` block,
+    including an A241-granted resumed probe window -- both re-enter the same
+    code path, so this scoping covers both automatically). A probe click's
+    falsification history is real and still accumulates into
+    ``falsification_counts`` exactly as before; only the no-progress count
+    itself -- the signal goal_resolver.py::_should_escalate_to_llm's
+    ``under_confident`` branch reads to ask "has GOAL-DIRECTED play
+    repeatedly failed" -- is left unchanged rather than incremented, since
+    exploratory probe actions are not goal-directed attempts and essentially
+    never register real progress (see backlog/A242.md). Mirrors A230's own
+    precedent of scoping ``annatar_unproductive_anchor_streak`` to non-probe
+    cycles. A genuine ``meaningful_progress=True`` still resets to 0
+    regardless of this flag -- real progress is real progress wherever it
+    happens.
+    """
     if meaningful_progress:
         return 0
     falsification_counts[action_key] = falsification_counts.get(action_key, 0) + max(1, falsification_delta)
+    if not count_toward_no_progress:
+        return no_progress_count
     return no_progress_count + 1
 
 
