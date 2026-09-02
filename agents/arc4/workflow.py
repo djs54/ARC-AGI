@@ -268,6 +268,17 @@ class WorkflowOrchestrator:
                     # remaining cycle would just repeat the same check for
                     # no benefit.
                     state.readiness_gate_resolved = True
+                    # A241: this probe window (whether the episode's
+                    # original mapping pass, or a resumed one granted by
+                    # AnnatarOutcome.resume_mapping below) has just
+                    # concluded -- clear the resume-start marker so a LATER
+                    # resume (entities_mapped is still < entities_total)
+                    # gets its own fresh rebasing point in arc_runtime/
+                    # bundle.py's readiness_gate closure, rather than
+                    # inheriting this one's now-stale start step_index.
+                    # Harmlessly a no-op (already None) on the episode's
+                    # very first, never-resumed probe window.
+                    state.readiness_gate_remap_started_step_index = None
 
                 resolved_goal = self._invoke_phase("resolve", self._dependencies.resolve, state, perception_payload)
                 phase_results.append(resolved_goal)
@@ -490,6 +501,31 @@ class WorkflowOrchestrator:
                     # swallowed. Set every cycle the Annatar actually runs, so
                     # this always reflects the most recent cycle's outcome.
                     state.annatar_degraded = outcome.degraded
+                    if outcome.resume_mapping:
+                        # A241: Annatar intercepted its own whole-episode-
+                        # futility override -- real unmapped territory
+                        # remains (a live, graph-grounded re-check, per
+                        # annatar_signals.py::run_annatar_cycle's docstring),
+                        # so resume the readiness-probe loop instead of
+                        # honoring what would otherwise be TERMINATE.
+                        # Resetting readiness_gate_resolved alone would do
+                        # nothing this cycle -- the gate's own `if` block
+                        # (top of this method) already ran and moved past
+                        # for THIS cycle's perception -- so `continue` routes
+                        # control back to the top of the outer `while True:`
+                        # loop, letting the NEXT cycle's iteration naturally
+                        # re-enter that `if` block and the existing probe-
+                        # path code (the `if probe_candidate is not None:`
+                        # block above) instead of duplicating it here.
+                        # state.active_investigation_anchor is already None
+                        # (run_annatar_cycle's decision.value == "advance"
+                        # branch clears it before this override ever runs)
+                        # and state.annatar_unproductive_anchor_streak was
+                        # already reset to 0 by run_annatar_cycle itself, so
+                        # neither needs repeating here.
+                        state.readiness_gate_resolved = False
+                        current_observation = execution_payload.observation
+                        continue
                     if outcome.decision == "terminate":
                         return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
                     if outcome.decision in ("repeat_deepen", "repeat_retry"):
@@ -669,6 +705,18 @@ class WorkflowOrchestrator:
             synthetic_evaluation,
             stall_reason="second_veto",
         )
+        if outcome.resume_mapping:
+            # A241: same interception as the normal-cycle call site --
+            # resume the readiness-probe loop instead of honoring what
+            # would otherwise be TERMINATE. No real execute/evaluate ran
+            # this cycle (the double-veto path never reaches them), so
+            # current_observation is already correct as-is; returning None
+            # lets the caller's own existing `continue` (right after this
+            # method's call site) route back to the top of the outer
+            # `while True:` loop, where the next iteration naturally
+            # re-enters the readiness-gate `if` block.
+            state.readiness_gate_resolved = False
+            return None
         if outcome.decision == "terminate":
             return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
         state.annatar_anchor_hint = outcome if outcome.decision in ("repeat_deepen", "repeat_retry") else None
