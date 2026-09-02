@@ -212,12 +212,24 @@ class PlanVetter:
         candidate: PlanCandidate,
         alternatives: tuple[PlanCandidate, ...],
     ) -> PlanCandidate | None:
+        # A239: exclusion must key on book_id, not the family-level
+        # action_id -- for ACTION6, every click candidate shares the bare
+        # action_id "ACTION6" regardless of coordinate (A185), so an
+        # action_id-based exclusion here skipped every other click target
+        # before its (correctly book_id-keyed since A188) attempt count was
+        # ever examined, silently discarding fresh click-target alternatives.
+        # book_id is a strict superset of the identity information action_id
+        # provides (same book_id implies same action_id, but not vice versa),
+        # so this still correctly refuses to offer a candidate as an
+        # "alternative" to itself -- the one behavior the old action_id
+        # check got right and this fix must not lose.
+        candidate_book_id = candidate.book_id
         for alternative in alternatives:
-            if alternative.action_id == candidate.action_id:
+            if alternative.book_id == candidate_book_id:
                 continue
             if int(state.action_attempt_counts.get(alternative.book_id, 0)) == 0:
                 return alternative
-        if state.latest_veto_alternative is not None and state.latest_veto_alternative.action_id != candidate.action_id:
+        if state.latest_veto_alternative is not None and state.latest_veto_alternative.book_id != candidate_book_id:
             if int(state.action_attempt_counts.get(state.latest_veto_alternative.book_id, 0)) == 0:
                 return state.latest_veto_alternative
         return None
