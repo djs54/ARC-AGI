@@ -177,7 +177,31 @@ class WorkflowOrchestrator:
                         evaluation_payload = self._require_payload(evaluation, WorkflowPhase.EVALUATE)
 
                         self._record_execution_attempt(state, execution_payload)
-                        self._record_evaluation_state(state, execution_payload, evaluation_payload)
+                        # A242: probe-phase cycles are exploratory, not
+                        # goal-directed attempts, and essentially never
+                        # register meaningful_progress -- letting them
+                        # increment state.consecutive_no_progress_count
+                        # (as they did pre-A242) inflated the count to
+                        # 15-21 before goal-directed play's very first
+                        # cycle even ran, forcing goal_resolver.py::_should_
+                        # escalate_to_llm's under_confident branch true
+                        # from cycle one regardless of genuine ambiguity.
+                        # count_toward_no_progress=False leaves falsification-
+                        # count bookkeeping (also done inside this call)
+                        # completely unaffected -- only the no-progress
+                        # count itself is scoped out, mirroring A230's own
+                        # non-probe-cycles-only precedent for
+                        # annatar_unproductive_anchor_streak. This block is
+                        # also re-entered verbatim by an A241-granted
+                        # resumed probe window (state.readiness_gate_
+                        # resolved reset to False re-enters this same `if
+                        # probe_candidate is not None:` block), so a
+                        # resumed probe window's cycles are excluded from
+                        # the count too, automatically -- no separate
+                        # handling needed.
+                        self._record_evaluation_state(
+                            state, execution_payload, evaluation_payload, count_toward_no_progress=False
+                        )
                         state.step_index += 1
 
                         termination = termination_from_evaluation(evaluation_payload.decision, evaluation_payload.reason)
@@ -744,6 +768,8 @@ class WorkflowOrchestrator:
         state: WorkflowState,
         execution: ExecutionResult,
         evaluation: EvaluationResult,
+        *,
+        count_toward_no_progress: bool = True,
     ) -> None:
         action_key = execution.candidate.book_id if execution.candidate is not None else execution.action_id
         state.consecutive_no_progress_count = record_evaluation_outcome(
@@ -752,6 +778,7 @@ class WorkflowOrchestrator:
             action_key=action_key,
             meaningful_progress=evaluation.meaningful_progress,
             falsification_delta=evaluation.falsification_delta,
+            count_toward_no_progress=count_toward_no_progress,
         )
         if state.active_goal is not None:
             goal_id = state.active_goal.selected.goal_id
