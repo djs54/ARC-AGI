@@ -307,6 +307,15 @@ class ArcV2Telemetry:
             # .py). getattr(..., False) also covers state being None (no
             # WorkflowState found in this phase call's args at all).
             "annatar_degraded": bool(getattr(state, "annatar_degraded", False)),
+            # A237: same getattr(..., False) degrade pattern as
+            # annatar_degraded above -- WorkflowState.plan_degraded/
+            # vet_degraded default False and are only ever set True by
+            # WorkflowOrchestrator.run() right after a plan/vet phase call
+            # whose PlanningResult.degraded/VetDecision.degraded came back
+            # True (see plan_generator.py/plan_vetter.py). Covers both "no
+            # graph configured" and "state is None" the same way.
+            "plan_degraded": bool(getattr(state, "plan_degraded", False)),
+            "vet_degraded": bool(getattr(state, "vet_degraded", False)),
             "graph_informed": graph_informed,
             # A224: the Cynefin readiness gate's own telemetry, per the
             # plan's acceptance criteria -- a real, queryable fact rather

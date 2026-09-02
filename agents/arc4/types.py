@@ -199,6 +199,16 @@ class PlanningResult:
     candidate: PlanCandidate | None
     alternatives: tuple[PlanCandidate, ...] = ()
     needs_vet: bool = True
+    # A237: True when any of plan_generator.py's graph_port calls
+    # (fetch_per_action_evidence, fetch_rules_for_action,
+    # fetch_untested_actions) raised while producing this PlanningResult --
+    # the candidate scoring already fell back to partial/no graph evidence
+    # (the correct, unchanged behavior), this field just makes that
+    # degradation visible instead of silently absorbed, mirroring
+    # AnnatarOutcome.degraded (A205) / WorkflowState.readiness_gate_partial
+    # (A224). Stays False both when graph_port is None (no graph configured
+    # -- not a failure) and when every graph_port call this cycle succeeded.
+    degraded: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -206,6 +216,7 @@ class PlanningResult:
             "candidate": self.candidate.to_dict() if self.candidate else None,
             "alternatives": [a.to_dict() for a in self.alternatives],
             "needs_vet": self.needs_vet,
+            "degraded": self.degraded,
             "metadata": self.metadata,
         }
 
@@ -215,6 +226,7 @@ class PlanningResult:
             candidate=PlanCandidate.from_dict(d["candidate"]) if d.get("candidate") else None,
             alternatives=tuple(PlanCandidate.from_dict(a) for a in d.get("alternatives", [])),
             needs_vet=d.get("needs_vet", True),
+            degraded=d.get("degraded", False),
             metadata=d.get("metadata", {}),
         )
 
@@ -226,6 +238,16 @@ class VetDecision:
     reason: str = ""
     alternative: PlanCandidate | None = None
     should_replan: bool = False
+    # A237: True when plan_vetter.py's _check_graph_gate or
+    # _has_live_rule_evidence hit their `except` branch while producing this
+    # VetDecision -- both still fail open/no-override exactly as before (this
+    # field doesn't change that), it just makes a graph-unreachable vet cycle
+    # visible instead of indistinguishable from "the gate genuinely found
+    # nothing to object to." Mirrors PlanningResult.degraded/AnnatarOutcome
+    # .degraded (A205). One combined bit for both exception sites, not split
+    # into gate-vs-override reasons -- no concrete consumer needs the
+    # distinction yet (see card A237's "Assumptions/defaults").
+    degraded: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -235,6 +257,7 @@ class VetDecision:
             "reason": self.reason,
             "alternative": self.alternative.to_dict() if self.alternative else None,
             "should_replan": self.should_replan,
+            "degraded": self.degraded,
             "metadata": self.metadata,
         }
 
@@ -246,9 +269,9 @@ class VetDecision:
             reason=d.get("reason", ""),
             alternative=PlanCandidate.from_dict(d["alternative"]) if d.get("alternative") else None,
             should_replan=d.get("should_replan", False),
+            degraded=d.get("degraded", False),
             metadata=d.get("metadata", {}),
         )
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -484,6 +507,16 @@ class WorkflowState:
     # state mutations -- not something A205 introduces). Stays at its default
     # False for the whole episode whenever no Annatar is configured at all.
     annatar_degraded: bool = False
+    # A237: mirrors annatar_degraded's exact shape for the plan/vet phases --
+    # set by WorkflowOrchestrator.run() right after each self._dependencies
+    # .plan/.vet call, from PlanningResult.degraded/VetDecision.degraded.
+    # "Most recent invocation's outcome" for the cycle, same as
+    # annatar_degraded (plan/vet can each run twice in one cycle, once
+    # before a replan pass and once after -- the second call's flag is what
+    # ends up here, which is correct: it's the graph-freshness state that
+    # actually produced the plan/vet decision the cycle acted on).
+    plan_degraded: bool = False
+    vet_degraded: bool = False
     # Post-A206 fix (2026-08-25, user-directed live-smoke follow-up): how
     # many investigation-thread anchors in a row have concluded (ADVANCE)
     # without ever once registering meaningful_progress. Tracks whole-
@@ -544,6 +577,8 @@ class WorkflowState:
             "active_investigation_anchor": self.active_investigation_anchor,
             "annatar_anchor_hint": self.annatar_anchor_hint.to_dict() if self.annatar_anchor_hint else None,
             "annatar_degraded": self.annatar_degraded,
+            "plan_degraded": self.plan_degraded,
+            "vet_degraded": self.vet_degraded,
             "annatar_unproductive_anchor_streak": self.annatar_unproductive_anchor_streak,
             "readiness_gate_resolved": self.readiness_gate_resolved,
             "readiness_gate_partial": self.readiness_gate_partial,
@@ -577,6 +612,8 @@ class WorkflowState:
             active_investigation_anchor=d.get("active_investigation_anchor"),
             annatar_anchor_hint=AnnatarOutcome.from_dict(d["annatar_anchor_hint"]) if d.get("annatar_anchor_hint") else None,
             annatar_degraded=d.get("annatar_degraded", False),
+            plan_degraded=d.get("plan_degraded", False),
+            vet_degraded=d.get("vet_degraded", False),
             annatar_unproductive_anchor_streak=d.get("annatar_unproductive_anchor_streak", 0),
             readiness_gate_resolved=d.get("readiness_gate_resolved", False),
             readiness_gate_partial=d.get("readiness_gate_partial", False),
