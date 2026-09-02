@@ -469,6 +469,26 @@ class WorkflowState:
     loop_history: list[str] = field(default_factory=list)
     loop_history_pointer: int = -1
     active_goal: ResolvedGoal | None = None
+    # A243: as of this card, goal_resolver.py::_should_escalate_to_llm no
+    # longer reads this field -- it was a flat, whole-episode counter with
+    # no reset on goal switches, so a freshly-selected goal's first cycle
+    # could inherit a "stalled" count from completely unrelated prior
+    # goals' failures (confirmed live, RE86 2026-09-02). That function now
+    # reads state.goal_failure_counts[<goal_id>] instead (already
+    # correctly per-goal-scoped, see that field's own comment below). This
+    # counter itself is still live and still updated (cycle_policy.py::
+    # record_evaluation_outcome, called from workflow.py::
+    # _record_evaluation_state) -- it remains the whole-episode
+    # "nothing has progressed at all, regardless of which goal" signal for
+    # telemetry (telemetry.py's STALL_CHECK/demotion_count) and the legacy
+    # no-Annatar check_stall() termination path (temporal_workflows.py
+    # mirrors the same bookkeeping). Deliberately not repurposed as a
+    # second OR-condition inside _should_escalate_to_llm either: the
+    # genuinely-different "has the whole episode gone nowhere across many
+    # different goals" question is already answered by
+    # annatar_unproductive_anchor_streak below, which routes to a more
+    # drastic and more appropriate consequence (TERMINATE) than re-asking
+    # the LLM for goal disambiguation help.
     consecutive_no_progress_count: int = 0
     # A236: tracks how many consecutive cycles the SAME top-two goal_id pair
     # has been ambiguous, so _should_escalate_to_llm's `ambiguous` branch can
@@ -481,6 +501,15 @@ class WorkflowState:
     ambiguous_pair_streak: int = 0
     action_attempt_counts: dict[str, int] = field(default_factory=dict)
     action_falsification_counts: dict[str, int] = field(default_factory=dict)
+    # Per-goal_id no-progress counter: resets to 0 whenever THIS goal's
+    # evaluation shows meaningful_progress, increments otherwise (see
+    # workflow.py::_record_evaluation_state). A dict miss (a goal_id never
+    # seen before) naturally starts at 0. Consumed by
+    # goal_resolver.py::_apply_failure_decay (confidence decay for a
+    # repeatedly-failed goal) and, as of A243, also by
+    # goal_resolver.py::_should_escalate_to_llm (per-goal LLM-escalation
+    # gate) -- both readers get a goal's own real history, never another
+    # goal's.
     goal_failure_counts: dict[str, int] = field(default_factory=dict)
     latest_veto_reason: str | None = None
     latest_veto_alternative: PlanCandidate | None = None

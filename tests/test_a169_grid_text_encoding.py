@@ -81,7 +81,15 @@ class TestGoalResolverPromptIncludesGridText:
     def test_goal_resolver_prompt_includes_grid_text(self):
         recorder = _RecordingLLMPort("{}")
         resolver = GoalResolver(GoalResolverLimits(ambiguity_gap=0.12, low_confidence_threshold=0.7, llm_patience_steps=2))
-        state = WorkflowState(consecutive_no_progress_count=2)
+        # A243: _should_escalate_to_llm's under_confident branch now reads
+        # state.goal_failure_counts[<goal_id>] instead of the flat
+        # state.consecutive_no_progress_count -- this test only needs SOME
+        # escalation trigger to exercise the grid_text prompt-threading it
+        # actually cares about, so it now seeds the failure count for the
+        # exact goal_id this perception's tier-one fallback hypothesis
+        # produces (no entities + grid_shape=(2, 2) -> "grid-2x2", see
+        # goal_resolver.py::_tier_one_hypotheses's fallback branch).
+        state = WorkflowState(goal_failure_counts={"grid-2x2": 2})
         perception = PerceptionSnapshot(
             observation={"grid": "hash-1"},
             grid_hash="hash-1",

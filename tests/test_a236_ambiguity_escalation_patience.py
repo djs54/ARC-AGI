@@ -171,10 +171,21 @@ def test_streak_resets_when_pair_becomes_unambiguous_then_re_ambiguous():
 
 
 def test_under_confident_branch_is_unaffected_by_the_new_streak_fields():
-    """Regression: the under_confident branch still reads only
-    consecutive_no_progress_count, never the new ambiguous-pair fields --
+    """Regression: the under_confident branch still reads only the top
+    hypothesis's own no-progress count, never the ambiguous-pair fields --
     behavior must be byte-for-byte unchanged whether or not an unrelated
-    ambiguous-pair streak happens to be active."""
+    ambiguous-pair streak happens to be active.
+
+    A243 update: this test originally set state.consecutive_no_progress_count
+    directly, matching the under_confident branch's old flat-counter read.
+    That was the exact card A243 fixed -- consecutive_no_progress_count
+    doesn't reset on a goal switch, so a fresh goal's first cycle could
+    inherit a stalled count from unrelated prior goals. The branch now
+    reads state.goal_failure_counts[<top hypothesis's own goal_id>]
+    instead (see goal_resolver.py::_should_escalate_to_llm's A243 comment),
+    so this test is updated to set that field for goal_id "a" (the top
+    hypothesis here) instead -- the assertions and their intent (streak
+    fields don't affect this branch; patience gates it) are unchanged."""
     resolver = GoalResolver(GoalResolverLimits(ambiguity_gap=0.01, low_confidence_threshold=0.9, llm_patience_steps=2))
     # Confidences intentionally far apart (> ambiguity_gap) so `ambiguous`
     # is False; top confidence is still below low_confidence_threshold.
@@ -183,16 +194,25 @@ def test_under_confident_branch_is_unaffected_by_the_new_streak_fields():
         GoalHypothesis(goal_id="b", description="b", confidence=0.1),
     ]
 
-    state_no_streak = _state(consecutive_no_progress_count=2)
-    state_with_unrelated_streak = _state(consecutive_no_progress_count=2)
+    state_no_streak = _state()
+    state_no_streak.goal_failure_counts = {"a": 2}
+    state_with_unrelated_streak = _state()
+    state_with_unrelated_streak.goal_failure_counts = {"a": 2}
     state_with_unrelated_streak.last_ambiguous_pair = ("x", "y")
     state_with_unrelated_streak.ambiguous_pair_streak = 5
 
     assert resolver._should_escalate_to_llm(state_no_streak, hypotheses) is True
     assert resolver._should_escalate_to_llm(state_with_unrelated_streak, hypotheses) is True
 
-    state_not_patient_yet = _state(consecutive_no_progress_count=1)
+    state_not_patient_yet = _state()
+    state_not_patient_yet.goal_failure_counts = {"a": 1}
     assert resolver._should_escalate_to_llm(state_not_patient_yet, hypotheses) is False
+
+    # A243 regression guard: consecutive_no_progress_count crossing patience
+    # must NOT, by itself, trigger escalation any more -- only the top
+    # hypothesis's OWN goal_failure_counts entry matters now.
+    state_flat_counter_only = _state(consecutive_no_progress_count=5)
+    assert resolver._should_escalate_to_llm(state_flat_counter_only, hypotheses) is False
 
 
 def test_workflow_state_ambiguous_pair_fields_default_and_round_trip():
