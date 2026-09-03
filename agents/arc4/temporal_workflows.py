@@ -188,6 +188,24 @@ class ArcPuzzleWorkflow:
             if stall_reason is not None:
                 return self._finish("stalled", stall_reason)
 
+            # A249: this workflow has no Annatar-equivalent phase at all --
+            # confirmed by direct read, no `annatar`/Reasoner dependency
+            # anywhere in this class. agents/arc4/evaluator.py is shared
+            # with WorkflowOrchestrator.run() (workflow.py), so its A249 fix
+            # (action_space_exhausted no longer sets decision=TERMINATE)
+            # applies here too -- but unlike workflow.py, this Temporal path
+            # has nothing to route that signal to. A genuinely
+            # action-space-exhausted episode run through THIS workflow now
+            # relies solely on check_stall's independent, differently-
+            # thresholded mechanism above as a backstop; it will not catch
+            # every case action_space_exhausted used to. Left as a named,
+            # documented gap (not solved here) -- see backlog/A249.md's
+            # Outcome for the investigation this comment summarizes. Low
+            # practical severity: ARCHITECTURE.md already documents this
+            # whole file as deprecated (2026-08-23) -- opt-in only via
+            # --temporal/ARC_TEMPORAL_ENABLED=1, never the default, and
+            # explicitly "not being built on or extended" by the Annatar/
+            # Shift-B work this card is part of.
             termination = termination_from_evaluation(evaluation.get("decision"), evaluation.get("reason"))
             if termination is not None:
                 return self._finish(termination[0], termination[1])

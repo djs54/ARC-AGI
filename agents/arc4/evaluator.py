@@ -154,7 +154,19 @@ class Evaluator:
             decision = WorkflowDecision.TERMINATE
             reason = terminal_reason
         elif action_space_exhausted:
-            decision = WorkflowDecision.TERMINATE
+            # A249: no longer TERMINATE here -- unlike terminal_reason (the
+            # ARC API's own authoritative win/loss signal), this signal is
+            # not environment-authoritative (see backlog/A249.md: "env_
+            # reported" is dead code today, "graph_confirmed_no_untested"
+            # and "threshold_only" are both decided by this evaluator, not
+            # the environment). It previously shared terminal_reason's
+            # workflow.py short-circuit and ended the whole episode before
+            # Annatar -- the codebase's single designated decision-owner --
+            # ever got a say. decision stays CONTINUE (the default set
+            # above); workflow.py now threads this metadata flag to Annatar
+            # via the same channel stall_reason already uses.
+            # action_space_exhausted/exhaustion_source remain in metadata
+            # unchanged below, so nothing downstream loses visibility.
             reason = "action_space_exhausted"
         elif meaningful_progress:
             reason = "meaningful_progress"

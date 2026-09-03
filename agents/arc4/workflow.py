@@ -225,6 +225,21 @@ class WorkflowOrchestrator:
                                 phase_results,
                             )
 
+                        if self._dependencies.annatar is None and evaluation_payload.metadata.get("action_space_exhausted"):
+                            # A249: action_space_exhausted is no longer part of the
+                            # unconditional short-circuit above (see backlog/A249.md)
+                            # -- it now routes to Annatar instead. But the legacy
+                            # no-Annatar fallback has no Annatar to route it to, so
+                            # this reproduces the exact prior outcome byte-for-byte
+                            # for that one consumer, mirroring A221's own precedent
+                            # of leaving "a genuinely separate consumer" untouched.
+                            return self._finish(
+                                state,
+                                WorkflowStatus.TERMINATED,
+                                evaluation_payload.reason or "terminated",
+                                phase_results,
+                            )
+
                         # A230: route every probe cycle through the SAME
                         # self._dependencies.annatar(...) call site the
                         # normal path already uses (below), instead of
@@ -237,11 +252,22 @@ class WorkflowOrchestrator:
                         # classification logic is untouched; only who acts
                         # on it changes.
                         if self._dependencies.annatar is not None:
+                            # A249: thread action_space_exhausted into Annatar
+                            # via the same stall_reason channel the normal-cycle
+                            # call site below uses (see backlog/A249.md) -- the
+                            # probe path has no check_stall-derived stall_reason
+                            # of its own, so this is purely the exhaustion flag.
+                            probe_stall_reason = (
+                                "action_space_exhausted"
+                                if evaluation_payload.metadata.get("action_space_exhausted")
+                                else None
+                            )
                             outcome = self._dependencies.annatar(
                                 state,
                                 perception_payload,
                                 execution_payload,
                                 evaluation_payload,
+                                stall_reason=probe_stall_reason,
                                 readiness_report=readiness_payload,
                             )
                             state.annatar_degraded = outcome.degraded
@@ -439,6 +465,17 @@ class WorkflowOrchestrator:
                 if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
                     return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
 
+                if self._dependencies.annatar is None and evaluation_payload.metadata.get("action_space_exhausted"):
+                    # A249: action_space_exhausted is no longer part of the
+                    # unconditional short-circuit above (see backlog/A249.md)
+                    # -- it now routes to Annatar instead, folded into
+                    # stall_reason below. But the legacy no-Annatar fallback
+                    # has no Annatar to route it to, so this reproduces the
+                    # exact prior outcome byte-for-byte for that one
+                    # consumer, mirroring A221's own precedent of leaving "a
+                    # genuinely separate consumer" untouched.
+                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
+
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
                 # Count distinct base actions so ACTION6@x,y click targets don't
@@ -520,12 +557,25 @@ class WorkflowOrchestrator:
                             else None
                         ),
                     }
+                    # A249: fold action_space_exhausted into the same
+                    # stall_reason channel Annatar already reads (see
+                    # backlog/A249.md) -- annatar_signals.py:251 only ever
+                    # checks `stall_reason is not None`, never its string
+                    # value, so this OR is safe: whichever signal fired (or
+                    # both) still produces the identical all_falsified=True/
+                    # untested_remaining=False override. This local fold
+                    # deliberately does NOT touch the outer `stall_reason`
+                    # variable itself -- the no-Annatar `else` branch below
+                    # still reads check_stall's own unmodified value.
+                    effective_stall_reason = stall_reason or (
+                        "action_space_exhausted" if evaluation_payload.metadata.get("action_space_exhausted") else None
+                    )
                     outcome = self._dependencies.annatar(
                         state,
                         perception_payload,
                         execution_payload,
                         evaluation_payload,
-                        stall_reason=stall_reason,
+                        stall_reason=effective_stall_reason,
                         veto_reason=veto_reason,
                         veto_alternative_action_id=veto_alternative_action_id,
                         resolve_report=resolve_report,
