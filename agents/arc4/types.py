@@ -128,6 +128,16 @@ class ResolvedGoal:
     selected: GoalHypothesis
     alternatives: tuple[GoalHypothesis, ...] = ()
     grounding_gate_passed: bool = True
+    # A251: True when goal_resolver.py::_query_llm's `llm_port.chat(...)`
+    # call raised while producing this ResolvedGoal -- the escalation
+    # already fell back to the pre-LLM hypothesis ranking (the correct,
+    # unchanged behavior, same as an unparseable/empty LLM response), this
+    # field just makes that degradation visible instead of silently
+    # absorbed, mirroring PlanningResult.degraded (A237) / EvaluationResult
+    # .degraded (A244) / AnnatarOutcome.degraded (A205). Stays False both
+    # when llm_port is None (no LLM configured -- not a failure) and when
+    # the LLM call this cycle succeeded (or was never escalated to at all).
+    degraded: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -135,6 +145,7 @@ class ResolvedGoal:
             "selected": self.selected.to_dict(),
             "alternatives": [a.to_dict() for a in self.alternatives],
             "grounding_gate_passed": self.grounding_gate_passed,
+            "degraded": self.degraded,
             "metadata": self.metadata,
         }
 
@@ -144,6 +155,7 @@ class ResolvedGoal:
             selected=GoalHypothesis.from_dict(d["selected"]),
             alternatives=tuple(GoalHypothesis.from_dict(a) for a in d.get("alternatives", [])),
             grounding_gate_passed=d.get("grounding_gate_passed", True),
+            degraded=d.get("degraded", False),
             metadata=d.get("metadata", {}),
         )
 
@@ -564,6 +576,15 @@ class WorkflowState:
     # state mutations -- not something A205 introduces). Stays at its default
     # False for the whole episode whenever no Annatar is configured at all.
     annatar_degraded: bool = False
+    # A251: mirrors annatar_degraded's exact shape for the resolve phase --
+    # set by WorkflowOrchestrator.run() right after each self._dependencies
+    # .resolve call, from ResolvedGoal.degraded (goal_resolver.py::
+    # _query_llm's now-caught llm_port.chat(...) exception site). "Most
+    # recent invocation's outcome" for the cycle, same as plan_degraded/
+    # vet_degraded/evaluate_degraded (resolve can run twice in one cycle,
+    # once before a replan pass and once after -- the second call's flag is
+    # what ends up here).
+    resolve_degraded: bool = False
     # A237: mirrors annatar_degraded's exact shape for the plan/vet phases --
     # set by WorkflowOrchestrator.run() right after each self._dependencies
     # .plan/.vet call, from PlanningResult.degraded/VetDecision.degraded.
@@ -658,6 +679,7 @@ class WorkflowState:
             "active_investigation_anchor": self.active_investigation_anchor,
             "annatar_anchor_hint": self.annatar_anchor_hint.to_dict() if self.annatar_anchor_hint else None,
             "annatar_degraded": self.annatar_degraded,
+            "resolve_degraded": self.resolve_degraded,
             "plan_degraded": self.plan_degraded,
             "vet_degraded": self.vet_degraded,
             "evaluate_degraded": self.evaluate_degraded,
@@ -695,6 +717,7 @@ class WorkflowState:
             active_investigation_anchor=d.get("active_investigation_anchor"),
             annatar_anchor_hint=AnnatarOutcome.from_dict(d["annatar_anchor_hint"]) if d.get("annatar_anchor_hint") else None,
             annatar_degraded=d.get("annatar_degraded", False),
+            resolve_degraded=d.get("resolve_degraded", False),
             plan_degraded=d.get("plan_degraded", False),
             vet_degraded=d.get("vet_degraded", False),
             evaluate_degraded=d.get("evaluate_degraded", False),

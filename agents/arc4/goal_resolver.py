@@ -45,6 +45,15 @@ class GoalResolver:
 
     def __init__(self, limits: GoalResolverLimits | None = None) -> None:
         self._limits = limits or GoalResolverLimits()
+        # A251: scratch flag, reset at the top of every resolve() call and
+        # set True by _query_llm when llm_port.chat(...) raises. Read back
+        # into ResolvedGoal.degraded at the end of resolve(). Mirrors
+        # PlanGenerator._degraded's exact instance-scratch-flag shape
+        # (A237) -- GoalResolver is likewise a single long-lived instance
+        # reused for every cycle of an episode (see arc_runtime/bundle.py),
+        # never called re-entrantly/concurrently on itself, so a
+        # reset-per-resolve() scratch attribute is safe here too.
+        self._degraded = False
 
     def resolve(
         self,
@@ -54,6 +63,9 @@ class GoalResolver:
         graph_port: GraphQueryPort | None = None,
         llm_port: LLMPort | None = None,
     ) -> PhaseResult[ResolvedGoal]:
+        # A251: reset before this cycle's LLM call so a prior cycle's
+        # degradation never leaks forward into this one.
+        self._degraded = False
         hypotheses = self._tier_one_hypotheses(state, perception, graph_port=graph_port)
         graph_evidence: list[dict[str, Any]] = []
 
@@ -140,6 +152,7 @@ class GoalResolver:
                 selected=selected,
                 alternatives=alternatives,
                 grounding_gate_passed=grounding_gate_passed,
+                degraded=self._degraded,
                 metadata=metadata,
             ),
             metadata={"hypothesis_count": len(hypotheses)},
@@ -506,8 +519,18 @@ class GoalResolver:
                 ),
             ),
         ]
-        response = llm_port.chat(messages)
-        return self._parse_llm_response(response)
+        try:
+            response = llm_port.chat(messages)
+            return self._parse_llm_response(response)
+        except Exception:
+            # A251: mirrors annatar_signals.py::resolve_llm_vote's own
+            # already-proven pattern (A205) -- a bounded single attempt,
+            # degrading to the same "no LLM patch" outcome the caller
+            # already handles (`if llm_patch is not None:`) rather than
+            # letting a raised exception propagate to workflow.py's outer
+            # except and crash the whole episode. See backlog/A251.md.
+            self._degraded = True
+            return None
 
     def _merge_llm_patch(
         self,
