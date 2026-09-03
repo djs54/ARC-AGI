@@ -171,7 +171,11 @@ class WorkflowDependencies:
     vet: VetPhase
     execute: ExecutePhase
     evaluate: EvaluatePhase
-    annatar: AnnatarPhase | None = None  # None means "no Annatar, run exactly as today"
+    # A250: no longer optional -- `annatar` has been unconditionally wired in
+    # production since A202 (arc_runtime/bundle.py always constructs one),
+    # so the `None`-means-legacy-mode fallback it used to gate in
+    # workflow.py was permanently dead code. See backlog/A250.md.
+    annatar: AnnatarPhase
     on_crash_cleanup: callable | None = None  # A211: best-effort thread closure on crash (no-op if None)
     # A224: the Cynefin readiness gate, called right after perceive, before
     # resolve. None means "no readiness gate, run exactly as today" -- same

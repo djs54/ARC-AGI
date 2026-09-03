@@ -225,21 +225,6 @@ class WorkflowOrchestrator:
                                 phase_results,
                             )
 
-                        if self._dependencies.annatar is None and evaluation_payload.metadata.get("action_space_exhausted"):
-                            # A249: action_space_exhausted is no longer part of the
-                            # unconditional short-circuit above (see backlog/A249.md)
-                            # -- it now routes to Annatar instead. But the legacy
-                            # no-Annatar fallback has no Annatar to route it to, so
-                            # this reproduces the exact prior outcome byte-for-byte
-                            # for that one consumer, mirroring A221's own precedent
-                            # of leaving "a genuinely separate consumer" untouched.
-                            return self._finish(
-                                state,
-                                WorkflowStatus.TERMINATED,
-                                evaluation_payload.reason or "terminated",
-                                phase_results,
-                            )
-
                         # A230: route every probe cycle through the SAME
                         # self._dependencies.annatar(...) call site the
                         # normal path already uses (below), instead of
@@ -251,75 +236,72 @@ class WorkflowOrchestrator:
                         # layer can read it -- readiness_status()'s own
                         # classification logic is untouched; only who acts
                         # on it changes.
-                        if self._dependencies.annatar is not None:
-                            # A249: thread action_space_exhausted into Annatar
-                            # via the same stall_reason channel the normal-cycle
-                            # call site below uses (see backlog/A249.md) -- the
-                            # probe path has no check_stall-derived stall_reason
-                            # of its own, so this is purely the exhaustion flag.
-                            probe_stall_reason = (
-                                "action_space_exhausted"
-                                if evaluation_payload.metadata.get("action_space_exhausted")
-                                else None
-                            )
-                            outcome = self._dependencies.annatar(
-                                state,
-                                perception_payload,
-                                execution_payload,
-                                evaluation_payload,
-                                stall_reason=probe_stall_reason,
-                                readiness_report=readiness_payload,
-                            )
-                            state.annatar_degraded = outcome.degraded
-                            # A230 live-verification hook: matches the
-                            # existing STALL_CHECK precedent below -- a
-                            # greppable, concrete record that Annatar was
-                            # actually invoked for this probe cycle and what
-                            # it decided, since (unlike every other phase)
-                            # the annatar dependency is not wrapped by
-                            # telemetry.wrap_phase and so never produces a
-                            # phase_transition snapshot of its own.
-                            import logging as _probe_logging
-                            _probe_logging.getLogger(__name__).info(
-                                "PROBE_ANNATAR decision=%s exploration_complete=%s entities_mapped=%s entities_total=%s",
-                                outcome.decision,
-                                outcome.exploration_complete,
-                                state.readiness_gate_entities_mapped,
-                                state.readiness_gate_entities_total,
-                            )
-                            if outcome.decision == "terminate":
-                                return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
+                        #
+                        # A250: `annatar` is unconditionally wired in
+                        # production since A202, so this call is no longer
+                        # gated behind an `is not None` check -- the
+                        # no-Annatar fallback branch (byte-for-byte pre-A230
+                        # behavior: always continue probing, no exhaustion
+                        # check at all) was permanently dead code. See
+                        # backlog/A250.md.
+                        #
+                        # A249: thread action_space_exhausted into Annatar
+                        # via the same stall_reason channel the normal-cycle
+                        # call site below uses (see backlog/A249.md) -- the
+                        # probe path has no check_stall-derived stall_reason
+                        # of its own, so this is purely the exhaustion flag.
+                        probe_stall_reason = (
+                            "action_space_exhausted"
+                            if evaluation_payload.metadata.get("action_space_exhausted")
+                            else None
+                        )
+                        outcome = self._dependencies.annatar(
+                            state,
+                            perception_payload,
+                            execution_payload,
+                            evaluation_payload,
+                            stall_reason=probe_stall_reason,
+                            readiness_report=readiness_payload,
+                        )
+                        state.annatar_degraded = outcome.degraded
+                        # A230 live-verification hook: matches the
+                        # existing STALL_CHECK precedent below -- a
+                        # greppable, concrete record that Annatar was
+                        # actually invoked for this probe cycle and what
+                        # it decided, since (unlike every other phase)
+                        # the annatar dependency is not wrapped by
+                        # telemetry.wrap_phase and so never produces a
+                        # phase_transition snapshot of its own.
+                        import logging as _probe_logging
+                        _probe_logging.getLogger(__name__).info(
+                            "PROBE_ANNATAR decision=%s exploration_complete=%s entities_mapped=%s entities_total=%s",
+                            outcome.decision,
+                            outcome.exploration_complete,
+                            state.readiness_gate_entities_mapped,
+                            state.readiness_gate_entities_total,
+                        )
+                        if outcome.decision == "terminate":
+                            return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
 
-                            current_observation = execution_payload.observation
-                            if outcome.exploration_complete is True:
-                                # Annatar's own outcome -- not readiness_
-                                # status()'s raw return value -- says the
-                                # world model is sufficiently explored. Fall
-                                # through (no `continue`) into the same
-                                # cycle's normal resolve/plan/vet path
-                                # immediately below, instead of burning a
-                                # whole extra cycle just to notice the gate
-                                # resolved. The "stop gating" code just below
-                                # still runs and sets
-                                # state.readiness_gate_resolved = True --
-                                # harmlessly idempotent when already True.
-                                pass
-                            else:
-                                # False (still not ready) or None (Annatar
-                                # configured but produced no readiness
-                                # opinion this cycle -- treat conservatively,
-                                # same as False): keep probing next cycle.
-                                continue
+                        current_observation = execution_payload.observation
+                        if outcome.exploration_complete is True:
+                            # Annatar's own outcome -- not readiness_
+                            # status()'s raw return value -- says the
+                            # world model is sufficiently explored. Fall
+                            # through (no `continue`) into the same
+                            # cycle's normal resolve/plan/vet path
+                            # immediately below, instead of burning a
+                            # whole extra cycle just to notice the gate
+                            # resolved. The "stop gating" code just below
+                            # still runs and sets
+                            # state.readiness_gate_resolved = True --
+                            # harmlessly idempotent when already True.
+                            pass
                         else:
-                            # No Annatar configured -- byte-for-byte pre-A230
-                            # behavior, same backward-compatibility
-                            # convention every other
-                            # `if self._dependencies.annatar is not None:`
-                            # branch in this file already provides: branch
-                            # directly on readiness_status()'s own return
-                            # value (already done above via probe_candidate),
-                            # always continue probing next cycle.
-                            current_observation = execution_payload.observation
+                            # False (still not ready) or None (Annatar
+                            # produced no readiness opinion this cycle --
+                            # treat conservatively, same as False): keep
+                            # probing next cycle.
                             continue
 
                     # NOT_READY with nothing left to probe this cycle,
@@ -465,17 +447,6 @@ class WorkflowOrchestrator:
                 if evaluation.status == PhaseStatus.TERMINATE or termination is not None:
                     return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
 
-                if self._dependencies.annatar is None and evaluation_payload.metadata.get("action_space_exhausted"):
-                    # A249: action_space_exhausted is no longer part of the
-                    # unconditional short-circuit above (see backlog/A249.md)
-                    # -- it now routes to Annatar instead, folded into
-                    # stall_reason below. But the legacy no-Annatar fallback
-                    # has no Annatar to route it to, so this reproduces the
-                    # exact prior outcome byte-for-byte for that one
-                    # consumer, mirroring A221's own precedent of leaving "a
-                    # genuinely separate consumer" untouched.
-                    return self._finish(state, WorkflowStatus.TERMINATED, evaluation_payload.reason or "terminated", phase_results)
-
                 available_actions = current_observation.get("available_actions", [])
                 num_available = len(available_actions)
                 # Count distinct base actions so ACTION6@x,y click targets don't
@@ -506,138 +477,136 @@ class WorkflowOrchestrator:
                     untested_remaining,
                 )
 
-                if self._dependencies.annatar is not None:
-                    # A202 / spec section 5: the Annatar now owns the
-                    # advance/repeat/terminate decision. check_stall's signal
-                    # is folded in as one of its inputs (see
-                    # annatar_signals.compute_cycle_signals) instead of
-                    # independently ending the run in the `else` branch below.
-                    #
-                    # A212 (visibility-only, audit conclusion): if this
-                    # cycle's first plan_vetter rejection was resolved by the
-                    # local same-cycle retry (cycle_vetoes > 0 but we still
-                    # reached here -- a second veto would have routed through
-                    # _route_second_veto_through_annatar and `continue`d
-                    # instead), pass its reason/alternative along too.
-                    # Gating on the local `cycle_vetoes` counter (not
-                    # directly reading state.latest_veto_reason) matters:
-                    # that state field is never reset, so reading it
-                    # unconditionally would leak a stale veto from an earlier
-                    # cycle into a cycle that had no veto at all. Purely
-                    # informational -- see CycleSignals.veto_reason's
-                    # docstring for why this cannot change what happens next.
-                    veto_reason = state.latest_veto_reason if cycle_vetoes else None
-                    veto_alternative_action_id = (
-                        state.latest_veto_alternative.action_id
-                        if cycle_vetoes and state.latest_veto_alternative is not None
+                # A202 / spec section 5: the Annatar owns the
+                # advance/repeat/terminate decision. check_stall's signal
+                # is folded in as one of its inputs (see
+                # annatar_signals.compute_cycle_signals) instead of
+                # independently ending the run.
+                #
+                # A250: `annatar` is unconditionally wired in production
+                # since A202, so this call is no longer gated behind an
+                # `is not None` check -- the no-Annatar fallback branch
+                # (bare `check_stall` ending the run directly as STALLED,
+                # with no arbiter) was permanently dead code. See
+                # backlog/A250.md.
+                #
+                # A212 (visibility-only, audit conclusion): if this
+                # cycle's first plan_vetter rejection was resolved by the
+                # local same-cycle retry (cycle_vetoes > 0 but we still
+                # reached here -- a second veto would have routed through
+                # _route_second_veto_through_annatar and `continue`d
+                # instead), pass its reason/alternative along too.
+                # Gating on the local `cycle_vetoes` counter (not
+                # directly reading state.latest_veto_reason) matters:
+                # that state field is never reset, so reading it
+                # unconditionally would leak a stale veto from an earlier
+                # cycle into a cycle that had no veto at all. Purely
+                # informational -- see CycleSignals.veto_reason's
+                # docstring for why this cannot change what happens next.
+                veto_reason = state.latest_veto_reason if cycle_vetoes else None
+                veto_alternative_action_id = (
+                    state.latest_veto_alternative.action_id
+                    if cycle_vetoes and state.latest_veto_alternative is not None
+                    else None
+                )
+                # A234: resolved_goal_payload is already in scope (set a
+                # few lines above, right after the last `resolve` call
+                # this cycle -- either the first resolve at the top of
+                # the cycle, or the local same-cycle retry's resolve if
+                # a first veto triggered one). Fold goal_resolver.py::
+                # resolve()'s own already-computed per-cycle output into
+                # this same existing Annatar call, mirroring A230's
+                # readiness_report -- no new call site, no new routing
+                # logic. `top_two_confidence_gap` re-derives the same
+                # ambiguity measure goal_resolver.py::_should_escalate_
+                # to_llm computes internally (selected vs. top
+                # alternative's confidence), read-only here from data
+                # already sitting on ResolvedGoal -- None when there is
+                # no alternative to compare against.
+                resolve_report = {
+                    "grounding_gate_passed": resolved_goal_payload.grounding_gate_passed,
+                    "llm_escalated": bool(resolved_goal_payload.metadata.get("llm_escalated")),
+                    "llm_reason": resolved_goal_payload.metadata.get("llm_reason"),
+                    "hypothesis_count": len(resolved_goal_payload.metadata.get("hypotheses", [])),
+                    "top_two_confidence_gap": (
+                        resolved_goal_payload.selected.confidence - resolved_goal_payload.alternatives[0].confidence
+                        if resolved_goal_payload.alternatives
                         else None
-                    )
-                    # A234: resolved_goal_payload is already in scope (set a
-                    # few lines above, right after the last `resolve` call
-                    # this cycle -- either the first resolve at the top of
-                    # the cycle, or the local same-cycle retry's resolve if
-                    # a first veto triggered one). Fold goal_resolver.py::
-                    # resolve()'s own already-computed per-cycle output into
-                    # this same existing Annatar call, mirroring A230's
-                    # readiness_report -- no new call site, no new routing
-                    # logic. `top_two_confidence_gap` re-derives the same
-                    # ambiguity measure goal_resolver.py::_should_escalate_
-                    # to_llm computes internally (selected vs. top
-                    # alternative's confidence), read-only here from data
-                    # already sitting on ResolvedGoal -- None when there is
-                    # no alternative to compare against.
-                    resolve_report = {
-                        "grounding_gate_passed": resolved_goal_payload.grounding_gate_passed,
-                        "llm_escalated": bool(resolved_goal_payload.metadata.get("llm_escalated")),
-                        "llm_reason": resolved_goal_payload.metadata.get("llm_reason"),
-                        "hypothesis_count": len(resolved_goal_payload.metadata.get("hypotheses", [])),
-                        "top_two_confidence_gap": (
-                            resolved_goal_payload.selected.confidence - resolved_goal_payload.alternatives[0].confidence
-                            if resolved_goal_payload.alternatives
-                            else None
-                        ),
-                    }
-                    # A249: fold action_space_exhausted into the same
-                    # stall_reason channel Annatar already reads (see
-                    # backlog/A249.md) -- annatar_signals.py:251 only ever
-                    # checks `stall_reason is not None`, never its string
-                    # value, so this OR is safe: whichever signal fired (or
-                    # both) still produces the identical all_falsified=True/
-                    # untested_remaining=False override. This local fold
-                    # deliberately does NOT touch the outer `stall_reason`
-                    # variable itself -- the no-Annatar `else` branch below
-                    # still reads check_stall's own unmodified value.
-                    effective_stall_reason = stall_reason or (
-                        "action_space_exhausted" if evaluation_payload.metadata.get("action_space_exhausted") else None
-                    )
-                    outcome = self._dependencies.annatar(
-                        state,
-                        perception_payload,
-                        execution_payload,
-                        evaluation_payload,
-                        stall_reason=effective_stall_reason,
-                        veto_reason=veto_reason,
-                        veto_alternative_action_id=veto_alternative_action_id,
-                        resolve_report=resolve_report,
-                    )
-                    # A234 live-verification hook: mirrors A230's own
-                    # PROBE_ANNATAR precedent -- a greppable, concrete
-                    # record that resolve()'s real output actually reached
-                    # this call, since (unlike every other phase) the
-                    # annatar dependency is not wrapped by
-                    # telemetry.wrap_phase and so never produces a
-                    # phase_transition snapshot of its own.
-                    import logging as _resolve_logging
-                    _resolve_logging.getLogger(__name__).info(
-                        "RESOLVE_ANNATAR grounding_gate_passed=%s llm_escalated=%s top_two_confidence_gap=%s",
-                        resolve_report["grounding_gate_passed"],
-                        resolve_report["llm_escalated"],
-                        resolve_report["top_two_confidence_gap"],
-                    )
-                    # A205 / spec section 8: make a degraded (graph-unreachable)
-                    # Annatar cycle visible in telemetry rather than silently
-                    # swallowed. Set every cycle the Annatar actually runs, so
-                    # this always reflects the most recent cycle's outcome.
-                    state.annatar_degraded = outcome.degraded
-                    if outcome.resume_mapping:
-                        # A241: Annatar intercepted its own whole-episode-
-                        # futility override -- real unmapped territory
-                        # remains (a live, graph-grounded re-check, per
-                        # annatar_signals.py::run_annatar_cycle's docstring),
-                        # so resume the readiness-probe loop instead of
-                        # honoring what would otherwise be TERMINATE.
-                        # Resetting readiness_gate_resolved alone would do
-                        # nothing this cycle -- the gate's own `if` block
-                        # (top of this method) already ran and moved past
-                        # for THIS cycle's perception -- so `continue` routes
-                        # control back to the top of the outer `while True:`
-                        # loop, letting the NEXT cycle's iteration naturally
-                        # re-enter that `if` block and the existing probe-
-                        # path code (the `if probe_candidate is not None:`
-                        # block above) instead of duplicating it here.
-                        # state.active_investigation_anchor is already None
-                        # (run_annatar_cycle's decision.value == "advance"
-                        # branch clears it before this override ever runs)
-                        # and state.annatar_unproductive_anchor_streak was
-                        # already reset to 0 by run_annatar_cycle itself, so
-                        # neither needs repeating here.
-                        state.readiness_gate_resolved = False
-                        current_observation = execution_payload.observation
-                        continue
-                    if outcome.decision == "terminate":
-                        return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
-                    if outcome.decision in ("repeat_deepen", "repeat_retry"):
-                        # Consumed by a later card (A203, anchor-biasing in
-                        # goal_resolver/plan_generator) -- this card only
-                        # needs to produce and store the hint correctly.
-                        state.annatar_anchor_hint = outcome
-                    else:
-                        state.annatar_anchor_hint = None
+                    ),
+                }
+                # A249: fold action_space_exhausted into the same
+                # stall_reason channel Annatar already reads (see
+                # backlog/A249.md) -- annatar_signals.py:251 only ever
+                # checks `stall_reason is not None`, never its string
+                # value, so this OR is safe: whichever signal fired (or
+                # both) still produces the identical all_falsified=True/
+                # untested_remaining=False override.
+                effective_stall_reason = stall_reason or (
+                    "action_space_exhausted" if evaluation_payload.metadata.get("action_space_exhausted") else None
+                )
+                outcome = self._dependencies.annatar(
+                    state,
+                    perception_payload,
+                    execution_payload,
+                    evaluation_payload,
+                    stall_reason=effective_stall_reason,
+                    veto_reason=veto_reason,
+                    veto_alternative_action_id=veto_alternative_action_id,
+                    resolve_report=resolve_report,
+                )
+                # A234 live-verification hook: mirrors A230's own
+                # PROBE_ANNATAR precedent -- a greppable, concrete
+                # record that resolve()'s real output actually reached
+                # this call, since (unlike every other phase) the
+                # annatar dependency is not wrapped by
+                # telemetry.wrap_phase and so never produces a
+                # phase_transition snapshot of its own.
+                import logging as _resolve_logging
+                _resolve_logging.getLogger(__name__).info(
+                    "RESOLVE_ANNATAR grounding_gate_passed=%s llm_escalated=%s top_two_confidence_gap=%s",
+                    resolve_report["grounding_gate_passed"],
+                    resolve_report["llm_escalated"],
+                    resolve_report["top_two_confidence_gap"],
+                )
+                # A205 / spec section 8: make a degraded (graph-unreachable)
+                # Annatar cycle visible in telemetry rather than silently
+                # swallowed. Set every cycle the Annatar actually runs, so
+                # this always reflects the most recent cycle's outcome.
+                state.annatar_degraded = outcome.degraded
+                if outcome.resume_mapping:
+                    # A241: Annatar intercepted its own whole-episode-
+                    # futility override -- real unmapped territory
+                    # remains (a live, graph-grounded re-check, per
+                    # annatar_signals.py::run_annatar_cycle's docstring),
+                    # so resume the readiness-probe loop instead of
+                    # honoring what would otherwise be TERMINATE.
+                    # Resetting readiness_gate_resolved alone would do
+                    # nothing this cycle -- the gate's own `if` block
+                    # (top of this method) already ran and moved past
+                    # for THIS cycle's perception -- so `continue` routes
+                    # control back to the top of the outer `while True:`
+                    # loop, letting the NEXT cycle's iteration naturally
+                    # re-enter that `if` block and the existing probe-
+                    # path code (the `if probe_candidate is not None:`
+                    # block above) instead of duplicating it here.
+                    # state.active_investigation_anchor is already None
+                    # (run_annatar_cycle's decision.value == "advance"
+                    # branch clears it before this override ever runs)
+                    # and state.annatar_unproductive_anchor_streak was
+                    # already reset to 0 by run_annatar_cycle itself, so
+                    # neither needs repeating here.
+                    state.readiness_gate_resolved = False
+                    current_observation = execution_payload.observation
+                    continue
+                if outcome.decision == "terminate":
+                    return self._finish(state, WorkflowStatus.TERMINATED, "annatar_exhausted", phase_results)
+                if outcome.decision in ("repeat_deepen", "repeat_retry"):
+                    # Consumed by a later card (A203, anchor-biasing in
+                    # goal_resolver/plan_generator) -- this card only
+                    # needs to produce and store the hint correctly.
+                    state.annatar_anchor_hint = outcome
                 else:
-                    # No Annatar configured -- today's exact existing
-                    # behavior, byte-for-byte.
-                    if stall_reason is not None:
-                        return self._finish(state, WorkflowStatus.STALLED, stall_reason, phase_results)
+                    state.annatar_anchor_hint = None
 
                 current_observation = execution_payload.observation
             except Exception:
@@ -646,11 +615,12 @@ class WorkflowOrchestrator:
                 traceback_text = traceback.format_exc()
                 anchor = state.active_investigation_anchor
                 thread_id = anchor.get("thread_id") if isinstance(anchor, dict) else None
-                if (
-                    self._dependencies.annatar is not None
-                    and thread_id is not None
-                    and self._dependencies.on_crash_cleanup is not None
-                ):
+                # A250: `annatar` is unconditionally wired in production
+                # since A202 -- this used to be a three-way AND-gate
+                # (annatar configured AND thread_id AND on_crash_cleanup);
+                # with `annatar` guaranteed non-None it narrows to the two
+                # conditions that actually vary. See backlog/A250.md.
+                if thread_id is not None and self._dependencies.on_crash_cleanup is not None:
                     try:
                         # Close out the thread's graph state before returning CRASHED.
                         # State value "exhausted" is used as an interim fit for the crash
@@ -704,10 +674,6 @@ class WorkflowOrchestrator:
         answer correctly -- see test_annatar_response_does_not_override_budget
         for the proof (a Annatar mock returning "advance" still ends the
         episode as BUDGET_EXHAUSTED with zero further phases invoked)."""
-        # If no Annatar configured, behavior is byte-for-byte identical to before.
-        if self._dependencies.annatar is None:
-            return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
-
         # First iteration has no prior cycle to report; end immediately.
         if state.step_index == 0:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
@@ -781,14 +747,10 @@ class WorkflowOrchestrator:
         (annatar_signals.run_annatar_cycle) built alongside this fix --
         no new termination logic needed for that case specifically.
 
-        Returns a WorkflowRunResult if the episode should end now (no
-        Annatar configured -- exact prior behavior -- or the Annatar said
-        "terminate"); None if the caller should `continue` the outer loop
-        instead, letting the Annatar's decision (a fresh anchor, or the
-        same one) drive the next cycle."""
-        if self._dependencies.annatar is None:
-            return self._finish(state, WorkflowStatus.SKIPPED, "second_veto", phase_results)
-
+        Returns a WorkflowRunResult if the episode should end now (the
+        Annatar said "terminate"); None if the caller should `continue` the
+        outer loop instead, letting the Annatar's decision (a fresh anchor,
+        or the same one) drive the next cycle."""
         synthetic_execution = ExecutionResult(action_id="", candidate=None, observation=current_observation, metadata={})
         synthetic_evaluation = EvaluationResult(
             decision=WorkflowDecision.CONTINUE,

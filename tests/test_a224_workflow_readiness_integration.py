@@ -14,9 +14,12 @@ Covers, in order:
    (WorkflowDependencies has no graph_port of its own -- it's only ever
    captured via closures at bundle-construction time, same pattern as
    resolve/plan/execute -- confirmed by reading ports.py directly rather
-   than assumed). None means "no readiness gate, run exactly as today",
-   same backward-compat convention `annatar: AnnatarPhase | None` already
-   established. NOT_READY (with a selectable probe_candidate) -> probe path
+   than assumed). None means "no readiness gate, run exactly as today" --
+   `readiness_gate` is still genuinely optional (unlike `annatar`, which
+   A250 made mandatory once its own identical `None`-means-legacy-mode
+   convention was confirmed permanently dead in production -- see
+   backlog/A250.md; `readiness_gate`'s own optionality is explicitly out of
+   that card's scope). NOT_READY (with a selectable probe_candidate) -> probe path
    (skip resolve/plan/vet entirely, straight to execute/evaluate); READY ->
    normal path; PARTIAL_FALLTHROUGH -> normal path + telemetry flag;
    already-resolved (cached via state.readiness_gate_resolved) -> gate
@@ -224,7 +227,16 @@ def _perception_result(entities):
     )
 
 
-def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=None, untested_non_click_actions=()):
+def _default_fake_annatar(state, perception, execution, evaluation, *, readiness_report=None, **_ignored):
+    """A250: `annatar` is a required WorkflowDependencies field now that
+    it's unconditionally wired in production (since A202) -- this is the
+    minimal non-terminating, non-exploration-complete stand-in used by
+    default below, so tests that aren't specifically exercising Annatar's
+    own decision logic don't need to supply their own mock."""
+    return AnnatarOutcome(decision="advance", exploration_complete=None)
+
+
+def _make_dependencies(*, graph_port, resolve_calls, execute_calls, annatar=_default_fake_annatar, untested_non_click_actions=()):
     goal = ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d", confidence=0.5))
 
     def perceive(state, observation):
@@ -336,9 +348,10 @@ class TestWorkflowReadinessGateRouting:
         assert execute_calls[0].goal_id == "g1", "normal path candidate, not a readiness probe"
 
     def test_no_readiness_gate_configured_behaves_exactly_as_before(self):
-        """None means "no readiness gate, run exactly as today" -- same
-        backward-compat convention `annatar: AnnatarPhase | None` already
-        established. Existing callers that don't wire this in must be
+        """None means "no readiness gate, run exactly as today" --
+        `readiness_gate` stays genuinely optional (see the module docstring
+        for why this is a different case from `annatar`, which A250 made
+        mandatory). Existing callers that don't wire this in must be
         completely unaffected."""
         resolve_calls, execute_calls = [], []
         graph_port = MagicMock()
@@ -352,27 +365,20 @@ class TestWorkflowReadinessGateRouting:
         assert len(resolve_calls) == 1, "no gate configured -- must proceed exactly as before this card"
         assert len(execute_calls) == 1
 
-    def test_readiness_gate_configured_annatar_none_behaves_exactly_as_before(self):
-        """A230: the new combination A224 never had to consider, since
-        Annatar wasn't reachable from the probe path at all until this
-        card. `annatar=None` must preserve byte-for-byte pre-A230 behavior
-        -- branch directly on readiness_status()'s own return value, same
-        backward-compatibility convention every other
-        `if self._dependencies.annatar is not None:` branch in workflow.py
-        already provides."""
-        resolve_calls, execute_calls = [], []
-        graph_port = MagicMock()
-        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
-        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
-        deps = _make_dependencies(graph_port=graph_port, resolve_calls=resolve_calls, execute_calls=execute_calls, annatar=None)
-        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=1))
-        state = WorkflowState()
-
-        orchestrator.run(state, {"entities": (_entity(1),)})
-
-        assert resolve_calls == [], "annatar=None -- probe path must skip resolve/plan/vet exactly as before A230"
-        assert len(execute_calls) == 1
-        assert execute_calls[0].metadata.get("readiness_probe") is True
+    # A250 note: this class used to also carry
+    # test_readiness_gate_configured_annatar_none_behaves_exactly_as_before,
+    # constructing dependencies with an explicit `annatar=None` and
+    # asserting the probe path still skips resolve/plan/vet. On inspection
+    # (A250's Step 1 enumeration) its assertions never actually depended on
+    # whether Annatar was configured -- skipping resolve/plan/vet during the
+    # probe path is a structural property of the probe path itself (the
+    # `if probe_candidate is not None:` block never calls resolve/plan/vet
+    # either way; only what happens AFTER execute/evaluate differs). Once
+    # `_make_dependencies`'s default `annatar` became a real (non-None)
+    # fake per A250 (required field), this test became a verbatim duplicate
+    # of test_not_ready_skips_resolve_plan_vet_routes_straight_to_execute
+    # above (identical graph_port setup, identical assertions), so it was
+    # deleted as redundant rather than ported forward.
 
     def test_probe_cycle_calls_annatar_dependency(self):
         """A230's core regression: today this sees 0 calls -- the whole

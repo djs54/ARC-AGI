@@ -82,45 +82,25 @@ class TestCrashWithoutInvestigationThread:
         assert "Simulated perceive failure" in result.traceback
 
 
-class TestCrashWithNullAnnatar:
-    """Test crash when no Annatar is configured (regression guard)."""
-
-    def test_crash_no_annatar_no_cleanup_call(self):
-        """No Annatar configured -> no cleanup call, pure CRASHED result."""
-        state = WorkflowState()
-        state.active_investigation_anchor = {
-            "thread_id": "thread_123",
-            "anchor_ref": "goal_1",
-            "anchor_type": "goal",
-            "state": "exploring",
-        }
-
-        perceive = make_failing_perceive()
-        resolve = Mock(return_value=PhaseResult(phase=WorkflowPhase.RESOLVE, status=PhaseStatus.OK))
-        plan = Mock(return_value=PhaseResult(phase=WorkflowPhase.PLAN, status=PhaseStatus.OK))
-        vet = Mock(return_value=PhaseResult(phase=WorkflowPhase.VET, status=PhaseStatus.OK))
-        execute = Mock(return_value=PhaseResult(phase=WorkflowPhase.EXECUTE, status=PhaseStatus.OK))
-        evaluate = Mock(return_value=PhaseResult(phase=WorkflowPhase.EVALUATE, status=PhaseStatus.OK))
-        on_crash_cleanup = Mock()
-
-        dependencies = WorkflowDependencies(
-            perceive=perceive,
-            resolve=resolve,
-            plan=plan,
-            vet=vet,
-            execute=execute,
-            evaluate=evaluate,
-            annatar=None,  # No Annatar
-            on_crash_cleanup=on_crash_cleanup,
-        )
-
-        orchestrator = WorkflowOrchestrator(dependencies)
-        result = orchestrator.run(state, {})
-
-        # Should still be CRASHED
-        assert result.status == WorkflowStatus.CRASHED
-        # No cleanup call (Annatar not configured)
-        on_crash_cleanup.assert_not_called()
+# A250 note: this file used to also carry a TestCrashWithNullAnnatar class
+# pinning the crash handler's three-way AND-gate
+# (`self._dependencies.annatar is not None and thread_id is not None and
+# self._dependencies.on_crash_cleanup is not None`) specifically via its
+# `annatar is not None` leg -- constructing dependencies with annatar=None,
+# a real thread_id, and a real on_crash_cleanup, and asserting cleanup was
+# NOT called. A250 narrowed that gate to two conditions
+# (`thread_id is not None and self._dependencies.on_crash_cleanup is not
+# None`) now that `annatar` is unconditionally wired in production since
+# A202 -- confirmed via TDD: with the branch narrowed, the exact same
+# construction (thread_id + on_crash_cleanup both present) now DOES call
+# cleanup, so the old assertion failed (not crashed) once the narrowing
+# landed, proving it really was pinning the annatar leg specifically. The
+# two conditions that actually still vary are each covered elsewhere in
+# this file: TestCrashWithoutInvestigationThread (thread_id=None -> no
+# cleanup call) and TestCrashWithNullOnCrashCleanup (on_crash_cleanup=None
+# -> no crash in the crash handler, since there's nothing to call) --
+# together they cover the narrowed two-condition gate with no loss of
+# coverage.
 
 
 class TestCrashWithValidThread:
