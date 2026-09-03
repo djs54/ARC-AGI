@@ -307,6 +307,14 @@ class ArcV2Telemetry:
             # .py). getattr(..., False) also covers state being None (no
             # WorkflowState found in this phase call's args at all).
             "annatar_degraded": bool(getattr(state, "annatar_degraded", False)),
+            # A251: same getattr(..., False) degrade pattern as
+            # annatar_degraded above -- WorkflowState.resolve_degraded
+            # defaults False and is only ever set True by
+            # WorkflowOrchestrator.run() right after a resolve phase call
+            # whose ResolvedGoal.degraded came back True (see
+            # goal_resolver.py::_query_llm's now-caught llm_port.chat(...)
+            # exception site).
+            "resolve_degraded": bool(getattr(state, "resolve_degraded", False)),
             # A237: same getattr(..., False) degrade pattern as
             # annatar_degraded above -- WorkflowState.plan_degraded/
             # vet_degraded default False and are only ever set True by

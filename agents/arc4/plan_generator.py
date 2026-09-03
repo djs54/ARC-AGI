@@ -650,8 +650,19 @@ class PlanGenerator:
                 ),
             ),
         ]
-        response = llm_port.chat(messages)
-        return self._parse_llm_response(response, candidates)
+        try:
+            response = llm_port.chat(messages)
+            return self._parse_llm_response(response, candidates)
+        except Exception:
+            # A251: mirrors annatar_signals.py::resolve_llm_vote's own
+            # already-proven pattern (A205) and goal_resolver.py::
+            # _query_llm's identical new site -- a bounded single attempt,
+            # degrading to the same "no LLM patch" outcome the caller
+            # already handles (`if llm_patch is not None:`) rather than
+            # letting a raised exception propagate to workflow.py's outer
+            # except and crash the whole episode. See backlog/A251.md.
+            self._degraded = True
+            return None
 
     @staticmethod
     def _parse_llm_response(response: str, candidates: Sequence[_CandidateRecord]) -> dict[str, Any] | None:

@@ -328,6 +328,10 @@ class WorkflowOrchestrator:
                 phase_results.append(resolved_goal)
                 resolved_goal_payload = self._require_payload(resolved_goal, WorkflowPhase.RESOLVE)
                 state.active_goal = resolved_goal_payload
+                # A251: mirrors state.annatar_degraded's exact placement --
+                # set immediately after the phase call, before any branching
+                # on the result.
+                state.resolve_degraded = getattr(resolved_goal_payload, "degraded", False)
 
                 planning = self._invoke_phase(
                     "plan",
@@ -369,6 +373,11 @@ class WorkflowOrchestrator:
                     phase_results.append(resolved_goal)
                     resolved_goal_payload = self._require_payload(resolved_goal, WorkflowPhase.RESOLVE)
                     state.active_goal = resolved_goal_payload
+                    # A251: same placement as the initial resolve call site
+                    # above -- "most recent invocation" semantics, matching
+                    # plan_degraded/vet_degraded's own two-call-site
+                    # precedent.
+                    state.resolve_degraded = getattr(resolved_goal_payload, "degraded", False)
 
                     planning = self._invoke_phase(
                         "plan",
