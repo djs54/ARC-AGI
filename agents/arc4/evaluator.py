@@ -32,6 +32,18 @@ class Evaluator:
     def __init__(self, graph_query_port: GraphQueryPort | None = None, *, limits: EvaluationLimits | None = None) -> None:
         self._graph_query_port = graph_query_port
         self._limits = limits or EvaluationLimits()
+        # A244: scratch flag, reset at the top of every evaluate() call and
+        # set True by evaluate()'s own fetch_causal_path except branch or
+        # _action_space_exhausted's fetch_untested_actions except branch.
+        # Read back into EvaluationResult.degraded when the result is built.
+        # Same instance-scratch design as PlanGenerator._degraded/
+        # PlanVetter._degraded (A237) -- confirmed via arc_runtime/bundle.py
+        # that Evaluator is likewise a single long-lived instance
+        # (`Evaluator(graph_query_port=graph_port).evaluate` bound once and
+        # reused for every cycle of an episode), never called re-entrantly/
+        # concurrently on itself, so a reset-per-evaluate() scratch
+        # attribute is safe for a purely additive visibility signal.
+        self._degraded = False
 
     def __call__(
         self,
@@ -49,6 +61,9 @@ class Evaluator:
         goal: ResolvedGoal,
         execution: ExecutionResult,
     ) -> PhaseResult[EvaluationResult]:
+        # A244: reset before this cycle's graph_port calls so a prior
+        # cycle's degradation never leaks forward into this one.
+        self._degraded = False
         action_family = self._action_family(execution.action_id)
         current_falsification_count = self._current_count(state, action_family, execution.action_id)
         current_attempt_count = self._current_attempt_count(state, action_family, execution.action_id)
@@ -117,7 +132,10 @@ class Evaluator:
                     meaningful_progress = False
                     causal_override = True
             except Exception:
-                pass  # graph unavailable — don't override
+                # A244: graph unavailable — don't override (unchanged
+                # fallback), degradation made visible instead of silently
+                # absorbed.
+                self._degraded = True
 
         # A150: "grid_change" is the weakest possible predicted-outcome kind — nearly
         # any action in a click-based game changes at least one pixel, so treating it
@@ -206,6 +224,7 @@ class Evaluator:
             meaningful_progress=meaningful_progress,
             falsification_delta=falsification_delta,
             reason=reason,
+            degraded=self._degraded,
             metadata=metadata_dict,
         )
 
@@ -358,7 +377,12 @@ class Evaluator:
                         return False, ""
                     return True, "graph_confirmed_no_untested"
                 except Exception:
-                    pass
+                    # A244: falls through to "threshold_only" below
+                    # (unchanged fallback) -- but that value is identical to
+                    # the "no graph configured at all" case, so a real graph
+                    # outage here would otherwise be indistinguishable in
+                    # the trace. Make it visible instead.
+                    self._degraded = True
         return True, "threshold_only"
 
 
