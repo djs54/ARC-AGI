@@ -38,7 +38,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.arc4.annatar_signals import run_annatar_cycle
-from agents.arc4.annatar_state_machine import ReadinessStatus
+from agents.arc4.annatar_state_machine import InvestigationState, ReadinessStatus
 from agents.arc4.graph_queries import ARC_V2_TOOL_NAMES
 from agents.arc4.types import (
     AnnatarOutcome,
@@ -103,7 +103,28 @@ def _unproductive_advance(state, perception, graph_port, *, anchor_entity_ref="a
     WholeEpisodeFutility._unproductive_advance in test_a202_annatar_
     orchestrator_integration.py exactly, except perception/graph_port are
     passed in so this file's tests can control the wider entity_domains
-    picture the A241 live re-derivation reads."""
+    picture the A241 live re-derivation reads.
+
+    A246: same fix as test_a202's own _unproductive_advance -- these tests
+    exercise whole-episode-futility/resume-mapping (anchor CONCLUSION), not
+    which anchor type gets freshly CREATED, and need an entity-type anchor
+    specifically for the CHAOTIC domain classification below. Before A246,
+    the entity_ref-carrying candidate alone was enough; after A246, a
+    goal-directed cycle (readiness_report is None, unchanged here) with
+    state.active_goal set now prefers the active goal for a *fresh*
+    anchor. Inject a pre-existing entity-type anchor directly whenever one
+    isn't already active, bypassing the creation block entirely."""
+    if state.active_investigation_anchor is None:
+        state.active_investigation_anchor = {
+            "anchor_ref": anchor_entity_ref,
+            "anchor_type": "entity",
+            "thread_id": None,
+            "state": InvestigationState.EXPLORING.value,
+            "deepening_cycle_count": 0,
+            "already_retried": False,
+            "any_progress": False,
+            "edge_writes_at_start": state.world_model_edge_writes,
+        }
     candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": anchor_entity_ref})
     execution = ExecutionResult(action_id="a1", candidate=candidate, observation={"grid": "h2"})
     evaluation = EvaluationResult(

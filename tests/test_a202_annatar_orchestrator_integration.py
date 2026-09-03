@@ -929,7 +929,43 @@ class TestResolveReportVisibilityFoldedIntoAnnatarCall:
 
 
 class TestRunAnnatarCycleAnchorSelection:
-    def test_fresh_attempt_prefers_entity_ref_from_executed_candidate(self):
+    def test_probe_cycle_prefers_entity_ref_from_executed_candidate(self):
+        """A246: entity-preferring fresh-anchor creation is probe-phase
+        behavior -- readiness_report is not None here, matching A230's
+        convention. Renamed from test_fresh_attempt_prefers_entity_ref_
+        from_executed_candidate: that name/assertion described what used to
+        happen on EVERY fresh attempt regardless of phase (the bug); it now
+        also needs an explicit readiness_report to represent probing. See
+        test_goal_directed_cycle_prefers_active_goal_over_entity_ref below
+        for the corrected goal-directed behavior, and backlog/A246.md."""
+        from agents.arc4.annatar_state_machine import ReadinessStatus
+
+        candidate = PlanCandidate(action_id="ACTION6", goal_id="g1", metadata={"entity_ref": "e42"})
+        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
+        execution = _execution_result(action_id="ACTION6", candidate=candidate)
+        evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
+
+        outcome = run_annatar_cycle(
+            state,
+            _perception_snapshot(),
+            execution,
+            evaluation,
+            graph_port=None,
+            readiness_report={"status": ReadinessStatus.NOT_READY, "entities_mapped": 0, "entities_total": 1},
+        )
+
+        assert outcome.anchor_type == "entity"
+        assert outcome.anchor_ref == "e42"
+
+    def test_goal_directed_cycle_prefers_active_goal_over_entity_ref(self):
+        """A246: during goal-directed play (readiness_report is None, the
+        default every non-probe call site actually uses), the just-executed
+        candidate's entity_ref must NOT override the active goal -- this is
+        the exact SK48 live bug this card fixes (a concluding goal-type
+        anchor's very next anchor incidentally becoming entity-type because
+        the last action happened to be an ACTION6 click). See
+        backlog/A246.md and tests/test_a246_anchor_selection_readiness_
+        context.py for the dedicated coverage."""
         candidate = PlanCandidate(action_id="ACTION6", goal_id="g1", metadata={"entity_ref": "e42"})
         state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g1", description="d")))
         execution = _execution_result(action_id="ACTION6", candidate=candidate)
@@ -937,8 +973,8 @@ class TestRunAnnatarCycleAnchorSelection:
 
         outcome = run_annatar_cycle(state, _perception_snapshot(), execution, evaluation, graph_port=None)
 
-        assert outcome.anchor_type == "entity"
-        assert outcome.anchor_ref == "e42"
+        assert outcome.anchor_type == "goal"
+        assert outcome.anchor_ref == "g1"
 
     def test_fresh_attempt_falls_back_to_active_goal_id(self):
         candidate = PlanCandidate(action_id="a1", goal_id="g1")
@@ -993,12 +1029,38 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
         removed (all_falsified was never graph-derived; see
         annatar_state_machine.py::transition()'s updated comment). Reaching
         EXHAUSTED now requires a graph-grounded CynefinDomain.CHAOTIC anchor
-        instead: the candidate carries an entity_ref (so anchor_type
-        resolves to "entity", the only type compute_cycle_signals computes
-        domain for) and graph_port returns all-falsified rule evidence.
-        stall_reason is still passed and still folds into all_falsified for
-        realism (matching a genuinely stalled episode) but no longer does
-        any work toward reaching EXHAUSTED itself -- CHAOTIC does that now."""
+        instead: anchor_type must resolve to "entity" (the only type
+        compute_cycle_signals computes domain for) and graph_port returns
+        all-falsified rule evidence. stall_reason is still passed and still
+        folds into all_falsified for realism (matching a genuinely stalled
+        episode) but no longer does any work toward reaching EXHAUSTED
+        itself -- CHAOTIC does that now.
+
+        A246: this class exercises anchor CONCLUSION/streak-counting, not
+        anchor CREATION -- unrelated to this card's fix. Before A246, an
+        entity_ref-carrying candidate was enough to make a *fresh* anchor
+        entity-type; after A246, a goal-directed cycle (readiness_report is
+        None, the same default every call here already used) with
+        state.active_goal set now prefers the active goal instead. Since
+        these tests need an entity-type anchor specifically (for the
+        CHAOTIC domain classification above) and are not testing which
+        anchor type gets freshly created, inject a pre-existing entity-type
+        anchor directly whenever one isn't already active -- bypassing the
+        creation block entirely, exactly like
+        test_progress_partway_through_a_deepening_anchor_counts_as_productive
+        already does a few tests below. This keeps every assertion in this
+        class about streak counting byte-for-byte unchanged."""
+        if state.active_investigation_anchor is None:
+            state.active_investigation_anchor = {
+                "anchor_ref": "e1",
+                "anchor_type": "entity",
+                "thread_id": None,
+                "state": InvestigationState.EXPLORING.value,
+                "deepening_cycle_count": 0,
+                "already_retried": False,
+                "any_progress": False,
+                "edge_writes_at_start": state.world_model_edge_writes,
+            }
         candidate = PlanCandidate(action_id="a1", goal_id="g1", metadata={"entity_ref": "e1"})
         execution = _execution_result(action_id="a1", candidate=candidate)
         evaluation = _evaluation_result(meaningful_progress=False, grid_changed=True)
@@ -1147,7 +1209,23 @@ class TestRunAnnatarCycleWholeEpisodeFutility:
         assert state.active_investigation_anchor is None
 
     def test_max_unproductive_anchors_kwarg_overrides_default_threshold(self):
-        state = WorkflowState(active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")))
+        state = WorkflowState(
+            active_goal=ResolvedGoal(selected=GoalHypothesis(goal_id="g7", description="d")),
+            # A246: inject a pre-existing entity-type anchor directly (same
+            # reasoning as _unproductive_advance's own A246 comment) so this
+            # stays a CHAOTIC-domain-entity scenario rather than the new
+            # goal-preferring fresh-anchor-creation path picking "goal".
+            active_investigation_anchor={
+                "anchor_ref": "e1",
+                "anchor_type": "entity",
+                "thread_id": None,
+                "state": InvestigationState.EXPLORING.value,
+                "deepening_cycle_count": 0,
+                "already_retried": False,
+                "any_progress": False,
+                "edge_writes_at_start": 0,
+            },
+        )
         # A221 Finding 1: entity_ref candidate + CHAOTIC-shaped graph_port,
         # same reasoning as _unproductive_advance -- reaching EXHAUSTED no
         # longer works via all_falsified/stall_reason alone.
