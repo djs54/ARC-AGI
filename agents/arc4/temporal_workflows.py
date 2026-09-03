@@ -8,7 +8,13 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, termination_from_evaluation
+    from .cycle_policy import (
+        check_budget,
+        check_stall,
+        record_evaluation_outcome,
+        termination_from_evaluation,
+        untested_remaining_actions,
+    )
     from .types import WorkflowPhase, WorkflowStatus, PhaseStatus, WorkflowDecision
 
 
@@ -170,10 +176,15 @@ class ArcPuzzleWorkflow:
 
             no_progress = self._state.get("consecutive_no_progress_count", 0)
             available = observation.get("available_actions", [])
-            # Count distinct base actions so ACTION6@x,y click targets don't
-            # inflate the attempted count past the available action space.
-            num_attempted = count_base_actions(self._state.get("action_attempt_counts", {}))
-            stall_reason = check_stall(no_progress, max_no_progress, len(available), num_attempted)
+            # A248: check_stall's grace now needs a set difference against
+            # *this cycle's* available_actions, not a length subtraction
+            # against action_attempt_counts's whole-episode-cumulative count
+            # (never reset -- can hold stale entries from an earlier,
+            # differently-composed action-space phase). Mirrors workflow.py's
+            # WorkflowOrchestrator.run() fix -- see backlog/A248.md.
+            attempt_counts = self._state.get("action_attempt_counts", {})
+            untested_remaining = untested_remaining_actions(available, attempt_counts)
+            stall_reason = check_stall(no_progress, max_no_progress, len(available), untested_remaining)
             if stall_reason is not None:
                 return self._finish("stalled", stall_reason)
 

@@ -24,6 +24,25 @@ def count_base_actions(attempt_keys: Iterable[str]) -> int:
     return len({base_action(key) for key in attempt_keys})
 
 
+def untested_remaining_actions(available_actions: Iterable[str], attempt_keys: Iterable[str]) -> int:
+    """Count of currently-available base actions never attempted (at any point).
+
+    A248: a set difference between *this cycle's* available_actions and the
+    base actions represented in attempt_keys -- not a length subtraction
+    against attempt_keys's raw count. attempt_keys (state.action_attempt_
+    counts) accumulates for the whole episode and is never reset, so it can
+    (and does) hold stale entries for actions no longer in the current
+    action space once the environment moves to a differently-composed
+    phase (e.g. a probe-phase ACTION6 click that isn't available once play
+    becomes goal-directed). The old `len(available) - count_base_actions
+    (attempted)` subtraction could go negative in that case and, worse,
+    could mask a genuinely-untested current action behind an unrelated
+    stale one -- this is always >= 0 by construction and immune to both.
+    """
+    attempted_base_actions = {base_action(key) for key in attempt_keys}
+    return len(set(available_actions) - attempted_base_actions)
+
+
 def check_budget(step_index: int, max_cycles: int) -> str | None:
     """Return budget_exhausted when the cycle budget is spent."""
     if step_index >= max_cycles:
@@ -48,11 +67,21 @@ def check_stall(
     consecutive_no_progress: int,
     max_consecutive_no_progress: int,
     num_available_actions: int,
-    num_attempted_actions: int,
+    num_untested_remaining: int,
 ) -> str | None:
-    """Return stall_detected once all actions are repeatedly non-productive."""
-    num_available = num_available_actions or 1
-    if num_available_actions > 0 and num_available - num_attempted_actions > 0:
+    """Return stall_detected once all actions are repeatedly non-productive.
+
+    A248: the 4th param is now the caller's already-correctly-scoped
+    "genuinely untested in the *current* action space" count (see
+    untested_remaining_actions above), not a whole-episode-cumulative
+    attempted count this function used to subtract from num_available
+    itself. That internal subtraction compared two differently-scoped
+    numbers (a point-in-time available-action set vs. a cumulative,
+    never-reset attempt count) and could go negative, silently skipping
+    this early-return even when the *current* phase's actions genuinely
+    hadn't all been tried yet.
+    """
+    if num_available_actions > 0 and num_untested_remaining > 0:
         return None
     if consecutive_no_progress >= stall_threshold(max_consecutive_no_progress, num_available_actions):
         return "stall_detected"
@@ -104,6 +133,7 @@ def termination_from_evaluation(decision: str | None, reason: str | None) -> tup
 __all__ = [
     "base_action",
     "count_base_actions",
+    "untested_remaining_actions",
     "check_budget",
     "check_stall",
     "stall_threshold",

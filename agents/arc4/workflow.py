@@ -7,7 +7,15 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .annatar_state_machine import ReadinessStatus
-from .cycle_policy import check_budget, check_stall, count_base_actions, record_evaluation_outcome, stall_threshold, termination_from_evaluation
+from .cycle_policy import (
+    check_budget,
+    check_stall,
+    count_base_actions,
+    record_evaluation_outcome,
+    stall_threshold,
+    termination_from_evaluation,
+    untested_remaining_actions,
+)
 from .ports import WorkflowDependencies
 from .types import (
     EvaluationResult,
@@ -435,8 +443,16 @@ class WorkflowOrchestrator:
                 num_available = len(available_actions)
                 # Count distinct base actions so ACTION6@x,y click targets don't
                 # inflate the attempted count past the available action space.
+                # `attempted` here stays a whole-episode-cumulative diagnostic
+                # number (informational only); `untested` below is what
+                # check_stall actually gates on and A248 fixed it to be a set
+                # difference against *this cycle's* available_actions, not a
+                # subtraction against this cumulative count -- action_attempt_
+                # counts is never reset, so it can hold stale entries from an
+                # earlier, differently-composed action-space phase (see
+                # backlog/A248.md).
                 num_attempted = count_base_actions(state.action_attempt_counts)
-                untested_remaining = (num_available or 1) - num_attempted
+                untested_remaining = untested_remaining_actions(available_actions, state.action_attempt_counts)
                 import logging as _logging
                 _logging.getLogger(__name__).info(
                     "STALL_CHECK no_progress=%d, available=%d, attempted=%d, untested=%d, threshold=%d",
@@ -450,7 +466,7 @@ class WorkflowOrchestrator:
                     state.consecutive_no_progress_count,
                     self._limits.max_consecutive_no_progress,
                     num_available,
-                    num_attempted,
+                    untested_remaining,
                 )
 
                 if self._dependencies.annatar is not None:

@@ -9,16 +9,20 @@ def test_check_budget_boundary():
 
 
 def test_check_stall_below_threshold():
-    assert check_stall(3, 4, 5, 5) is None
+    # A248: check_stall's 4th arg is the caller's already-computed
+    # "genuinely untested in the current action space" count, not a raw
+    # attempted count. 0 untested remaining == every available action tried.
+    assert check_stall(3, 4, 5, 0) is None
 
 
 def test_check_stall_untested_remaining():
-    assert check_stall(6, 4, 5, 3) is None
+    # 2 of the 5 available actions genuinely untested -> early pass.
+    assert check_stall(6, 4, 5, 2) is None
 
 
 def test_check_stall_two_full_passes():
-    assert check_stall(9, 4, 5, 5) is None
-    assert check_stall(10, 4, 5, 5) == "stall_detected"
+    assert check_stall(9, 4, 5, 0) is None
+    assert check_stall(10, 4, 5, 0) == "stall_detected"
 
 
 def test_check_stall_empty_action_list():

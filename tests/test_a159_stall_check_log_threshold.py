@@ -35,11 +35,13 @@ def test_threshold_handles_zero_available_actions():
 def test_check_stall_still_matches_original_behavior_at_floor():
     # Matches the live evidence: no_progress=2 with a single-action game must
     # NOT stall yet (the run correctly continued past this point).
+    # A248: 4th arg is "genuinely untested remaining" -- the single action
+    # was already attempted, so 0 remain untested.
     result = check_stall(
         consecutive_no_progress=2,
         max_consecutive_no_progress=4,
         num_available_actions=1,
-        num_attempted_actions=1,
+        num_untested_remaining=0,
     )
     assert result is None
 
@@ -49,6 +51,6 @@ def test_check_stall_fires_at_floor():
         consecutive_no_progress=4,
         max_consecutive_no_progress=4,
         num_available_actions=1,
-        num_attempted_actions=1,
+        num_untested_remaining=0,
     )
     assert result == "stall_detected"
