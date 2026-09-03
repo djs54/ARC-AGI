@@ -2,20 +2,26 @@
 WorkflowOrchestrator.run() via the new `annatar` dependency.
 
 Test groups:
-  - Backward-compat byte-for-byte regression (annatar=None) against a real
-    pre-A202 baseline of workflow.py, loaded from a copy of the file taken
-    immediately before this card's edits.
   - Orchestrator control-flow tests: terminate / repeat_deepen / advance /
     stall-folded-into-annatar / termination-short-circuits-before-annatar /
     check_budget unaffected.
   - Unit tests for agents/arc4/annatar_signals.py's compute_cycle_signals
     and run_annatar_cycle (including the AWAITING_LLM -> resolve_llm_vote
     -> apply_llm_vote path and the NotImplementedError placeholder).
+
+A250 note: this file used to also carry a "backward-compat byte-for-byte
+regression (annatar=None) against a real pre-A202 baseline" group
+(TestBackwardCompatByteForByte, comparing against a frozen copy of
+workflow.py at tests/fixtures/workflow_pre_a202_baseline.py). That group
+was deleted by A250 -- `annatar` is unconditionally wired in production
+since A202, so the "no Annatar configured" fallback it was pinning was
+permanently dead code, and the frozen baseline fixture existed solely to
+support it. See backlog/A250.md's Outcome for the full enumeration of what
+was deleted/ported/kept.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from collections import deque
 from pathlib import Path
@@ -61,94 +67,6 @@ from test_arc4_workflow import (
     _scripted_phase,
     _vet,
 )
-
-
-# ── Baseline (pre-A202) WorkflowOrchestrator, loaded from a real snapshot ──
-# taken immediately before this card's edits to agents/arc4/workflow.py, so
-# test 1 below compares against genuine pre-change behavior, not a
-# hand-typed guess at what it used to do.
-#
-# Fixed 2026-08-25 (A207 follow-up): this originally pointed at a path
-# inside one specific agent session's own /private/tmp scratchpad directory
-# -- it happened to work in every session run so far only because that
-# scratchpad file was never cleaned up, but it was never actually committed
-# to the repo. A fresh clone, a different machine, or real CI (which is
-# exactly what caught this: `make test-a`'s fixed file list never touches
-# this test, so only `make test-all`/full CI runs ever exercised the
-# collection failure) would hit `FileNotFoundError` on collection, taking
-# down every test in this file. Moved into the repo proper so the fixture
-# travels with the code that depends on it.
-_BASELINE_PATH = Path(__file__).resolve().parent / "fixtures" / "workflow_pre_a202_baseline.py"
-
-
-def _load_baseline_orchestrator_module():
-    spec = importlib.util.spec_from_file_location("agents.arc4._workflow_baseline_a202", _BASELINE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    # The baseline file uses relative imports (`from .cycle_policy import
-    # ...`); set __package__ so those resolve against the real,
-    # already-importable agents.arc4 package on disk (cycle_policy.py/
-    # ports.py/types.py are unmodified-in-structure by this card, only
-    # extended with new optional fields, so the baseline's relative imports
-    # keep working).
-    module.__package__ = "agents.arc4"
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_baseline = _load_baseline_orchestrator_module()
-
-
-def _run_both(overrides=None, limits_kwargs=None):
-    """Run the same scripted scenario through both the baseline (pre-A202)
-    orchestrator and the current one, with reason=None on the current side,
-    and return (baseline_result, current_result)."""
-    limits_kwargs = limits_kwargs or {}
-    calls_baseline: list[str] = []
-    calls_current: list[str] = []
-
-    baseline_deps = _shared_dependencies(calls_baseline, overrides=overrides)
-    current_deps = _shared_dependencies(calls_current, overrides=overrides)
-
-    baseline_orchestrator = _baseline.WorkflowOrchestrator(
-        baseline_deps, limits=_baseline.WorkflowLimits(**limits_kwargs)
-    )
-    current_orchestrator = WorkflowOrchestrator(current_deps, limits=WorkflowLimits(**limits_kwargs))
-
-    baseline_result = baseline_orchestrator.run(WorkflowState(), {"grid": [[1]]})
-    current_result = current_orchestrator.run(WorkflowState(), {"grid": [[1]]})
-    return baseline_result, current_result
-
-
-class TestBackwardCompatByteForByte:
-    """Test 1: WorkflowDependencies(reason=None, ...) must produce
-    byte-for-byte identical WorkflowOrchestrator.run() output to the real
-    pre-A202 baseline, for at least two existing scenario shapes."""
-
-    def test_simple_terminate_scenario_matches_baseline(self):
-        baseline_result, current_result = _run_both(limits_kwargs={"max_cycles": 3})
-
-        assert current_result.status == baseline_result.status == WorkflowStatus.TERMINATED
-        assert current_result.to_dict() == baseline_result.to_dict()
-
-    def test_stall_scenario_matches_baseline(self):
-        overrides = {
-            "perceive": [_perception("grid-1"), _perception("grid-2")],
-            "resolve": [_goal(), _goal()],
-            "plan": [_plan(), _plan()],
-            "vet": [_vet(True), _vet(True)],
-            "execute": [_execute(grid_hash="grid-2"), _execute(grid_hash="grid-3")],
-            "evaluate": [
-                _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat", falsification_delta=1),
-                _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat again", falsification_delta=1),
-            ],
-        }
-        baseline_result, current_result = _run_both(
-            overrides=overrides, limits_kwargs={"max_cycles": 5, "max_consecutive_no_progress": 2}
-        )
-
-        assert current_result.status == baseline_result.status == WorkflowStatus.STALLED
-        assert current_result.to_dict() == baseline_result.to_dict()
 
 
 class TestAnnatarControlFlow:
@@ -315,25 +233,20 @@ class TestSecondVetoRoutesThroughAnnatar:
     workflow.py now feeds Annatar a synthetic "nothing was attempted"
     pair (candidate=None, meaningful_progress=False) plus
     stall_reason="second_veto" (reusing the existing stall-fold mechanism
-    rather than inventing a parallel one)."""
+    rather than inventing a parallel one).
 
-    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
-        """Regression guard, mirrors test_second_veto_skips_execution in
-        test_arc4_workflow.py exactly -- reason=None must be untouched."""
-        calls: list[str] = []
-        deps = _shared_dependencies(
-            calls,
-            overrides={
-                "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto")],
-                "plan": [_plan(), _plan()],
-                "resolve": [_goal(), _goal()],
-            },
-        )
-
-        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
-
-        assert result.status == WorkflowStatus.SKIPPED
-        assert result.reason == "second_veto"
+    A250 note: this class used to also carry
+    test_no_annatar_configured_preserves_exact_prior_behavior, pinning the
+    dead no-Annatar fallback's own SKIPPED/second_veto outcome
+    (_route_second_veto_through_annatar's `if self._dependencies.annatar is
+    None:` branch). That branch was deleted by A250 (confirmed via TDD: the
+    test crashed -- not merely failed -- once the branch was removed and an
+    Annatar-configured fake was substituted, since the scripted phase
+    queues were sized for the old direct-SKIPPED behavior, not for the
+    Annatar-configured continuation the remaining code now always takes).
+    The four tests below already cover the same underlying mechanism
+    (double veto routes to Annatar via a synthetic execution/evaluation
+    pair) with Annatar configured, so no coverage was lost."""
 
     def test_annatar_invoked_with_synthetic_inconclusive_signals_and_second_veto_stall_reason(self):
         calls: list[str] = []
@@ -510,12 +423,24 @@ class TestFirstVetoVisibilityFoldedIntoAnnatarCall:
         assert result.status == WorkflowStatus.TERMINATED
         assert result.reason == "annatar_exhausted"
 
-    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
-        """Regression guard: with no Annatar wired in, a first veto followed
-        by a successful retry must behave exactly as it did before this
-        card -- this card only ever reads state.latest_veto_reason to build
-        a kwarg for an Annatar call that, with annatar=None, never
-        happens."""
+    def test_local_retry_success_terminates_via_evaluation_before_annatar_runs(self):
+        """A250 note: this test used to be named
+        test_no_annatar_configured_preserves_exact_prior_behavior and pinned
+        no-Annatar-configured behavior specifically. On inspection (per
+        A250's Step 1 enumeration) it never actually exercised any of the
+        dead no-Annatar branches: `_shared_dependencies`'s default
+        `evaluate` response is decision=TERMINATE, so this scenario always
+        short-circuits via termination_from_evaluation (the genuine
+        environment-terminal signal, untouched by A250) *before* the code
+        ever reaches the Annatar call at all -- confirmed by leaving the
+        test unmodified (still uses the shared default fake Annatar,
+        neither overridden nor asserted on) and it continued to pass
+        unchanged after A250's production edits. What it actually pins,
+        still real coverage: a first-veto local resolve/plan/vet retry that
+        succeeds, followed by a genuine env-terminal result, never invokes
+        Annatar at all -- a distinct scenario from
+        TestAnnatarControlFlow::test_evaluation_termination_short_circuits_before_annatar_runs
+        (that one has no veto at all)."""
         calls: list[str] = []
         deps = _shared_dependencies(
             calls,
@@ -911,18 +836,17 @@ class TestResolveReportVisibilityFoldedIntoAnnatarCall:
         assert resolve_report["grounding_gate_passed"] is True
         assert resolve_report["llm_escalated"] is False
 
-    def test_no_annatar_configured_preserves_exact_prior_behavior(self):
-        """Regression guard: with no Annatar wired in, resolve()'s output is
-        never read into a resolve_report at all -- this card only ever
-        builds the dict for an Annatar call that, with annatar=None, never
-        happens."""
-        calls: list[str] = []
-        deps = _shared_dependencies(calls)
-
-        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
-
-        assert calls == ["perceive", "resolve", "plan", "vet", "execute", "evaluate"]
-        assert result.status == WorkflowStatus.TERMINATED
+    # A250 note: this class used to also carry
+    # test_no_annatar_configured_preserves_exact_prior_behavior ("with no
+    # Annatar wired in, resolve()'s output is never read into a
+    # resolve_report at all"). On inspection (A250's Step 1 enumeration) it
+    # never exercised any no-Annatar-specific branch -- it used the shared
+    # default TERMINATE evaluate response, so the run always short-circuits
+    # via termination_from_evaluation before ever reaching the Annatar call,
+    # regardless of whether Annatar is configured. Its assertions (call
+    # sequence + TERMINATED status) were a verbatim duplicate of
+    # test_arc4_workflow.py::test_phase_order_runs_in_fixed_sequence, so it
+    # was deleted as redundant rather than ported forward.
 
 
 # ── Unit tests: agents/arc4/annatar_signals.run_annatar_cycle ─────────

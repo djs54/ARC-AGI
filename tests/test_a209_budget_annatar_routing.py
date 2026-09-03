@@ -87,32 +87,19 @@ class TestCheckBudgetRoutesToAnnatar:
         assert result.completed_cycles == 0
 
 
-class TestCheckBudgetWithoutAnnatar:
-    """When no Annatar configured, behavior matches the old code (byte-for-byte)."""
-
-    def test_no_annatar_configured_budget_exhaustion(self):
-        """Budget exhaustion without Annatar returns immediately."""
-        state = WorkflowState(step_index=5)
-
-        dependencies = WorkflowDependencies(
-            perceive=MagicMock(),
-            resolve=MagicMock(),
-            plan=MagicMock(),
-            vet=MagicMock(),
-            execute=MagicMock(),
-            evaluate=MagicMock(),
-            annatar=None,  # No Annatar
-        )
-
-        orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=5))
-        observation = {"available_actions": []}
-
-        result = orchestrator.run(state, observation)
-
-        assert result.status == WorkflowStatus.BUDGET_EXHAUSTED
-        assert result.completed_cycles == 5
-        # No phases should have been invoked since budget was checked first
-        dependencies.perceive.assert_not_called()
+# A250 note: this file used to also carry a TestCheckBudgetWithoutAnnatar
+# class ("When no Annatar configured, behavior matches the old code
+# (byte-for-byte)") pinning `_route_budget_through_annatar`'s
+# `if self._dependencies.annatar is None: return BUDGET_EXHAUSTED` branch
+# directly. That branch was deleted by A250 -- `annatar` is unconditionally
+# wired in production since A202, so it was permanently dead code (confirmed
+# via TDD: the test raised TypeError, "'NoneType' object is not callable",
+# once the branch was removed, since annatar is no longer allowed to be
+# None at all). TestCheckBudgetRoutesToAnnatar (below/above),
+# TestCheckBudgetIsHardCeiling, TestCheckBudgetSyntheticPayloads, and
+# TestCheckBudgetEdgeCases already cover the same underlying mechanism
+# (budget exhaustion ends the episode as BUDGET_EXHAUSTED, with or without
+# Annatar invoking) with Annatar configured, so no coverage was lost.
 
 
 class TestCheckBudgetIsHardCeiling:
@@ -164,8 +151,16 @@ class TestCheckBudgetRegressionGuard:
         assert check_budget(step_index=0, max_cycles=0) == "budget_exhausted"
 
     def test_budget_exhaustion_status_reason(self):
-        """Budget exhaustion is reported with correct status and reason."""
+        """Budget exhaustion is reported with correct status and reason
+        (Annatar-configured -- see A250 note above TestCheckBudgetIsHardCeiling
+        for why this test no longer constructs a no-Annatar dependency set;
+        step_index=3 with max_cycles=3 means step_index > 0, so Annatar IS
+        invoked here, mirroring test_budget_fires_with_annatar_configured
+        above)."""
         state = WorkflowState(step_index=3)
+
+        annatar_mock = MagicMock()
+        annatar_mock.return_value = MagicMock(decision="terminate")
 
         dependencies = WorkflowDependencies(
             perceive=MagicMock(),
@@ -174,7 +169,7 @@ class TestCheckBudgetRegressionGuard:
             vet=MagicMock(),
             execute=MagicMock(),
             evaluate=MagicMock(),
-            annatar=None,
+            annatar=annatar_mock,
         )
 
         orchestrator = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=3))

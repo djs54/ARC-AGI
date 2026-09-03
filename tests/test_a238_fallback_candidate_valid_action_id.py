@@ -35,6 +35,7 @@ from agents.arc4.plan_generator import PlanGenerator, PlanGeneratorLimits
 from agents.arc4.plan_vetter import PlanVetter
 from agents.arc4.ports import WorkflowDependencies
 from agents.arc4.types import (
+    AnnatarOutcome,
     GoalHypothesis,
     PerceptionSnapshot,
     PhaseResult,
@@ -178,12 +179,16 @@ class TestWorkflowNeverExecutesWhenActionSpaceExhausted:
         scripted): every real action is already repeated_falsified, so both
         the initial plan/vet and the same-cycle replan retry produce
         candidate=None -> vetoed -> vetoed again -> routes to
-        _route_second_veto_through_annatar, which (no Annatar configured)
-        ends the episode as SKIPPED/second_veto. `execute` and `evaluate`
-        are deliberately given empty response queues below -- if either is
-        ever invoked, the scripted phase raises AssertionError, which is
-        exactly the "zero wasted real API calls" guarantee this card is
-        about."""
+        _route_second_veto_through_annatar, which feeds Annatar a synthetic
+        "nothing was attempted" pair and terminates on its decision (A250:
+        `annatar` is unconditionally wired in production since A202, so the
+        no-Annatar SKIPPED/second_veto direct-return this test used to pin
+        was permanently dead code -- see backlog/A250.md). `execute` and
+        `evaluate` are deliberately given empty response queues below -- if
+        either is ever invoked, the scripted phase raises AssertionError,
+        which is exactly the "zero wasted real API calls" guarantee this
+        card is about, and is completely unaffected by which branch ends
+        the episode."""
         state = _state(
             action_falsification_counts={"ACTION1": 2, "ACTION2": 2},
         )
@@ -206,6 +211,15 @@ class TestWorkflowNeverExecutesWhenActionSpaceExhausted:
             calls.append("evaluate")
             raise AssertionError("evaluate must never be invoked when the action space is exhausted")
 
+        def _annatar(*_args, **_kwargs):
+            # Fixed "terminate" so the double-veto path ends the episode
+            # deterministically in one pass -- with real falsification state
+            # persisting across an "advance"/"repeat" decision, the same
+            # exhausted candidates would just double-veto again next cycle,
+            # infinite-looping a test that isn't about Annatar's own
+            # decision logic at all.
+            return AnnatarOutcome(decision="terminate")
+
         dependencies = WorkflowDependencies(
             perceive=_perceive,
             resolve=_resolve,
@@ -213,14 +227,15 @@ class TestWorkflowNeverExecutesWhenActionSpaceExhausted:
             vet=PlanVetter(),
             execute=_execute,
             evaluate=_evaluate,
+            annatar=_annatar,
         )
 
         result = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=3)).run(state, {"grid": [[1]]})
 
         assert "execute" not in calls
         assert "evaluate" not in calls
-        assert result.status == WorkflowStatus.SKIPPED
-        assert result.reason == "second_veto"
+        assert result.status == WorkflowStatus.TERMINATED
+        assert result.reason == "annatar_exhausted"
 
 
 # ---------------------------------------------------------------------------

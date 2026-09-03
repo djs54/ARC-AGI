@@ -349,26 +349,20 @@ class TestAnnatarConfiguredRoutesExhaustionInsteadOfTerminating:
         assert result.completed_cycles == 2
 
 
-class TestNoAnnatarConfiguredPreservesExactPriorBehavior:
-    """Legacy fallback: with no Annatar wired in, this card explicitly does
-    NOT change behavior (A249.md's "Explicitly NOT this card's job" +
-    A221's precedent). action_space_exhausted must still terminate the
-    episode immediately, byte-for-byte with the pre-A249 outcome."""
-
-    def test_action_space_exhausted_still_terminates_with_no_annatar(self):
-        calls: list[str] = []
-        deps = _shared_dependencies(
-            calls,
-            overrides={"evaluate": [_evaluation_with_action_space_exhausted()]},
-        )
-        # deps.annatar stays None (the default from _shared_dependencies).
-
-        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
-
-        assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "action_space_exhausted"
-        assert result.completed_cycles == 1
-        assert calls == ["perceive", "resolve", "plan", "vet", "execute", "evaluate"]
+# A250 note: this file used to also carry a
+# TestNoAnnatarConfiguredPreservesExactPriorBehavior class, pinning the
+# no-Annatar action_space_exhausted branch (workflow.py's normal-cycle
+# `if self._dependencies.annatar is None and evaluation_payload.metadata.get
+# ("action_space_exhausted"): return TERMINATED` short-circuit A249 added).
+# That branch was deleted by A250 -- `annatar` is unconditionally wired in
+# production since A202, so it was permanently dead code (confirmed via
+# TDD: the test crashed, not merely failed, once the branch was removed and
+# the shared default fake Annatar took over -- the scripted `evaluate`
+# queue only had one entry, sized for the old direct-TERMINATED behavior,
+# not for the Annatar-configured continuation the remaining code now always
+# takes). TestAnnatarConfiguredRoutesExhaustionInsteadOfTerminating (above)
+# already covers the same underlying mechanism with Annatar configured, so
+# no coverage was lost.
 
 
 class TestGenuineTerminalReasonStillShortCircuitsUnconditionally:
@@ -393,17 +387,20 @@ class TestGenuineTerminalReasonStillShortCircuitsUnconditionally:
         assert result.reason == "done"
         assert mock_annatar.call_count == 0
 
-    def test_terminal_decision_short_circuits_with_no_annatar_configured(self):
-        calls: list[str] = []
-        deps = _shared_dependencies(
-            calls,
-            overrides={"evaluate": [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True, reason="solved")]},
-        )
-
-        result = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
-
-        assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "solved"
+    # A250 note: this class used to also carry
+    # test_terminal_decision_short_circuits_with_no_annatar_configured,
+    # constructing dependencies with the (then-default) no-Annatar shape.
+    # On inspection (A250's Step 1 enumeration) it never exercised any
+    # no-Annatar-specific branch -- a genuine terminal decision
+    # short-circuits via termination_from_evaluation before the code ever
+    # reaches the Annatar call, regardless of whether Annatar is
+    # configured. Confirmed empirically: it kept passing unchanged, using
+    # the shared default fake Annatar, both before and after A250's
+    # production edits. Its assertions were a strict subset of
+    # test_terminal_decision_short_circuits_before_annatar_with_annatar_configured
+    # above (same scenario, minus the mock_annatar.call_count == 0 check,
+    # which is the strictly stronger version of the same guarantee), so it
+    # was deleted as redundant rather than ported forward.
 
 
 # --- Probe-path call site ----------------------------------------------------
@@ -513,30 +510,18 @@ class TestProbePathCallSiteAlsoRoutesExhaustionThroughAnnatar:
         assert mock_annatar.call_count == 1
         assert mock_annatar.call_args_list[0].kwargs["stall_reason"] == "action_space_exhausted"
 
-    def test_probe_path_action_space_exhausted_terminates_with_no_annatar(self):
-        graph_port = MagicMock()
-        graph_port.fetch_entity_neighborhood.return_value = {"hypotheses": [], "rules": []}
-        graph_port.fetch_entity_history.return_value = {"transitions": [], "changed_count_total": 0}
-
-        def evaluate(state, perception, resolved_goal, execution):
-            return PhaseResult(
-                phase=WorkflowPhase.EVALUATE,
-                status=PhaseStatus.OK,
-                payload=EvaluationResult(
-                    decision=WorkflowDecision.CONTINUE,
-                    meaningful_progress=False,
-                    reason="action_space_exhausted",
-                    metadata={"action_space_exhausted": True, "exhaustion_source": "threshold_only"},
-                ),
-            )
-
-        deps = _probe_dependencies(graph_port=graph_port, annatar=None, evaluate_fn=evaluate)
-        orchestrator = WorkflowOrchestrator(deps, limits=WorkflowLimits(max_cycles=3))
-
-        result = orchestrator.run(WorkflowState(), {"entities": (_entity(1),)})
-
-        assert result.status == WorkflowStatus.TERMINATED
-        assert result.reason == "action_space_exhausted"
+    # A250 note: this class used to also carry
+    # test_probe_path_action_space_exhausted_terminates_with_no_annatar
+    # (`_probe_dependencies(..., annatar=None, ...)`), pinning the probe
+    # path's own no-Annatar action_space_exhausted branch. That branch was
+    # deleted by A250 -- confirmed via TDD: the test crashed once the
+    # branch was removed (the probe path's execute() mock only supports a
+    # single readiness-probe candidate shape, and the no-longer-gated
+    # unconditional Annatar call then received annatar=None, raising
+    # TypeError). test_probe_path_action_space_exhausted_reaches_annatar_
+    # stall_reason above already covers the same underlying mechanism
+    # (probe-path exhaustion routes through Annatar via stall_reason) with
+    # Annatar configured, so no coverage was lost.
 
 
 # --- Whole-episode futility backstop is unaffected --------------------------

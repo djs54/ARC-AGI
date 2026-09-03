@@ -27,6 +27,7 @@ from agents.arc4.plan_generator import PlanGenerator, PlanGeneratorLimits
 from agents.arc4.plan_vetter import PlanVetter
 from agents.arc4.telemetry import ArcV2Telemetry
 from agents.arc4.types import (
+    AnnatarOutcome,
     EvaluationResult,
     ExecutionResult,
     GoalHypothesis,
@@ -359,6 +360,14 @@ def _evaluate(state, perception, goal, execution):
     )
 
 
+def _fake_annatar(state, perception, execution, evaluation, **_kwargs):
+    """A250: `annatar` is a required WorkflowDependencies field now that
+    it's unconditionally wired in production (since A202) -- this module's
+    tests are about plan/vet degraded-visibility propagation, not Annatar's
+    own decision logic, so a minimal non-terminating stand-in is enough."""
+    return AnnatarOutcome(decision="advance")
+
+
 def _make_dependencies(graph_port: Any) -> WorkflowDependencies:
     plan_generator = PlanGenerator(PlanGeneratorLimits())
     vetter = PlanVetter(graph_port=graph_port)
@@ -373,6 +382,7 @@ def _make_dependencies(graph_port: Any) -> WorkflowDependencies:
         vet=vetter.vet,
         execute=_execute,
         evaluate=_evaluate,
+        annatar=_fake_annatar,
     )
 
 

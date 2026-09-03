@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.arc4.ports import WorkflowDependencies
 from agents.arc4.types import (
+    AnnatarOutcome,
     EvaluationResult,
     ExecutionResult,
     GoalHypothesis,
@@ -24,6 +25,18 @@ from agents.arc4.types import (
     WorkflowStatus,
 )
 from agents.arc4.workflow import WorkflowLimits, WorkflowOrchestrator
+
+
+def _fake_annatar(state, perception, execution, evaluation, *, stall_reason=None, veto_reason=None, veto_alternative_action_id=None, readiness_report=None, resolve_report=None):
+    """A250: `annatar` is a required WorkflowDependencies field now that it's
+    unconditionally wired in production (since A202) -- this is the minimal
+    non-terminating stand-in every test in this module (and every module
+    that imports `_dependencies` from here) uses by default, so the general
+    orchestrator-mechanics tests below don't need to care about Annatar's
+    own decision logic at all. Tests that DO care override `deps.annatar`
+    with their own mock after construction (see test_a202_annatar_
+    orchestrator_integration.py's own pattern)."""
+    return AnnatarOutcome(decision="advance")
 
 
 def _scripted_phase(name: str, responses: list[PhaseResult], calls: list[str]):
@@ -111,6 +124,7 @@ def _dependencies(calls: list[str], overrides: dict[str, list[PhaseResult]] | No
         vet=_scripted_phase("vet", overrides.get("vet", [_vet(True)]), calls),
         execute=_scripted_phase("execute", overrides.get("execute", [_execute()]), calls),
         evaluate=_scripted_phase("evaluate", overrides.get("evaluate", [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True, reason="done")]), calls),
+        annatar=_fake_annatar,
     )
 
 
@@ -150,6 +164,7 @@ def test_crash_guard_captures_traceback():
         vet=_scripted_phase("vet", [_vet(True)], calls),
         execute=_scripted_phase("execute", [_execute()], calls),
         evaluate=_scripted_phase("evaluate", [_evaluation(WorkflowDecision.TERMINATE, meaningful_progress=True)], calls),
+        annatar=_fake_annatar,
     )
 
     result = WorkflowOrchestrator(dependencies).run(WorkflowState(), {"grid": [[1]]})
@@ -181,62 +196,20 @@ def test_single_veto_triggers_one_replan_pass():
     assert result.state.latest_veto_alternative.action_id == "action-2"
 
 
-def test_second_veto_skips_execution():
-    calls: list[str] = []
-    dependencies = _dependencies(
-        calls,
-        overrides={
-            "vet": [_vet(False, reason="first veto"), _vet(False, reason="second veto")],
-            "plan": [_plan("action-1"), _plan("action-2")],
-            "resolve": [_goal(), _goal()],
-        },
-    )
 
-    result = WorkflowOrchestrator(dependencies, limits=WorkflowLimits(max_cycles=3)).run(WorkflowState(), {"grid": [[1]]})
-
-    assert calls == ["perceive", "resolve", "plan", "vet", "resolve", "plan", "vet"]
-    assert result.status == WorkflowStatus.SKIPPED
-    assert result.reason == "second_veto"
-    assert result.state.replan_passes == 1
-
-
-def test_stall_terminates_after_repeated_no_progress():
-    calls: list[str] = []
-    dependencies = _dependencies(
-        calls,
-        overrides={
-            "perceive": [_perception("grid-1"), _perception("grid-2")],
-            "resolve": [_goal(), _goal()],
-            "plan": [_plan(), _plan()],
-            "vet": [_vet(True), _vet(True)],
-            "execute": [_execute(grid_hash="grid-2"), _execute(grid_hash="grid-3")],
-            "evaluate": [
-                _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat", falsification_delta=1),
-                _evaluation(WorkflowDecision.CONTINUE, meaningful_progress=False, reason="flat again", falsification_delta=1),
-            ],
-        },
-    )
-
-    result = WorkflowOrchestrator(
-        dependencies,
-        limits=WorkflowLimits(max_cycles=5, max_consecutive_no_progress=2),
-    ).run(WorkflowState(), {"grid": [[1]]})
-
-    assert calls == [
-        "perceive",
-        "resolve",
-        "plan",
-        "vet",
-        "execute",
-        "evaluate",
-        "perceive",
-        "resolve",
-        "plan",
-        "vet",
-        "execute",
-        "evaluate",
-    ]
-    assert result.status == WorkflowStatus.STALLED
-    assert result.reason == "stall_detected"
-    assert result.state.consecutive_no_progress_count == 2
-    assert result.state.action_falsification_counts["action-1"] == 2
+# A250: test_second_veto_skips_execution and
+# test_stall_terminates_after_repeated_no_progress used to live here,
+# pinning the no-Annatar-configured fallback's own outcomes (a bare
+# `check_stall` ending the run directly as STALLED with no arbiter, and a
+# second veto ending it directly as SKIPPED/second_veto). Both branches were
+# deleted from workflow.py by A250 -- `annatar` has been unconditionally
+# wired in production since A202, so they were permanently dead code.
+# Confirmed via TDD: both tests failed (not errored) once the production
+# branches were removed, proving they really did exercise exactly that code.
+# The underlying mechanisms they covered are exercised with an
+# Annatar-configured dependency set instead, in
+# tests/test_a202_annatar_orchestrator_integration.py::
+# TestSecondVetoRoutesThroughAnnatar (second-veto routing) and
+# ::TestAnnatarControlFlow::test_stall_signal_folds_into_annatar_instead_of_independently_stalling
+# (stall folding into the Annatar call instead of independently ending the
+# run). See backlog/A250.md's Outcome for the full enumeration.
