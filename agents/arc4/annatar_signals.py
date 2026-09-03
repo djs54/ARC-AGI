@@ -500,11 +500,27 @@ def run_annatar_cycle(
     if anchor is None:
         cand_meta = execution.candidate.metadata if execution.candidate is not None else {}
         entity_ref = cand_meta.get("entity_ref") if isinstance(cand_meta, dict) else None
-        if entity_ref is not None:
+        active_goal_id = state.active_goal.selected.goal_id if state.active_goal is not None else None
+        # A246: during goal-directed play (readiness_report is None, the
+        # same established convention this function already uses elsewhere
+        # -- see the readiness_report docstring above and A230), prefer the
+        # active goal over an incidentally-entity_ref-carrying candidate.
+        # Before this fix, a fresh anchor was picked purely from whatever
+        # the just-executed candidate happened to be -- since ACTION6 click
+        # candidates carry entity_ref unconditionally (plan_generator.py::
+        # _click_targets), a concluding goal-type anchor's very next anchor
+        # would incidentally become entity-type on most puzzles, silently
+        # re-blurring the readiness-gate phase boundary (A224) from inside
+        # goal-directed play. Probe-phase anchor creation (readiness_report
+        # is not None) is unchanged -- entity-preferring there is correct
+        # and load-bearing for A224/A230/A231's own mapping behavior. See
+        # backlog/A246.md.
+        if readiness_report is None and active_goal_id is not None:
+            anchor_ref, anchor_type = active_goal_id, "goal"
+        elif entity_ref is not None:
             anchor_ref, anchor_type = entity_ref, "entity"
         else:
-            anchor_ref = state.active_goal.selected.goal_id if state.active_goal is not None else None
-            anchor_type = "goal"
+            anchor_ref, anchor_type = active_goal_id, "goal"
 
         thread_id = None
         if graph_port is not None:
