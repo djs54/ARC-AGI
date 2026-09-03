@@ -316,6 +316,14 @@ class ArcV2Telemetry:
             # graph configured" and "state is None" the same way.
             "plan_degraded": bool(getattr(state, "plan_degraded", False)),
             "vet_degraded": bool(getattr(state, "vet_degraded", False)),
+            # A244: same getattr(..., False) degrade pattern, completing
+            # A237's own explicitly-deferred evaluator.py follow-up --
+            # WorkflowState.evaluate_degraded defaults False and is only
+            # ever set True by WorkflowOrchestrator.run() right after an
+            # evaluate phase call whose EvaluationResult.degraded came back
+            # True (see evaluator.py's fetch_causal_path/
+            # fetch_untested_actions except sites).
+            "evaluate_degraded": bool(getattr(state, "evaluate_degraded", False)),
             "graph_informed": graph_informed,
             # A224: the Cynefin readiness gate's own telemetry, per the
             # plan's acceptance criteria -- a real, queryable fact rather

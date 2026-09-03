@@ -175,6 +175,10 @@ class WorkflowOrchestrator:
                         )
                         phase_results.append(evaluation)
                         evaluation_payload = self._require_payload(evaluation, WorkflowPhase.EVALUATE)
+                        # A244: mirrors state.plan_degraded/vet_degraded's
+                        # exact placement -- set immediately after the phase
+                        # call, before any branching on the result.
+                        state.evaluate_degraded = getattr(evaluation_payload, "degraded", False)
 
                         self._record_execution_attempt(state, execution_payload)
                         # A242: probe-phase cycles are exploratory, not
@@ -404,6 +408,10 @@ class WorkflowOrchestrator:
                 )
                 phase_results.append(evaluation)
                 evaluation_payload = self._require_payload(evaluation, WorkflowPhase.EVALUATE)
+                # A244: same placement as the probe-path evaluate call site
+                # above -- "most recent invocation" semantics, matching
+                # plan_degraded/vet_degraded's own two-call-site precedent.
+                state.evaluate_degraded = getattr(evaluation_payload, "degraded", False)
 
                 self._record_execution_attempt(state, execution_payload)
                 self._record_evaluation_state(state, execution_payload, evaluation_payload)

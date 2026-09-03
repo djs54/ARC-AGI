@@ -315,6 +315,17 @@ class EvaluationResult:
     falsification_delta: int = 0
     reason: str = ""
     next_goal: ResolvedGoal | None = None
+    # A244: True when either of evaluator.py's two graph_port calls
+    # (fetch_causal_path in evaluate(), fetch_untested_actions in
+    # _action_space_exhausted) raised while producing this EvaluationResult
+    # -- the unchanged fallback behavior (no causal override; exhaustion
+    # falls through to "threshold_only") already applied, this field just
+    # makes that degradation visible instead of silently absorbed, mirroring
+    # PlanningResult.degraded/VetDecision.degraded (A237) and
+    # AnnatarOutcome.degraded (A205). Stays False both when graph_query_port
+    # is None (no graph configured -- not a failure) and when every
+    # graph_port call this cycle succeeded.
+    degraded: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -324,6 +335,7 @@ class EvaluationResult:
             "falsification_delta": self.falsification_delta,
             "reason": self.reason,
             "next_goal": self.next_goal.to_dict() if self.next_goal else None,
+            "degraded": self.degraded,
             "metadata": self.metadata,
         }
 
@@ -335,6 +347,7 @@ class EvaluationResult:
             falsification_delta=d.get("falsification_delta", 0),
             reason=d.get("reason", ""),
             next_goal=ResolvedGoal.from_dict(d["next_goal"]) if d.get("next_goal") else None,
+            degraded=d.get("degraded", False),
             metadata=d.get("metadata", {}),
         )
 
@@ -561,6 +574,14 @@ class WorkflowState:
     # actually produced the plan/vet decision the cycle acted on).
     plan_degraded: bool = False
     vet_degraded: bool = False
+    # A244: same shape as plan_degraded/vet_degraded above, but for the
+    # evaluate phase -- set by WorkflowOrchestrator.run() right after each
+    # self._dependencies.evaluate call (there are two call sites: the
+    # A230/A241 probe-window path and the normal goal-directed path), from
+    # EvaluationResult.degraded (evaluator.py's fetch_causal_path /
+    # fetch_untested_actions except sites). "Most recent invocation's
+    # outcome" for the cycle, same convention as plan_degraded/vet_degraded.
+    evaluate_degraded: bool = False
     # Post-A206 fix (2026-08-25, user-directed live-smoke follow-up): how
     # many investigation-thread anchors in a row have concluded (ADVANCE)
     # without ever once registering meaningful_progress. Tracks whole-
@@ -639,6 +660,7 @@ class WorkflowState:
             "annatar_degraded": self.annatar_degraded,
             "plan_degraded": self.plan_degraded,
             "vet_degraded": self.vet_degraded,
+            "evaluate_degraded": self.evaluate_degraded,
             "annatar_unproductive_anchor_streak": self.annatar_unproductive_anchor_streak,
             "readiness_gate_resolved": self.readiness_gate_resolved,
             "readiness_gate_partial": self.readiness_gate_partial,
@@ -675,6 +697,7 @@ class WorkflowState:
             annatar_degraded=d.get("annatar_degraded", False),
             plan_degraded=d.get("plan_degraded", False),
             vet_degraded=d.get("vet_degraded", False),
+            evaluate_degraded=d.get("evaluate_degraded", False),
             annatar_unproductive_anchor_streak=d.get("annatar_unproductive_anchor_streak", 0),
             readiness_gate_resolved=d.get("readiness_gate_resolved", False),
             readiness_gate_partial=d.get("readiness_gate_partial", False),
