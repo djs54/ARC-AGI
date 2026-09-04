@@ -656,81 +656,52 @@ class WorkflowOrchestrator:
         phase_results: list[PhaseResult[Any]],
     ) -> WorkflowRunResult:
         """A209 fix (2026-08-25): `check_budget` previously ended the episode
-        directly, without ever giving the Annatar a say -- another place the
-        "one agent that sees everything end-to-end" was structurally excluded
-        from a termination decision. Unlike `second_veto`, `check_budget` fires
-        BEFORE perceive runs, so there is no perception payload for the current
-        cycle at all.
+        directly, without ever giving anything a chance to close out an open
+        investigation thread's graph bookkeeping first -- another place a
+        termination could happen with no cleanup. The budget ceiling itself is
+        non-negotiable: this method always ends the episode as
+        BUDGET_EXHAUSTED regardless of anything below.
 
-        Strategy: On the first iteration (step_index=0), there are no prior
-        cycles, so we skip the Annatar and end directly -- nothing to report.
-        On subsequent iterations, we give the Annatar a synthetic "budget
-        exhausted" signal (fresh, empty payloads -- A209's plan called this
-        "Option A"; its own Outcome section wrote "Option B" by mistake,
-        which described reusing the prior cycle's real state instead --
-        that is NOT what this implements, correct the record if referencing
-        it later) with the current (unchanged) observation, so it can close
-        out its own bookkeeping (e.g. write_thread_state on an open
-        investigation thread) before the episode ends.
+        A252 (2026-09-04): previously ran a full synthetic Annatar cycle
+        (fabricated PerceptionSnapshot/ExecutionResult/EvaluationResult
+        payloads through the real `self._dependencies.annatar(...)`) purely
+        to trigger its own end-of-cycle `write_thread_state` bookkeeping --
+        discarding the decision it produced but keeping the graph write,
+        which was computed from data that doesn't reflect anything real and
+        could land on a specific, misleadingly-precise `InvestigationState`
+        value. It also risked a real LLM call (`resolve_llm_vote`) if the
+        open thread happened to be AWAITING_LLM, spending real cost on a
+        decision nobody reads. Replaced with the same direct close-out A211
+        already uses for the crash path: call `on_crash_cleanup(thread_id,
+        ...)` directly, best-effort, no synthetic Annatar cycle, no risk of
+        a misleading graph write or a wasted LLM call. See backlog/A252.md.
 
         Every branch of this method returns a real WorkflowRunResult -- there
-        is no path that returns None. In particular, `outcome.decision` from
-        the Annatar call below is deliberately never inspected: the budget
-        ceiling is non-negotiable regardless of what the Annatar decides, so
-        the method doesn't depend on (and doesn't assert) the Annatar
-        producing any particular decision. This is what makes the hard-ceiling
-        guarantee structural rather than a matter of trusting the Annatar to
-        answer correctly -- see test_annatar_response_does_not_override_budget
-        for the proof (a Annatar mock returning "advance" still ends the
-        episode as BUDGET_EXHAUSTED with zero further phases invoked)."""
+        is no path that returns None. The close-out call's own outcome
+        (success, no-op, or exception) is never inspected either: the budget
+        ceiling is non-negotiable regardless of it, so the method doesn't
+        depend on (and doesn't assert) any particular close-out result. This
+        is what makes the hard-ceiling guarantee structural -- see
+        test_annatar_response_does_not_override_budget for the proof (a
+        Annatar mock returning "advance" still ends the episode as
+        BUDGET_EXHAUSTED with zero further phases invoked)."""
         # First iteration has no prior cycle to report; end immediately.
         if state.step_index == 0:
             return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
-        # For step_index > 0, construct synthetic payloads representing
-        # "budget exhausted before we could run any phases." Annatar sees
-        # the last known observation and decides to terminate (as it should,
-        # since the budget is non-negotiable).
-        synthetic_execution = ExecutionResult(
-            action_id="", candidate=None, observation=current_observation, metadata={}
-        )
-        synthetic_evaluation = EvaluationResult(
-            decision=WorkflowDecision.CONTINUE,
-            meaningful_progress=False,
-            reason="budget_exhausted",
-            metadata={"grid_changed": False},
-        )
+        # For step_index > 0, best-effort close out any open investigation
+        # thread directly -- mirrors the crash handler's own pattern exactly
+        # (see workflow.py's `except Exception:` block above). Cleanup
+        # failure must never prevent the real BUDGET_EXHAUSTED result from
+        # returning.
+        anchor = state.active_investigation_anchor
+        thread_id = anchor.get("thread_id") if isinstance(anchor, dict) else None
+        if thread_id is not None and self._dependencies.on_crash_cleanup is not None:
+            try:
+                self._dependencies.on_crash_cleanup(thread_id, "exhausted")
+            except Exception:
+                pass  # best-effort, same non-negotiable as the crash path
 
-        # We don't have a perception payload from this cycle (it hasn't run yet).
-        # Annatar needs one for its signature. We can't easily get the prior
-        # cycle's perception payload from the function signature, so we create a
-        # minimal synthetic one. This is acceptable because Annatar's only
-        # real decision here is to TERMINATE (the budget is hard), so the
-        # perception details don't matter — the signal "budget_exhausted" overrides.
-        # In a future iteration, if we store perception payloads in state, we
-        # could reuse the last real one instead.
-        from .types import PerceptionSnapshot  # Local import to avoid circular deps
-
-        synthetic_perception = PerceptionSnapshot(
-            grid_hash="",
-            observation=current_observation,
-            grid_shape=None,
-            loop_signal=False,
-            repeated_grid_count=0,
-            entities=(),
-            metadata={"synthetic": True, "reason": "budget_exhausted"},
-        )
-
-        outcome = self._dependencies.annatar(
-            state,
-            synthetic_perception,
-            synthetic_execution,
-            synthetic_evaluation,
-            stall_reason="budget_exhausted",
-        )
-        # The Annatar's decision should be to terminate (the budget is hard).
-        # But even if it somehow said "continue", we end the episode anyway
-        # because the budget is non-negotiable.
         return self._finish(state, WorkflowStatus.BUDGET_EXHAUSTED, "budget_exhausted", phase_results)
 
     def _route_second_veto_through_annatar(
