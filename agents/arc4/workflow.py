@@ -745,6 +745,13 @@ class WorkflowOrchestrator:
             synthetic_evaluation,
             stall_reason="second_veto",
         )
+        # A253: mirrors the probe-path (line ~266) / normal-cycle (line
+        # ~584) call sites' own placement -- set immediately after the
+        # call, before any branching on the result. Previously omitted
+        # here (this call site was added in A206, the same day A205
+        # established this field, and apparently never backfilled). See
+        # backlog/A253.md.
+        state.annatar_degraded = outcome.degraded
         if outcome.resume_mapping:
             # A241: same interception as the normal-cycle call site --
             # resume the readiness-probe loop instead of honoring what
