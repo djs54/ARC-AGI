@@ -285,11 +285,109 @@ def test_readiness_roundtrip_success():
     ) is True
 
 
-def test_readiness_roundtrip_fails_when_not_persisted():
+def test_readiness_roundtrip_passes_despite_empty_semantic_recall(caplog):
+    # A254 (corrected root cause): a real write (`upsert_lesson` returning a
+    # genuine lesson_id) followed by an empty `recall_relevant_lessons`
+    # result is exactly the known, tracked false-negative this card fixes --
+    # hippocampy's write path does not yet populate the embedding index for
+    # any newly-written Lesson (cross-repo gap, hippocampy B418), so this
+    # scenario must now PASS, not raise. This server script is the same one
+    # the pre-fix test used to assert failure on; the assertion flipped
+    # because the old test was unknowingly encoding the bug, not a genuine
+    # backend failure.
     cmd = python_cmd_for(ROUNDTRIP_FAIL_SERVER_SCRIPT)
-    with pytest.raises(ReadinessError):
+    with caplog.at_level("WARNING"):
+        assert check_mcp_readiness(
+            cmd=cmd,
+            required_tools=["current_truth", "upsert_lesson"],
+            require_roundtrip_persistence=True,
+        ) is True
+    assert any("A254" in rec.message for rec in caplog.records)
+
+
+def test_readiness_roundtrip_fails_when_write_returns_no_lesson_id():
+    # The critical regression guard: a genuine persistence failure (the
+    # write never even nominally succeeds -- no lesson_id comes back) must
+    # still fail loudly. This proves the A254 fix didn't just weaken the
+    # roundtrip check into always-passing.
+    no_id_script = textwrap.dedent(
+        r"""
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get('method')
+    id = msg.get('id')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '0.1.0'}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'tools': [
+            {'name': 'current_truth'},
+            {'name': 'upsert_lesson'},
+            {'name': 'recall_relevant_lessons'},
+        ]}}), flush=True)
+    elif method == 'tools/call':
+        params = msg.get('params') or {}
+        name = params.get('name')
+        if name == 'upsert_lesson':
+            payload = {}
+        elif name == 'recall_relevant_lessons':
+            payload = {'lessons': []}
+        else:
+            payload = {'results': []}
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps(payload)}]}}), flush=True)
+"""
+    )
+    cmd = python_cmd_for(no_id_script)
+    with pytest.raises(ReadinessError, match="no lesson id"):
         check_mcp_readiness(
             cmd=cmd,
-            required_tools=["current_truth", "upsert_lesson", "recall_relevant_lessons"],
+            required_tools=["current_truth", "upsert_lesson"],
+            require_roundtrip_persistence=True,
+        )
+
+
+def test_readiness_roundtrip_fails_when_recall_reports_daemon_offline():
+    # A genuinely different failure (backend actually offline, surfaced via
+    # the best-effort recall call) must still be fatal -- distinguishing a
+    # real outage from the known, benign embedding-recall gap is the whole
+    # point of downgrading only the "empty result" case.
+    offline_recall_script = textwrap.dedent(
+        r"""
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get('method')
+    id = msg.get('id')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '0.1.0'}}}), flush=True)
+    elif method == 'tools/list':
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'tools': [
+            {'name': 'current_truth'},
+            {'name': 'upsert_lesson'},
+            {'name': 'recall_relevant_lessons'},
+        ]}}), flush=True)
+    elif method == 'tools/call':
+        params = msg.get('params') or {}
+        name = params.get('name')
+        if name == 'upsert_lesson':
+            payload = {'lesson_id': 'probe-1'}
+        elif name == 'recall_relevant_lessons':
+            payload = {'error': 'daemon_offline'}
+        else:
+            payload = {'results': []}
+        print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'content': [{'type': 'text', 'text': json.dumps(payload)}]}}), flush=True)
+"""
+    )
+    cmd = python_cmd_for(offline_recall_script)
+    with pytest.raises(ReadinessError, match="backend-offline"):
+        check_mcp_readiness(
+            cmd=cmd,
+            required_tools=["current_truth", "upsert_lesson"],
             require_roundtrip_persistence=True,
         )
