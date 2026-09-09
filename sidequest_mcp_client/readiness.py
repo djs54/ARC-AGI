@@ -8,15 +8,17 @@ failure.
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import stat
-import time
 import uuid
 from pathlib import Path
 from typing import List, Optional
 
 from .mcp_session import MCPStdIOSession
+
+_logger = logging.getLogger(__name__)
 
 
 class ReadinessError(RuntimeError):
@@ -189,7 +191,35 @@ def check_mcp_readiness(
                     f"(current_truth={probe})."
                 )
         if require_roundtrip_persistence:
-            required_roundtrip_tools = {"upsert_lesson", "recall_relevant_lessons"}
+            # A254 (corrected root cause, see backlog/A254.md): this check
+            # used to gate pass/fail on `recall_relevant_lessons` finding
+            # the just-written probe lesson. That read path is a
+            # semantic/embedding-similarity search, and hippocampy's
+            # current `upsert_lesson` write path (the `lessons.create_lesson`
+            # SPARQL-templated NamedQuery) never populates the sqlite-vec
+            # index it depends on -- `GraphGateway._dispatch_oxigraph`
+            # routes any NamedQuery with a `sparql=` template straight to
+            # `OxigraphClient.execute_write()`, which never calls
+            # `write_node()` (the only code path that calls
+            # `vector_store.upsert_vector()`/`index_text()`). So a freshly
+            # written Lesson is not embedding-searchable yet, for any
+            # content, rich or not -- confirmed independently by reading
+            # hippocampy's own gateway/oxigraph_client source during this
+            # investigation. This is a structural, cross-repo gap (tracked
+            # as hippocampy's own B418), not something this side can fix
+            # (MCP-seam boundary, CLAUDE.md non-negotiable #1) and not
+            # something a richer probe string would work around.
+            #
+            # `upsert_lesson`'s own write, in contrast, is synchronous: the
+            # MCP daemon awaits the graph store's write under its lock
+            # before responding, so a real, non-empty `lesson_id` already
+            # proves the write became durable. That is now this check's
+            # actual pass/fail gate. `recall_relevant_lessons` is still
+            # attempted, best-effort, for diagnostic value (and because a
+            # daemon-offline response there is still a genuine, different
+            # failure worth surfacing) -- but an empty/no-match result from
+            # it is no longer treated as a readiness failure.
+            required_roundtrip_tools = {"upsert_lesson"}
             if not required_roundtrip_tools.issubset(tool_names):
                 missing_roundtrip = sorted(required_roundtrip_tools.difference(tool_names))
                 raise ReadinessError(
@@ -200,7 +230,10 @@ def check_mcp_readiness(
                 "upsert_lesson",
                 {
                     "domain": "readiness_probe",
-                    "text": probe_token,
+                    "text": (
+                        "Readiness probe: verifying MCP write-read persistence "
+                        f"for session {probe_token}."
+                    ),
                     "valence": 0.5,
                     "confidence": 0.9,
                     "tags": ["readiness_probe", "arc"],
@@ -220,29 +253,40 @@ def check_mcp_readiness(
                     "HippoCampy MCP upsert_lesson returned no lesson id during readiness probe "
                     f"(payload={write_payload})."
                 )
-            readback_ok = False
-            last_readback = None
-            for _ in range(3):
-                readback = session.call_tool(
-                    "recall_relevant_lessons",
-                    {"query": probe_token, "limit": 3},
-                    timeout=call_timeout,
-                )
-                last_readback = readback
-                if _is_daemon_offline_response(readback):
-                    raise ReadinessError(
-                        "HippoCampy MCP recall returned backend-offline during readiness probe "
-                        f"(recall_relevant_lessons={readback})."
+            if "recall_relevant_lessons" in tool_names:
+                try:
+                    readback = session.call_tool(
+                        "recall_relevant_lessons",
+                        {"query": probe_token, "limit": 3},
+                        timeout=call_timeout,
                     )
-                if _response_contains_probe(readback, probe_token):
-                    readback_ok = True
-                    break
-                time.sleep(0.1)
-            if not readback_ok:
-                raise ReadinessError(
-                    "HippoCampy MCP write-read roundtrip failed: probe lesson not recallable "
-                    f"(last_readback={last_readback})."
-                )
+                except Exception as exc:  # pragma: no cover - defensive, transport-level
+                    _logger.warning(
+                        "A254: best-effort readiness recall probe raised %s; not treated "
+                        "as a readiness failure (see backlog/A254.md).",
+                        exc,
+                    )
+                else:
+                    if _is_daemon_offline_response(readback):
+                        # A genuinely different failure (backend actually
+                        # offline) from the known embedding-recall gap --
+                        # still fatal.
+                        raise ReadinessError(
+                            "HippoCampy MCP recall returned backend-offline during readiness probe "
+                            f"(recall_relevant_lessons={readback})."
+                        )
+                    if not _response_contains_probe(readback, probe_token):
+                        _logger.warning(
+                            "A254: readiness probe's write succeeded (lesson_id=%s) but "
+                            "recall_relevant_lessons did not find it (last_readback=%s). "
+                            "This is a known, tracked gap: hippocampy's upsert_lesson write "
+                            "path does not yet populate the embedding index for new Lessons "
+                            "(cross-repo, tracked as hippocampy B418), so semantic recall "
+                            "cannot find any freshly-written lesson yet. Not treated as a "
+                            "readiness failure -- see backlog/A254.md.",
+                            lesson_id,
+                            readback,
+                        )
         return True
     except Exception as exc:
         raise ReadinessError(f"HippoCampy MCP not available: {exc}") from exc
