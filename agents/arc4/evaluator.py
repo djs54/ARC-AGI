@@ -243,6 +243,15 @@ class Evaluator:
         evaluation.metadata["graph_recording"] = self._record_evaluation(evaluation)
         evaluation.metadata["transition_recording"] = self._record_transition(perception, execution, state)
         evaluation.metadata["rule_recording"] = self._record_rule_evidence(perception, execution, state)
+        # A255: evaluation.degraded was snapshotted from self._degraded above,
+        # before these three write-path calls ran -- any of the three except
+        # branches above (or an earlier read-path one) may have set
+        # self._degraded = True since that snapshot. Re-sync so the returned
+        # EvaluationResult actually reflects write-path degradation instead
+        # of silently dropping it (the write-path self._degraded assignments
+        # would otherwise be dead writes as far as this method's caller can
+        # observe).
+        evaluation.degraded = self._degraded
         return PhaseResult(phase=WorkflowPhase.EVALUATE, status=PhaseStatus.TERMINATE if decision == WorkflowDecision.TERMINATE else PhaseStatus.OK, payload=evaluation, reason=reason or None)
 
     def _record_transition(self, perception: Any, execution: ExecutionResult, state: WorkflowState) -> str:
@@ -261,6 +270,7 @@ class Evaluator:
         try:
             result = record(execution, grid_diff, getattr(perception, "entities", ()))
         except Exception:
+            self._degraded = True  # A255: mirrors fetch_causal_path's A244 pattern -- was silently swallowed
             return "failed"
         # A183: only a confirmed real write counts toward world_model_node_writes.
         if isinstance(result, Mapping) and result.get("status") == "ok":
@@ -291,6 +301,7 @@ class Evaluator:
             else:
                 result = record(execution, grid_diff)
         except Exception:
+            self._degraded = True  # A255
             return "failed"
         # A183: a real rule create/confirm/falsify writes PREDICTS/
         # CONFIRMED_BY/FALSIFIED_BY edges -- only count a confirmed write.
@@ -326,6 +337,7 @@ class Evaluator:
         try:
             record(evaluation)
         except Exception:
+            self._degraded = True  # A255
             return "failed"
         return "ok"
 
